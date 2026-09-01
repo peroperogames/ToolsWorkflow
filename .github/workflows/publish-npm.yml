@@ -23,7 +23,7 @@ on:
 jobs:
   publish:
     # Labels
-    runs-on: unitypkg-share
+    runs-on: [build-server, unitypkg-share]
     
     env:
       EXPECTED_PACKAGE_PREFIX: ${{ inputs.expected-package-prefix || 'com.prpr' }}
