@@ -30,8 +30,6 @@ jobs:
       # 将 secrets 转为环境变量，方便后续 shell 使用
       BACKEND_AC_TOKEN: ${{ secrets.BACKEND_AC_TOKEN }}
       NPM_URL: ${{ secrets.NPM_URL }}
-      NPM_PASSWD: ${{ secrets.NPM_PASSWD }}
-      NPM_EMAIL: ${{ secrets.NPM_EMAIL }}
 
     steps:
       # 1. 检出当前仓库
@@ -63,17 +61,7 @@ jobs:
         run: |
           sh /devops/ToolsWorkflow/package_preprocess.sh
 
-      # 5. npm login
-      - name: npm login
-        env:
-          NPM_URL: ${{ secrets.NPM_URL }}
-          NPM_PASSWD: ${{ secrets.NPM_PASSWD }}
-          NPM_EMAIL: ${{ secrets.NPM_EMAIL }}
-        run: |
-          chmod +x /devops/ToolsWorkflow/npm_login.sh
-          /devops/ToolsWorkflow/npm_login.sh "$NPM_URL" peropero "$NPM_PASSWD" "$NPM_EMAIL"
-
-      # 6. 显示 .npmrc 内容
+      # 5. 显示 .npmrc 内容
       - name: Show .npmrc
         run: |
           echo "==== show /root/.npmrc ===="
@@ -81,11 +69,11 @@ jobs:
           echo "==== show project .npmrc ===="
           cat .npmrc || echo "no project .npmrc"
 
-      # 7. 验证当前登录用户
+      # 6. 验证当前登录用户
       - name: Test npm whoami
         run: npm whoami --registry "$NPM_URL"
 
-      # 8. 发布到 npm
+      # 7. 发布到 npm
       - name: Publish with retry
         run: |
           for i in {1..3}; do
@@ -95,7 +83,7 @@ jobs:
           done
           exit 1
 
-      # 9. 清理临时目录（无论成功失败都执行）
+      # 8. 清理临时目录（无论成功失败都执行）
       - name: Clean up /devops
         if: always()
         run: rm -rf /devops
