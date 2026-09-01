@@ -50,16 +50,25 @@ jobs:
 
       # 3. 执行 changefoldername.sh
       - name: Change folder name
+        env:
+          CI_PROJECT_DIR: ${{ github.workspace }}
         run: |
           bash /devops/ToolsWorkflow/changefoldername.sh
 
       # 4. 执行 package.json 预处理脚本
       - name: Package preprocess
+        env:
+          CI_COMMIT_TAG: ${{ github.ref_name }}
+          EXPECTED_PACKAGE_PREFIX: ${{ vars.EXPECTED_PACKAGE_PREFIX }}
         run: |
           sh /devops/ToolsWorkflow/package_preprocess.sh
 
       # 5. npm login
       - name: npm login
+        env:
+          NPM_URL: ${{ secrets.NPM_URL }}
+          NPM_PASSWD: ${{ secrets.NPM_PASSWD }}
+          NPM_EMAIL: ${{ secrets.NPM_EMAIL }}
         run: |
           chmod +x /devops/ToolsWorkflow/npm_login.sh
           /devops/ToolsWorkflow/npm_login.sh "$NPM_URL" peropero "$NPM_PASSWD" "$NPM_EMAIL"
