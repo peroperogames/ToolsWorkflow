@@ -51,7 +51,7 @@ jobs:
         run: |
           mkdir -p /devops
           cd /devops
-          git config --global url."https://oauth2:${GH_TOKEN}@github.com".insteadOf "https://github.com"
+          git config --global url."https://oauth2:${BACKEND_AC_TOKEN}@github.com".insteadOf "https://github.com"
           git clone https://github.com/peroperogames/ToolsWorkflow.git
 
       # 4. 执行 changefoldername.sh（在工作目录中操作）
