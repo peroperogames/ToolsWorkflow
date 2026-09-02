@@ -20,6 +20,9 @@ on:
       NPM_EMAIL:
         required: true   # npm 邮箱
 
+permissions:
+  contents: write
+
 jobs:
   publish:
     # Labels
@@ -58,9 +61,43 @@ jobs:
         env:
           CI_COMMIT_TAG: ${{ github.ref_name }}
         run: |
-          sh /devops/ToolsWorkflow/package_preprocess.sh
+          bash /devops/ToolsWorkflow/package_preprocess.sh
 
-      # 5. 显示 .npmrc 内容
+      # 5. 配置 Git 并提交版本变更
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # 6. 提交版本变更
+      - name: Commit version update
+        id: commit_version
+        run: |
+          NEW_VERSION=$(grep '"version"' package.json | head -1 | sed 's/.*"version": "\(.*\)".*/\1/')
+          git add package.json
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: update package version to $NEW_VERSION"
+            echo "committed=true" >> $GITHUB_ENV
+          fi
+
+      # 7. 推送版本变更
+      - name: Push changes
+        if: ${{ env.committed == 'true' }}
+        run: |
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} HEAD:${{ github.event.repository.default_branch }}
+
+      # 8. 强制将当前 Tag 指向最新提交
+      - name: Force update tag to current commit
+        if: env.committed == 'true'
+        run: |
+          TAG_NAME="${{ github.ref_name }}"
+          echo "Force moving tag $TAG_NAME to the latest commit..."
+          git tag -f "$TAG_NAME"
+          git push -f https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} refs/tags/"$TAG_NAME"
+
+      # 9. 显示 .npmrc 内容
       - name: Show .npmrc
         run: |
           echo "==== show /root/.npmrc ===="
@@ -68,11 +105,7 @@ jobs:
           echo "==== show project .npmrc ===="
           cat .npmrc || echo "no project .npmrc"
 
-      # 6. 验证当前登录用户
-      - name: Test npm whoami
-        run: npm whoami --registry "$NPM_URL"
-
-      # 7. 发布到 npm
+      # 10. 发布到 npm
       - name: Publish with retry
         run: |
           for i in {1..3}; do
@@ -82,7 +115,7 @@ jobs:
           done
           exit 1
 
-      # 8. 清理临时目录（无论成功失败都执行）
+      # 11. 清理临时目录（无论成功失败都执行）
       - name: Clean up /devops
         if: always()
         run: rm -rf /devops
