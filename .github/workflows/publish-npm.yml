@@ -11,65 +11,69 @@ on:
         default: 'com.prpr'
     # 组织仓库 Secrets
     secrets:
-      BACKEND_AC_TOKEN:
-        required: true   # Clone token
       NPM_URL:
         required: true   # 私有 npm 仓库地址
-      NPM_PASSWD:
-        required: true   # npm 密码
-      NPM_EMAIL:
-        required: true   # npm 邮箱
+      APP_ID:
+        required: true   # GitHub App ID
+      APP_PK:
+        required: true   # GitHub App private key
 
 permissions:
   contents: write
 
 jobs:
   publish:
-    # Labels
-    runs-on: [build-server, unitypkg-share]
-    
+    if: github.actor != 'perotoolsbot[bot]'
+    runs-on: [build-server, unitypkg-share] # Labels
     env:
       EXPECTED_PACKAGE_PREFIX: ${{ inputs.expected-package-prefix || 'com.prpr' }}
-      # 将 secrets 转为环境变量，方便后续 shell 使用
-      BACKEND_AC_TOKEN: ${{ secrets.BACKEND_AC_TOKEN }}
       NPM_URL: ${{ secrets.NPM_URL }}
 
     steps:
-      # 1. 检出当前仓库
+      # 1. 生成 App Token
+      - name: Generate token via GitHub App
+        id: generate_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PK }}
+          repositories: ${{ github.event.repository.name }}, ToolsWorkflow
+
+      # 2. 检出当前仓库
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # 获取所有历史，确保 tag 信息完整
+          token: ${{ steps.generate_token.outputs.token }}
+          fetch-depth: 0
 
-      # 2. 克隆 ci_cd 脚本仓库
+      # 3. 克隆 ci_cd 脚本仓库
       - name: Clone ci_cd repository
         run: |
           mkdir -p /devops
           cd /devops
-          git config --global url."https://oauth2:${BACKEND_AC_TOKEN}@github.com".insteadOf "https://github.com"
-          git clone https://github.com/peroperogames/ToolsWorkflow.git
+          git clone https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/peroperogames/ToolsWorkflow.git
 
-      # 3. 执行 changefoldername.sh
+      # 4. 执行 changefoldername.sh
       - name: Change folder name
         env:
           CI_PROJECT_DIR: ${{ github.workspace }}
         run: |
           bash /devops/ToolsWorkflow/changefoldername.sh
 
-      # 4. 执行 package.json 预处理脚本
+      # 5. 执行 package.json 预处理脚本
       - name: Package preprocess
         env:
           CI_COMMIT_TAG: ${{ github.ref_name }}
         run: |
           bash /devops/ToolsWorkflow/package_preprocess.sh
 
-      # 5. 配置 Git 并提交版本变更
+      # 6. 配置 Git 并提交版本变更
       - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      # 6. 提交版本变更
+      # 7. 提交版本变更
       - name: Commit version update
         id: commit_version
         run: |
@@ -78,26 +82,26 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "chore: update package version to $NEW_VERSION"
+            git commit -m "chore: update package version to $NEW_VERSION."
             echo "committed=true" >> $GITHUB_ENV
           fi
 
-      # 7. 推送版本变更
+      # 8. 推送版本变更
       - name: Push changes
         if: ${{ env.committed == 'true' }}
         run: |
-          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} HEAD:${{ github.event.repository.default_branch }}
+           git push https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/${{ github.repository }} HEAD:${{ github.event.repository.default_branch }}
 
-      # 8. 强制将当前 Tag 指向最新提交
+      # 9. 强制将当前 Tag 指向最新提交
       - name: Force update tag to current commit
         if: env.committed == 'true'
         run: |
           TAG_NAME="${{ github.ref_name }}"
           echo "Force moving tag $TAG_NAME to the latest commit..."
           git tag -f "$TAG_NAME"
-          git push -f https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} refs/tags/"$TAG_NAME"
+          git push -f https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/${{ github.repository }} refs/tags/"$TAG_NAME"
 
-      # 9. 显示 .npmrc 内容
+      # 10. 显示 .npmrc 内容
       - name: Show .npmrc
         run: |
           echo "==== show /root/.npmrc ===="
@@ -105,7 +109,7 @@ jobs:
           echo "==== show project .npmrc ===="
           cat .npmrc || echo "no project .npmrc"
 
-      # 10. 发布到 npm
+      # 11. 发布到 npm
       - name: Publish with retry
         run: |
           for i in {1..3}; do
@@ -115,7 +119,7 @@ jobs:
           done
           exit 1
 
-      # 11. 清理临时目录（无论成功失败都执行）
+      # 12. 清理临时目录
       - name: Clean up /devops
-        if: always()
+        if: always() && github.actor != 'perotoolsbot[bot]'
         run: rm -rf /devops
