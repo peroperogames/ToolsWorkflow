@@ -23,7 +23,6 @@ permissions:
 
 jobs:
   publish:
-    if: github.actor != 'perotoolsbot[bot]'
     runs-on: [build-server, unitypkg-share] # Labels
     env:
       EXPECTED_PACKAGE_PREFIX: ${{ inputs.expected-package-prefix || 'com.prpr' }}
@@ -82,7 +81,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "chore: update package version to $NEW_VERSION."
+            git commit -m "chore: update package version to $NEW_VERSION [skip ci]."
             echo "committed=true" >> $GITHUB_ENV
           fi
 
