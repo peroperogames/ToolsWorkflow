@@ -2,34 +2,35 @@ name: Publish NPM Package (Reusable)
 
 on:
   workflow_call:
-    # 可选的输入参数
     inputs:
       expected-package-prefix:
         description: 'Expected package name prefix (used in scripts)'
         required: false
         type: string
         default: 'com.prpr'
-    # 组织仓库 Secrets
     secrets:
       NPM_URL:
-        required: true   # 私有 npm 仓库地址
+        required: true   # NPM registry URL
       APP_ID:
         required: true   # GitHub App ID
       APP_PK:
         required: true   # GitHub App private key
+      FEISHU_WEBHOOK:
+        required: true   # Feishu webhook URL
+      FEISHU_SECRET:
+        required: true   # Feishu secret
 
 permissions:
   contents: write
 
 jobs:
   publish:
-    runs-on: [build-server, unitypkg-share] # Labels
+    runs-on: [build-server, unitypkg-share]
     env:
       EXPECTED_PACKAGE_PREFIX: ${{ inputs.expected-package-prefix || 'com.prpr' }}
       NPM_URL: ${{ secrets.NPM_URL }}
 
     steps:
-      # 1. 生成 App Token
       - name: Generate token via GitHub App
         id: generate_token
         uses: actions/create-github-app-token@v1
@@ -38,41 +39,35 @@ jobs:
           private-key: ${{ secrets.APP_PK }}
           repositories: ${{ github.event.repository.name }}, ToolsWorkflow
 
-      # 2. 检出当前仓库
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           token: ${{ steps.generate_token.outputs.token }}
           fetch-depth: 0
 
-      # 3. 克隆 ci_cd 脚本仓库
       - name: Clone ci_cd repository
         run: |
           mkdir -p /devops
           cd /devops
           git clone https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/peroperogames/ToolsWorkflow.git
 
-      # 4. 执行 changefoldername.sh
       - name: Change folder name
         env:
           CI_PROJECT_DIR: ${{ github.workspace }}
         run: |
-          bash /devops/ToolsWorkflow/changefoldername.sh
+          bash /devops/ToolsWorkflow/publish/changefoldername.sh
 
-      # 5. 执行 package.json 预处理脚本
       - name: Package preprocess
         env:
           CI_COMMIT_TAG: ${{ github.ref_name }}
         run: |
-          bash /devops/ToolsWorkflow/package_preprocess.sh
+          bash /devops/ToolsWorkflow/publish/package_preprocess.sh
 
-      # 6. 配置 Git 并提交版本变更
       - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      # 7. 提交版本变更
       - name: Commit version update
         id: commit_version
         run: |
@@ -81,26 +76,16 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "chore: update package version to $NEW_VERSION [skip ci]."
+            git commit -m "chore: update package version to $NEW_VERSION."
             echo "committed=true" >> $GITHUB_ENV
           fi
 
-      # 8. 推送版本变更
       - name: Push changes
         if: ${{ env.committed == 'true' }}
         run: |
-           git push https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/${{ github.repository }} HEAD:${{ github.event.repository.default_branch }}
+           TARGET_BRANCH="${{ github.event.release.target_commitish }}"
+           git push https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/${{ github.repository }} HEAD:"$TARGET_BRANCH"
 
-      # 9. 强制将当前 Tag 指向最新提交
-      - name: Force update tag to current commit
-        if: env.committed == 'true'
-        run: |
-          TAG_NAME="${{ github.ref_name }}"
-          echo "Force moving tag $TAG_NAME to the latest commit..."
-          git tag -f "$TAG_NAME"
-          git push -f https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/${{ github.repository }} refs/tags/"$TAG_NAME"
-
-      # 10. 显示 .npmrc 内容
       - name: Show .npmrc
         run: |
           echo "==== show /root/.npmrc ===="
@@ -108,7 +93,6 @@ jobs:
           echo "==== show project .npmrc ===="
           cat .npmrc || echo "no project .npmrc"
 
-      # 11. 发布到 npm
       - name: Publish with retry
         run: |
           for i in {1..3}; do
@@ -118,7 +102,19 @@ jobs:
           done
           exit 1
 
-      # 12. 清理临时目录
+      - name: Send Feishu notification
+        if: success() && endsWith(github.ref_name, '-base') #  (only for -base)
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
+          PROJECT_NAME: ${{ github.event.repository.name }}
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ steps.generate_token.outputs.token }}
+        run: |
+          RELEASE_NOTES=$(gh release view "$TAG" --json body --jq .body)
+          README_URL="https://github.com/${{ github.repository }}/blob/${{ github.sha }}/README.md"
+          bash /devops/ToolsWorkflow/publish/feishu_webhook.sh "$FEISHU_WEBHOOK" "$FEISHU_SECRET" "$PROJECT_NAME" "$TAG" "$RELEASE_NOTES" "$README_URL"
+
       - name: Clean up /devops
         if: always() && github.actor != 'perotoolsbot[bot]'
         run: rm -rf /devops
