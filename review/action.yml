@@ -1,0 +1,62 @@
+name: 'AI Code Review'
+description: 'AI-powered GitHub pull request review with conversation history and session persistence.'
+branding:
+  icon: 'check-circle'
+  color: 'purple'
+
+inputs:
+  github-token:
+    description: 'GitHub token with pull-requests:write, issues:write and contents:read.'
+    required: true
+  openai-api-key:
+    description: 'OpenAI-compatible API key.'
+    required: true
+  openai-model:
+    description: 'Model to use.'
+    required: false
+    default: 'gpt-4o'
+  openai-base-url:
+    description: 'OpenAI-compatible API base URL.'
+    required: false
+    default: 'https://api.openai.com/v1'
+  review-language:
+    description: 'Language for the review and replies (en, zh, cn, ja, ko, ...).'
+    required: false
+    default: 'en'
+  review-prompt:
+    description: 'Optional review prompt override (defaults to the bundled prompt.md).'
+    required: false
+    default: ''
+  max-tokens-per-chunk:
+    description: 'Max tokens per chunk for large PRs.'
+    required: false
+    default: '6000'
+  silent-mode:
+    description: "Set 'true' to post a comment instead of a review."
+    required: false
+    default: 'false'
+  state-dir:
+    description: 'Directory for per-PR session/history files (default: <tmp>/ai-code-review).'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install dependencies
+      shell: bash
+      run: python3 -m pip install -r "$GITHUB_ACTION_PATH/requirements.txt"
+
+    - name: Run AI code review
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        OPENAI_API_KEY: ${{ inputs.openai-api-key }}
+        OPENAI_API_MODEL: ${{ inputs.openai-model }}
+        OPENAI_API_BASE_URL: ${{ inputs.openai-base-url }}
+        REVIEW_LANGUAGE: ${{ inputs.review-language }}
+        REVIEW_PROMPT: ${{ inputs.review-prompt }}
+        MAX_TOKENS_PER_CHUNK: ${{ inputs.max-tokens-per-chunk }}
+        SILENT_MODE: ${{ inputs.silent-mode }}
+        REVIEW_STATE_DIR: ${{ inputs.state-dir }}
+      run: python3 "$GITHUB_ACTION_PATH/main.py"

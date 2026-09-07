@@ -66,24 +66,6 @@ class AIClient:
         for attempt in range(self.max_retries + 1):
             try:
                 resp = self.session.post(url, json=payload, timeout=self.timeout)
-                if resp.status_code >= 400:
-                    raise RuntimeError(
-                        f"OpenAI API error ({resp.status_code}): {resp.text}"
-                    )
-
-                data = resp.json()
-                choices: List[Any] = data.get("choices") or []
-                if not choices:
-                    raise RuntimeError("Invalid response format from OpenAI API")
-
-                message: Dict[str, Any] = choices[0].get("message") or {}
-                content: str = message.get("content") or ""
-
-                usage = data.get("usage")
-                if usage:
-                    self._log_usage(usage)
-
-                return content.strip()
             except (requests.Timeout, requests.ConnectionError) as exc:
                 last_error = exc
                 if attempt < self.max_retries:
@@ -91,8 +73,41 @@ class AIClient:
                     time.sleep(delay)
                     continue
                 raise RuntimeError(f"Network error calling OpenAI API: {exc}") from exc
-            except requests.RequestException as exc:
-                raise RuntimeError(f"Failed to call OpenAI API: {exc}") from exc
+
+            # HTTP-level error: include the body and do not retry.
+            if resp.status_code >= 400:
+                raise RuntimeError(
+                    f"OpenAI API error ({resp.status_code}): {resp.text[:500]}"
+                )
+
+            # 2xx/3xx but an empty body — usually the base URL path is wrong
+            # (many gateways serve /v1/chat/completions, not /chat/completions).
+            text = resp.text or ""
+            if not text.strip():
+                raise RuntimeError(
+                    f"OpenAI API returned an empty body (HTTP {resp.status_code}) "
+                    f"from {url}. Check OPENAI_API_BASE_URL — it may need a '/v1' path."
+                )
+
+            try:
+                data = resp.json()
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"OpenAI API returned non-JSON (HTTP {resp.status_code}): {text[:500]}"
+                ) from exc
+
+            choices: List[Any] = data.get("choices") or []
+            if not choices:
+                raise RuntimeError("Invalid response format from OpenAI API")
+
+            message: Dict[str, Any] = choices[0].get("message") or {}
+            content: str = message.get("content") or ""
+
+            usage = data.get("usage")
+            if usage:
+                self._log_usage(usage)
+
+            return content.strip()
 
         raise RuntimeError(f"Failed to call OpenAI API after retries: {last_error}")
 

@@ -28,11 +28,14 @@ import json
 import os
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ai_client import AIClient, DEFAULT_BASE_URL, DEFAULT_MODEL
 from github_client import GitHubClient
+
+import history
 
 # The prompt file is resolved next to this script so the tool works regardless
 # of the caller's current working directory.
@@ -52,6 +55,14 @@ FALLBACK_PROMPT = (
     "Identify bugs, security issues, performance problems, and maintainability "
     "concerns. Be specific (file and line), actionable (show fixes), and "
     "constructive (acknowledge what was done well). Return a structured Markdown review."
+)
+
+# Prompt used when answering a developer's reply — short and plain, not a review.
+REPLY_SYSTEM_PROMPT = (
+    "You are a helpful AI code review assistant. A developer is replying to your "
+    "previous review on a pull request. Answer their comment directly and "
+    "concisely — a short, plain message, NOT a full structured review. Reference "
+    "files or code only when it helps."
 )
 
 # Common language codes/names -> human-readable label used in the directive.
@@ -183,16 +194,20 @@ def build_system_prompt(prompt: str, language: Optional[str]) -> str:
     )
 
 
-def resolve_pull_request() -> Tuple[str, str, int]:
-    """Determine (owner, repo, number) from the GitHub Actions environment."""
-    repo_slug = os.environ.get("GITHUB_REPOSITORY")
-    event_name = os.environ.get("GITHUB_EVENT_NAME")
+def load_event() -> Tuple[str, Dict[str, Any]]:
+    """Read the current GitHub Actions event name and payload."""
+    event_name = os.environ.get("GITHUB_EVENT_NAME") or ""
     event_path = os.environ.get("GITHUB_EVENT_PATH")
-
     payload: Dict[str, Any] = {}
     if event_path and os.path.exists(event_path):
         with open(event_path, encoding="utf-8") as fh:
             payload = json.load(fh)
+    return event_name, payload
+
+
+def resolve_pull_request(event_name: str, payload: Dict[str, Any]) -> Tuple[str, str, int]:
+    """Determine (owner, repo, number) from the GitHub Actions environment."""
+    repo_slug = os.environ.get("GITHUB_REPOSITORY")
 
     owner: Optional[str] = None
     repo: Optional[str] = None
@@ -264,6 +279,7 @@ def fetch_conversation(
                     "ts": comment.get("created_at") or "",
                     "who": (comment.get("user") or {}).get("login", "unknown"),
                     "kind": "comment",
+                    "id": comment.get("id"),
                     "body": body,
                 }
             )
@@ -291,6 +307,22 @@ def render_conversation(
         label = "review" if entry["kind"] == "review" else "comment"
         blocks.append(f"### {entry['who']} ({label})\n\n{body}")
     return "\n\n".join(blocks)
+
+
+def merge_conversation(
+    stored: List[Dict[str, Any]], fresh: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Merge stored and freshly-fetched entries, deduping by body content."""
+    seen: set = set()
+    merged: List[Dict[str, Any]] = []
+    for entry in [*stored, *fresh]:
+        key = " ".join((entry.get("body") or "").split())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(entry)
+    merged.sort(key=lambda e: e.get("ts", ""))
+    return merged
 
 
 def build_diff_text(
@@ -447,6 +479,31 @@ def perform_review(
     return "# AI Code Review (multi-part)\n\n" + "\n\n---\n\n".join(reviews)
 
 
+def generate_reply(
+    ai: AIClient,
+    reply_prompt: str,
+    conversation: str,
+    author: str,
+    comment_body: str,
+) -> str:
+    """Generate a short, plain reply to a human comment on the pull request."""
+    parts: List[str] = []
+    if conversation:
+        parts.append(
+            "## Previous Conversation\n\nThe following prior reviews and comments "
+            f"on this pull request are provided for context:\n\n{conversation}"
+        )
+    parts.append(
+        f"## New Comment\n\n**{author}** just wrote:\n\n{comment_body}\n\n"
+        "Reply concisely and directly to this comment."
+    )
+    messages = [
+        {"role": "system", "content": reply_prompt},
+        {"role": "user", "content": "\n\n".join(parts)},
+    ]
+    return ai.chat(messages)
+
+
 def determine_event(review_text: str) -> str:
     """Map the review content to a GitHub review event."""
     t = review_text.lower()
@@ -473,8 +530,32 @@ def labels_for_event(event: str) -> List[str]:
 def main() -> int:
     config = load_config()
     system_prompt = build_system_prompt(config.prompt, config.language)
+    reply_prompt = build_system_prompt(REPLY_SYSTEM_PROMPT, config.language)
 
-    owner, repo, number = resolve_pull_request()
+    event_name, payload = load_event()
+
+    # issue_comment: only answer threaded replies to the bot's own comments.
+    # Standalone comments, bot comments, and replies to others are ignored.
+    reply_comment: Optional[Dict[str, Any]] = None
+    reply_to_id: Any = None
+    if event_name == "issue_comment":
+        issue = payload.get("issue") or {}
+        comment = payload.get("comment") or {}
+        if not issue.get("pull_request"):
+            log("Ignoring comment on a non-pull-request issue.")
+            return 0
+        author = (comment.get("user") or {}).get("login", "")
+        if author.endswith("[bot]"):
+            log("Ignoring comment from a bot (prevents reply loops).")
+            return 0
+        reply_to_id = comment.get("in_reply_to_id")
+        if not reply_to_id:
+            log("Ignoring standalone comment (not a reply to the bot).")
+            return 0
+        if (comment.get("body") or "").strip():
+            reply_comment = comment
+
+    owner, repo, number = resolve_pull_request(event_name, payload)
 
     gh = GitHubClient(config.github_token)
     ai = AIClient(config.openai_token, model=config.model, base_url=config.base_url)
@@ -485,6 +566,69 @@ def main() -> int:
     log(f"Language: {config.language}")
 
     pr = gh.get_pull_request(owner, repo, number)
+
+    # Closed PRs need no review; drop any persisted history for them.
+    if (pr.get("state") or "open") == "closed":
+        history.delete(owner, repo, number)
+        log(f"Pull Request #{number} is closed; removed any local review history.")
+        return 0
+
+    stored = history.load(owner, repo, number)
+    fresh = fetch_conversation(gh, owner, repo, number)
+
+    # Reply mode: proceed only if the parent comment is one of the bot's own.
+    if reply_comment is not None:
+        parent_is_bot = any(
+            e.get("kind") == "comment"
+            and str(e.get("id")) == str(reply_to_id)
+            and (e.get("who") or "").endswith("[bot]")
+            for e in fresh
+        )
+        if not parent_is_bot:
+            log("Ignoring reply to a non-bot comment.")
+            return 0
+
+        author = (reply_comment.get("user") or {}).get("login", "unknown")
+        body = reply_comment.get("body") or ""
+
+        # Drop the triggering comment from the context (it is injected below).
+        body_key = " ".join(body.split())
+        fresh = [
+            e
+            for e in fresh
+            if not (
+                e.get("who") == author
+                and " ".join((e.get("body") or "").split()) == body_key
+            )
+        ]
+
+        entries = merge_conversation(stored, fresh)
+        conversation = render_conversation(entries)
+
+        reply = generate_reply(ai, reply_prompt, conversation, author, body)
+        if not reply:
+            log("Error: the AI returned an empty reply.")
+            return 1
+
+        if config.dry_run:
+            print(reply)
+            return 0
+
+        gh.post_comment(owner, repo, number, reply)
+        log("Posted reply comment.")
+
+        entries.append(
+            {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "who": "ai-reviewer",
+                "kind": "comment",
+                "body": reply,
+            }
+        )
+        history.save(owner, repo, number, entries[-MAX_CONVERSATION_ENTRIES:])
+        return 0
+
+    # Review mode.
     files = gh.list_files(owner, repo, number)
     log(f"Changed files: {len(files)}")
 
@@ -492,10 +636,10 @@ def main() -> int:
         log("No changed files found; nothing to review.")
         return 0
 
-    entries = fetch_conversation(gh, owner, repo, number)
+    entries = merge_conversation(stored, fresh)
     conversation = render_conversation(entries)
     if conversation:
-        log(f"Included {len(entries)} prior review/comment entry(ies) as context.")
+        log(f"Using {len(entries)} prior review/comment entry(ies) as context.")
 
     review = perform_review(
         ai, system_prompt, pr, files, config.max_tokens_per_chunk, conversation
@@ -524,6 +668,17 @@ def main() -> int:
             log(f"Added label: {label}")
         except Exception as exc:  # noqa: BLE001 - labels are best-effort
             log(f"Warning: failed to add label '{label}': {exc}")
+
+    # Persist this run's review so the next run can build on it.
+    entries.append(
+        {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "who": "ai-reviewer",
+            "kind": "review",
+            "body": review,
+        }
+    )
+    history.save(owner, repo, number, entries[-MAX_CONVERSATION_ENTRIES:])
 
     return 0
 

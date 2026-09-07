@@ -23,7 +23,15 @@ class GitHubClient:
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         resp = self.session.request(method, f"{self.api_url}{path}", **kwargs)
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            detail = ""
+            try:
+                detail = resp.json().get("message", "")
+            except ValueError:
+                detail = resp.text
+            raise RuntimeError(
+                f"GitHub API error ({resp.status_code}) {method} {path}: {detail}"
+            )
         return resp.json()
 
     def get_pull_request(self, owner: str, repo: str, number: int) -> Dict[str, Any]:

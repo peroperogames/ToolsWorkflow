@@ -12,7 +12,7 @@ on:
         description: 'OpenAI API base URL (for custom endpoints or proxies)'
         required: false
         type: string
-        default: 'https://token.peropero.net'
+        default: 'https://token.peropero.net/v1'
       review-language:
         description: 'Language of the review comment (e.g. en, zh, ja, ko, es, fr, de, ru, pt)'
         required: false
@@ -26,10 +26,6 @@ on:
       APP_PK:
         required: true   # GitHub App private key
 
-permissions:
-  contents: read
-  pull-requests: write
-
 jobs:
   review:
     runs-on: [build-server, unitypkg-share]
@@ -40,32 +36,13 @@ jobs:
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PK }}
-          repositories: ${{ github.event.repository.name }}, ToolsWorkflow
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          token: ${{ steps.generate_token.outputs.token }}
-          fetch-depth: 0
-
-      - name: Clone ToolsWorkflow
-        run: |
-          mkdir -p /devops
-          git clone https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/peroperogames/ToolsWorkflow.git /devops/ToolsWorkflow
-
-      - name: Install dependencies
-        run: pip install -r /devops/ToolsWorkflow/review/requirements.txt
+          repositories: ${{ github.event.repository.name }}
 
       - name: Run AI code review
-        env:
-          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_API_MODEL: ${{ inputs.openai-model }}
-          OPENAI_API_BASE_URL: ${{ inputs.openai-base-url }}
-          REVIEW_LANGUAGE: ${{ inputs.review-language }}
-        run: |
-          python /devops/ToolsWorkflow/review/main.py
-
-      - name: Clean up /devops
-        if: always() && github.actor != 'perotoolsbot[bot]'
-        run: rm -rf /devops
+        uses: peroperogames/ToolsWorkflow/review@main
+        with:
+          github-token: ${{ steps.generate_token.outputs.token }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          openai-model: ${{ inputs.openai-model }}
+          openai-base-url: ${{ inputs.openai-base-url }}
+          review-language: ${{ inputs.review-language }}
