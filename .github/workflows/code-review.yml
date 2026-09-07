@@ -1,0 +1,71 @@
+name: AI Code Review (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      openai-model:
+        description: 'OpenAI model to use for the review'
+        required: false
+        type: string
+        default: 'glm-5.3-flash'
+      openai-base-url:
+        description: 'OpenAI API base URL (for custom endpoints or proxies)'
+        required: false
+        type: string
+        default: 'https://token.peropero.net'
+      review-language:
+        description: 'Language of the review comment (e.g. en, zh, ja, ko, es, fr, de, ru, pt)'
+        required: false
+        type: string
+        default: 'cn'
+    secrets:
+      OPENAI_API_KEY:
+        required: true   # OpenAI API key
+      APP_ID:
+        required: true   # GitHub App ID (used to generate a token)
+      APP_PK:
+        required: true   # GitHub App private key
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: [build-server, unitypkg-share]
+    steps:
+      - name: Generate token via GitHub App
+        id: generate_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PK }}
+          repositories: ${{ github.event.repository.name }}, ToolsWorkflow
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.generate_token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Clone ToolsWorkflow
+        run: |
+          mkdir -p /devops
+          git clone https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/peroperogames/ToolsWorkflow.git /devops/ToolsWorkflow
+
+      - name: Install dependencies
+        run: pip install -r /devops/ToolsWorkflow/review/requirements.txt
+
+      - name: Run AI code review
+        env:
+          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_MODEL: ${{ inputs.openai-model }}
+          OPENAI_API_BASE_URL: ${{ inputs.openai-base-url }}
+          REVIEW_LANGUAGE: ${{ inputs.review-language }}
+        run: |
+          python /devops/ToolsWorkflow/review/main.py
+
+      - name: Clean up /devops
+        if: always() && github.actor != 'perotoolsbot[bot]'
+        run: rm -rf /devops

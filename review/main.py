@@ -1,0 +1,532 @@
+#!/usr/bin/env python3
+"""GitHub AI Code Review.
+
+Fetches a pull request from GitHub, sends its diff to an OpenAI-compatible chat
+completions API for review, and posts the result back to the pull request as a
+review (APPROVE / REQUEST_CHANGES / COMMENT).
+
+The tool is fully configured through environment variables (no CLI arguments):
+
+    GITHUB_TOKEN          (required) GitHub token with pull-requests write access.
+    OPENAI_API_KEY        (required) OpenAI-compatible API token.
+    OPENAI_API_MODEL      (optional) Model to use (default: gpt-4o).
+    OPENAI_API_BASE_URL   (optional) API base URL (default: https://api.openai.com/v1).
+    REVIEW_LANGUAGE       (optional) Review output language (default: en).
+    REVIEW_PROMPT         (optional) Review prompt; defaults to prompt.md next to this script.
+    MAX_TOKENS_PER_CHUNK  (optional) Max tokens per chunk for large PRs (default: 6000).
+    SILENT_MODE           (optional) "true"/"1" posts a comment instead of a review.
+    DRY_RUN               (optional) "true"/"1" prints the review without posting.
+
+The pull request is resolved from the GitHub Actions environment
+(``GITHUB_REPOSITORY`` + ``GITHUB_EVENT_PATH``); for manual runs, set
+``GITHUB_REPOSITORY`` and ``GITHUB_PR_NUMBER``.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from ai_client import AIClient, DEFAULT_BASE_URL, DEFAULT_MODEL
+from github_client import GitHubClient
+
+# The prompt file is resolved next to this script so the tool works regardless
+# of the caller's current working directory.
+DEFAULT_PROMPT_FILE = Path(__file__).resolve().parent / "prompt.md"
+
+# Rough heuristic: ~4 characters per token, used for chunking large PRs.
+CHARS_PER_TOKEN = 4
+DEFAULT_MAX_TOKENS_PER_CHUNK = 6000
+
+# Conversation transcript limits, to avoid unbounded context growth.
+MAX_CONVERSATION_ENTRIES = 50
+MAX_CONVERSATION_ENTRY_CHARS = 4000
+
+# Minimal fallback used only when both REVIEW_PROMPT and prompt.md are empty.
+FALLBACK_PROMPT = (
+    "You are an expert software engineer performing a thorough code review. "
+    "Identify bugs, security issues, performance problems, and maintainability "
+    "concerns. Be specific (file and line), actionable (show fixes), and "
+    "constructive (acknowledge what was done well). Return a structured Markdown review."
+)
+
+# Common language codes/names -> human-readable label used in the directive.
+LANGUAGE_ALIASES = {
+    "en": "English",
+    "english": "English",
+    "zh": "Chinese",
+    "cn": "Chinese",
+    "zh-cn": "Chinese (Simplified)",
+    "zh-tw": "Chinese (Traditional)",
+    "chinese": "Chinese",
+    "中文": "Chinese",
+    "ja": "Japanese",
+    "japanese": "Japanese",
+    "ko": "Korean",
+    "korean": "Korean",
+    "es": "Spanish",
+    "spanish": "Spanish",
+    "fr": "French",
+    "french": "French",
+    "de": "German",
+    "german": "German",
+    "ru": "Russian",
+    "russian": "Russian",
+    "pt": "Portuguese",
+    "portuguese": "Portuguese",
+    "it": "Italian",
+    "italian": "Italian",
+    "ar": "Arabic",
+    "arabic": "Arabic",
+    "hi": "Hindi",
+    "hindi": "Hindi",
+}
+
+
+def log(message: str) -> None:
+    """Print a progress message to stderr (stdout is reserved for the review)."""
+    print(message, file=sys.stderr)
+
+
+@dataclass
+class Config:
+    github_token: str
+    openai_token: str
+    model: str
+    base_url: str
+    language: str
+    prompt: str
+    max_tokens_per_chunk: int
+    silent: bool
+    dry_run: bool
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    """Read a boolean-style environment variable."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def load_prompt() -> str:
+    """Resolve the review prompt from REVIEW_PROMPT, then prompt.md."""
+    explicit = os.environ.get("REVIEW_PROMPT", "").strip()
+    if explicit:
+        return explicit
+
+    if DEFAULT_PROMPT_FILE.is_file():
+        content = DEFAULT_PROMPT_FILE.read_text(encoding="utf-8").strip()
+        if content:
+            return content
+
+    log("Warning: prompt.md is missing or empty; using fallback prompt.")
+    return FALLBACK_PROMPT
+
+
+def load_config() -> Config:
+    """Build the runtime configuration from environment variables."""
+    github_token = os.environ.get("GITHUB_TOKEN", "").strip()
+    openai_token = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not github_token:
+        raise SystemExit("Error: GITHUB_TOKEN environment variable is required.")
+    if not openai_token:
+        raise SystemExit("Error: OPENAI_API_KEY environment variable is required.")
+
+    try:
+        max_tokens_per_chunk = int(
+            os.environ.get("MAX_TOKENS_PER_CHUNK", DEFAULT_MAX_TOKENS_PER_CHUNK)
+        )
+    except ValueError:
+        log("Warning: invalid MAX_TOKENS_PER_CHUNK; using default.")
+        max_tokens_per_chunk = DEFAULT_MAX_TOKENS_PER_CHUNK
+
+    return Config(
+        github_token=github_token,
+        openai_token=openai_token,
+        model=os.environ.get("OPENAI_API_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL,
+        base_url=os.environ.get("OPENAI_API_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL,
+        language=os.environ.get("REVIEW_LANGUAGE", "en").strip() or "en",
+        prompt=load_prompt(),
+        max_tokens_per_chunk=max_tokens_per_chunk,
+        silent=env_bool("SILENT_MODE"),
+        dry_run=env_bool("DRY_RUN"),
+    )
+
+
+def resolve_language(language: Optional[str]) -> str:
+    """Normalize a language code/name to a human-readable label."""
+    if not language:
+        return "English"
+    key = language.strip().lower()
+    if key in LANGUAGE_ALIASES:
+        return LANGUAGE_ALIASES[key]
+    # Fall back to the base code for region-suffixed tags (e.g. "fr-fr" -> "fr").
+    base = key.split("-", 1)[0]
+    return LANGUAGE_ALIASES.get(base, language.strip())
+
+
+def build_system_prompt(prompt: str, language: Optional[str]) -> str:
+    """Attach an explicit output-language directive to the review prompt."""
+    label = resolve_language(language)
+    if label.lower() == "english":
+        return prompt
+    return (
+        prompt
+        + "\n\n## Output Language\n"
+        + f"Write your ENTIRE review in {label}. "
+        + "Keep code snippets, file paths, and technical terms unchanged."
+    )
+
+
+def resolve_pull_request() -> Tuple[str, str, int]:
+    """Determine (owner, repo, number) from the GitHub Actions environment."""
+    repo_slug = os.environ.get("GITHUB_REPOSITORY")
+    event_name = os.environ.get("GITHUB_EVENT_NAME")
+    event_path = os.environ.get("GITHUB_EVENT_PATH")
+
+    payload: Dict[str, Any] = {}
+    if event_path and os.path.exists(event_path):
+        with open(event_path, encoding="utf-8") as fh:
+            payload = json.load(fh)
+
+    owner: Optional[str] = None
+    repo: Optional[str] = None
+    if repo_slug and "/" in repo_slug:
+        owner, repo = repo_slug.split("/", 1)
+    if not (owner and repo):
+        repository = payload.get("repository") or {}
+        owner = owner or repository.get("owner", {}).get("login")
+        repo = repo or repository.get("name")
+
+    number: Optional[int] = None
+    if event_name in ("pull_request", "pull_request_target"):
+        number = (payload.get("pull_request") or {}).get("number")
+    elif event_name == "issue_comment":
+        if (payload.get("issue") or {}).get("pull_request"):
+            number = (payload.get("issue") or {}).get("number")
+    if number is None:
+        # Manual/local runs: allow an explicit override.
+        number = int(os.environ.get("GITHUB_PR_NUMBER", 0) or 0) or None
+
+    if not (owner and repo and number):
+        raise SystemExit(
+            "Could not determine the pull request. This tool expects the GitHub "
+            "Actions environment (GITHUB_REPOSITORY + GITHUB_EVENT_PATH), or set "
+            "GITHUB_PR_NUMBER for manual runs."
+        )
+
+    return owner, repo, int(number)
+
+
+def _summarize_files(files: List[Dict[str, Any]]) -> List[str]:
+    """Render a one-line summary per file, used for overview and chunk context."""
+    return [
+        f"- **{f.get('filename', '')}** ({f.get('status', '')}): "
+        f"+{f.get('additions', 0)} -{f.get('deletions', 0)}"
+        for f in files
+    ]
+
+
+def fetch_conversation(
+    gh: GitHubClient, owner: str, repo: str, number: int
+) -> List[Dict[str, str]]:
+    """Collect prior reviews and comments into a chronological transcript."""
+    entries: List[Dict[str, str]] = []
+
+    try:
+        for review in gh.list_reviews(owner, repo, number):
+            body = (review.get("body") or "").strip()
+            if not body:
+                continue
+            entries.append(
+                {
+                    "ts": review.get("submitted_at") or "",
+                    "who": (review.get("user") or {}).get("login", "unknown"),
+                    "kind": "review",
+                    "body": body,
+                }
+            )
+    except Exception as exc:  # noqa: BLE001 - context is best-effort
+        log(f"Warning: could not fetch prior reviews: {exc}")
+
+    try:
+        for comment in gh.list_comments(owner, repo, number):
+            body = (comment.get("body") or "").strip()
+            if not body:
+                continue
+            entries.append(
+                {
+                    "ts": comment.get("created_at") or "",
+                    "who": (comment.get("user") or {}).get("login", "unknown"),
+                    "kind": "comment",
+                    "body": body,
+                }
+            )
+    except Exception as exc:  # noqa: BLE001 - context is best-effort
+        log(f"Warning: could not fetch prior comments: {exc}")
+
+    entries.sort(key=lambda e: e["ts"])
+    return entries
+
+
+def render_conversation(
+    entries: List[Dict[str, str]],
+    max_entries: int = MAX_CONVERSATION_ENTRIES,
+    max_chars: int = MAX_CONVERSATION_ENTRY_CHARS,
+) -> str:
+    """Render a conversation transcript for inclusion in the review prompt."""
+    if not entries:
+        return ""
+
+    blocks = []
+    for entry in entries[-max_entries:]:
+        body = entry["body"]
+        if len(body) > max_chars:
+            body = body[:max_chars] + "\n… (truncated)"
+        label = "review" if entry["kind"] == "review" else "comment"
+        blocks.append(f"### {entry['who']} ({label})\n\n{body}")
+    return "\n\n".join(blocks)
+
+
+def build_diff_text(
+    pr: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    all_files: Optional[List[Dict[str, Any]]] = None,
+    conversation: str = "",
+) -> str:
+    """Render PR metadata and per-file diffs into a single review payload.
+
+    ``files`` are the files to review in detail; ``all_files`` is the complete
+    list of files, used to provide context when reviewing a chunk of a large PR.
+    ``conversation`` is an optional transcript of prior reviews/comments.
+    """
+    is_chunk = all_files is not None and len(all_files) > len(files)
+
+    head = pr.get("head", {}).get("ref", "")
+    base = pr.get("base", {}).get("ref", "")
+    lines = [
+        "# Pull Request Review Request",
+        f"**Title**: {pr.get('title', '')}",
+        f"**Author**: {pr.get('user', {}).get('login', 'unknown')}",
+        f"**Branch**: {head} -> {base}",
+        "",
+        "**Description**:",
+        pr.get("body") or "(No description provided)",
+        "",
+        f"**Total Files Changed**: {len(all_files) if is_chunk else len(files)}",
+        f"**Additions**: +{pr.get('additions', 0)}",
+        f"**Deletions**: -{pr.get('deletions', 0)}",
+        "",
+    ]
+
+    if conversation:
+        lines += [
+            "## Previous Conversation",
+            "",
+            "The following prior reviews and comments on this pull request are "
+            "provided for context:",
+            "",
+            conversation,
+            "",
+        ]
+
+    if is_chunk:
+        lines += [
+            "## Chunk Review Context",
+            "",
+            f"You are reviewing {len(files)} of {len(all_files)} total files.",
+            "The complete PR includes these files (for context only):",
+            "",
+            *_summarize_files(all_files),
+            "",
+            "**Instructions**:",
+            "- Review ONLY the files under 'Files to Review' below in detail.",
+            "- Use the full file list above to resolve imports, references, and "
+            "cross-file relationships — do NOT flag a reference as missing if the "
+            "file is listed above.",
+            "",
+            "## Files to Review",
+            "",
+            *_summarize_files(files),
+            "",
+        ]
+    else:
+        lines += [
+            "## Files Modified",
+            "",
+            *_summarize_files(files),
+            "",
+        ]
+
+    lines.append("## Changes")
+    lines.append("")
+    for f in files:
+        filename = f.get("filename", "")
+        status = f.get("status", "")
+        additions = f.get("additions", 0)
+        deletions = f.get("deletions", 0)
+        patch = f.get("patch")
+        lines.append(f"### {filename} ({status}) +{additions} -{deletions}")
+        if patch:
+            lines.append("```diff")
+            lines.append(patch)
+            lines.append("```")
+        else:
+            lines.append("_(no textual patch available)_")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def chunk_files(files: List[Dict[str, Any]], max_chars: int) -> List[List[Dict[str, Any]]]:
+    """Split files into chunks so no chunk exceeds ``max_chars``."""
+    chunks: List[List[Dict[str, Any]]] = []
+    current: List[Dict[str, Any]] = []
+    size = 0
+    for f in files:
+        f_size = len(f.get("patch") or "") + len(f.get("filename", "")) + 120
+        if current and size + f_size > max_chars:
+            chunks.append(current)
+            current = []
+            size = 0
+        current.append(f)
+        size += f_size
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def review_files(
+    ai: AIClient,
+    system_prompt: str,
+    pr: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    all_files: Optional[List[Dict[str, Any]]] = None,
+    conversation: str = "",
+) -> str:
+    """Review a set of files and return the AI's Markdown review."""
+    diff_text = build_diff_text(pr, files, all_files, conversation)
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": diff_text},
+    ]
+    return ai.chat(messages)
+
+
+def perform_review(
+    ai: AIClient,
+    system_prompt: str,
+    pr: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    max_tokens_per_chunk: int,
+    conversation: str = "",
+) -> str:
+    """Review the whole PR, chunking large diffs and combining the results."""
+    max_chars = max_tokens_per_chunk * CHARS_PER_TOKEN
+    chunks = chunk_files(files, max_chars)
+
+    if len(chunks) <= 1:
+        return review_files(ai, system_prompt, pr, files, conversation=conversation)
+
+    log(f"Large PR: reviewing in {len(chunks)} chunks.")
+    reviews = []
+    for i, chunk in enumerate(chunks, start=1):
+        log(f"Reviewing chunk {i}/{len(chunks)} ({len(chunk)} files)...")
+        chunk_review = review_files(
+            ai, system_prompt, pr, chunk, all_files=files, conversation=conversation
+        )
+        filenames = "\n".join(f"  - {f['filename']}" for f in chunk)
+        reviews.append(
+            f"## Chunk {i}/{len(chunks)}\n\nFiles:\n{filenames}\n\n{chunk_review}"
+        )
+
+    return "# AI Code Review (multi-part)\n\n" + "\n\n---\n\n".join(reviews)
+
+
+def determine_event(review_text: str) -> str:
+    """Map the review content to a GitHub review event."""
+    t = review_text.lower()
+    critical = any(k in t for k in ("critical", "blocking", "blocker", "must fix", "must-fix", "🔴"))
+    warning = any(k in t for k in ("warning", "⚠️"))
+    approved = any(k in t for k in ("approved", "looks good", "no issues", "✅"))
+    if critical:
+        return "REQUEST_CHANGES"
+    if warning:
+        return "COMMENT"
+    if approved:
+        return "APPROVE"
+    return "COMMENT"
+
+
+def labels_for_event(event: str) -> List[str]:
+    if event == "REQUEST_CHANGES":
+        return ["needs-changes"]
+    if event == "APPROVE":
+        return ["ai-approved"]
+    return []
+
+
+def main() -> int:
+    config = load_config()
+    system_prompt = build_system_prompt(config.prompt, config.language)
+
+    owner, repo, number = resolve_pull_request()
+
+    gh = GitHubClient(config.github_token)
+    ai = AIClient(config.openai_token, model=config.model, base_url=config.base_url)
+
+    log(f"Repository: {owner}/{repo}")
+    log(f"Pull Request: #{number}")
+    log(f"Model: {config.model}")
+    log(f"Language: {config.language}")
+
+    pr = gh.get_pull_request(owner, repo, number)
+    files = gh.list_files(owner, repo, number)
+    log(f"Changed files: {len(files)}")
+
+    if not files:
+        log("No changed files found; nothing to review.")
+        return 0
+
+    entries = fetch_conversation(gh, owner, repo, number)
+    conversation = render_conversation(entries)
+    if conversation:
+        log(f"Included {len(entries)} prior review/comment entry(ies) as context.")
+
+    review = perform_review(
+        ai, system_prompt, pr, files, config.max_tokens_per_chunk, conversation
+    )
+    if not review:
+        log("Error: the AI returned an empty review.")
+        return 1
+
+    event = determine_event(review)
+    log(f"Review event: {event}")
+
+    if config.dry_run:
+        print(review)
+        return 0
+
+    if config.silent:
+        gh.post_comment(owner, repo, number, review)
+        log("Posted review as a regular comment (silent mode).")
+    else:
+        gh.post_review(owner, repo, number, review, event=event)
+        log(f"Posted review with event: {event}")
+
+    for label in labels_for_event(event):
+        try:
+            gh.add_labels(owner, repo, number, [label])
+            log(f"Added label: {label}")
+        except Exception as exc:  # noqa: BLE001 - labels are best-effort
+            log(f"Warning: failed to add label '{label}': {exc}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
