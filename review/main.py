@@ -325,6 +325,18 @@ def merge_conversation(
     return merged
 
 
+def comment_mentions_bot(body: str, login: str) -> bool:
+    """Return True if the comment @-mentions the bot (with or without [bot])."""
+    if not body or not login:
+        return False
+    lowered = body.lower()
+    login = login.lower()
+    candidates = {login}
+    if login.endswith("[bot]"):
+        candidates.add(login[: -len("[bot]")])
+    return any(f"@{c}" in lowered for c in candidates)
+
+
 def build_diff_text(
     pr: Dict[str, Any],
     files: List[Dict[str, Any]],
@@ -534,11 +546,13 @@ def main() -> int:
 
     event_name, payload = load_event()
 
-    # issue_comment: only answer threaded replies to the bot's own comments.
-    # Standalone comments, bot comments, and replies to others are ignored.
-    reply_comment: Optional[Dict[str, Any]] = None
-    reply_to_id: Any = None
-    if event_name == "issue_comment":
+    # issue_comment: respond only to a human comment that @-mentions the bot.
+    # GitHub does not expose threading for issue comments (in_reply_to_id only
+    # exists for PR review comments), so a "reply" cannot be detected — an
+    # @-mention is the reliable trigger.
+    is_issue_comment = event_name == "issue_comment"
+    comment: Dict[str, Any] = {}
+    if is_issue_comment:
         issue = payload.get("issue") or {}
         comment = payload.get("comment") or {}
         if not issue.get("pull_request"):
@@ -548,12 +562,6 @@ def main() -> int:
         if author.endswith("[bot]"):
             log("Ignoring comment from a bot (prevents reply loops).")
             return 0
-        reply_to_id = comment.get("in_reply_to_id")
-        if not reply_to_id:
-            log("Ignoring standalone comment (not a reply to the bot).")
-            return 0
-        if (comment.get("body") or "").strip():
-            reply_comment = comment
 
     owner, repo, number = resolve_pull_request(event_name, payload)
 
@@ -576,20 +584,21 @@ def main() -> int:
     stored = history.load(owner, repo, number)
     fresh = fetch_conversation(gh, owner, repo, number)
 
-    # Reply mode: proceed only if the parent comment is one of the bot's own.
-    if reply_comment is not None:
-        parent_is_bot = any(
-            e.get("kind") == "comment"
-            and str(e.get("id")) == str(reply_to_id)
-            and (e.get("who") or "").endswith("[bot]")
-            for e in fresh
-        )
-        if not parent_is_bot:
-            log("Ignoring reply to a non-bot comment.")
+    # Reply mode.
+    if is_issue_comment:
+        body = comment.get("body") or ""
+        # Determine bot login from the conversation (bot-authored entries).
+        bot_login = ""
+        for e in fresh:
+            who = e.get("who") or ""
+            if who.endswith("[bot]"):
+                bot_login = who
+                break
+        if not comment_mentions_bot(body, bot_login):
+            log(f"Ignoring comment that does not @-mention the bot (@{bot_login}).")
             return 0
 
-        author = (reply_comment.get("user") or {}).get("login", "unknown")
-        body = reply_comment.get("body") or ""
+        author = (comment.get("user") or {}).get("login", "unknown")
 
         # Drop the triggering comment from the context (it is injected below).
         body_key = " ".join(body.split())

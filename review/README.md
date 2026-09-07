@@ -89,12 +89,13 @@ python main.py
 
 ### Reply mode (answering comments)
 
-Triggering the workflow on `issue_comment` makes the bot answer human comments
-on the PR instead of performing a full review:
+Triggering the workflow on `issue_comment` makes the bot answer comments that
+**@-mention it**. GitHub does not expose threading for issue comments, so an
+@-mention is the reliable trigger:
 
-- A human comment on a PR → the bot posts an AI-generated reply.
-- Comments on non-PR issues and bot comments are ignored (the latter prevents
-  the bot from replying to its own messages in a loop).
+- A human comment that @-mentions the bot → the bot posts an AI-generated reply.
+- Comments on non-PR issues, bot comments, and comments that don't mention the
+  bot are ignored.
 
 Replying requires the GitHub App to have **`Issues: Read and write`** permission
 (issue comments use the Issues API, which is separate from `Pull requests`).
