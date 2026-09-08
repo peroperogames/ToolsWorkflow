@@ -66,6 +66,42 @@ REPLY_SYSTEM_PROMPT = (
     "files or code only when it helps."
 )
 
+INTENT_CLASSIFIER_PROMPT = (
+    "Classify the intent of this GitHub comment directed at you (a code review bot).\n"
+    "Reply with EXACTLY one word:\n"
+    "- 'improve_prompt' if the user is asking to improve the review prompt.\n"
+    "- 'code_change' if the user is asking you to write code, fix a bug, add a "
+    "feature, refactor, or submit a PR with code changes.\n"
+    "- 'reply' for anything else (questions, review requests, etc.)."
+)
+
+IMPROVE_PROMPT_SYSTEM_PROMPT = (
+    "You are an expert at improving AI prompts for code review. "
+    "You will be given the current review prompt and user feedback. "
+    "Produce an improved version that addresses the feedback while "
+    "preserving the core structure and purpose.\n\n"
+    "Rules:\n"
+    "- Keep the same overall structure (sections, headings).\n"
+    "- Address the feedback specifically.\n"
+    "- Do NOT remove existing useful content.\n"
+    "- Return ONLY the improved prompt in markdown. No explanation, no code fences."
+)
+
+CODE_CHANGE_SYSTEM_PROMPT = (
+    "You are a skilled software engineer. Given current file contents, "
+    "conversation context, and the user's instruction, generate the required "
+    "code changes.\n\n"
+    "Return a JSON object:\n"
+    '{"message": "concise commit message", "files": [{"path": "relative/path", '
+    '"content": "complete new file content"}]}\n\n'
+    "Rules:\n"
+    "- Return the COMPLETE new file content for each file, not a diff.\n"
+    "- Only include files that actually change.\n"
+    "- Preserve the existing code style, conventions, and imports.\n"
+    "- Make minimal, focused changes that address the instruction.\n"
+    "- Return ONLY the JSON, no markdown fences, no extra text."
+)
+
 # Common language codes/names -> human-readable label used in the directive.
 LANGUAGE_ALIASES = {
     "en": "English",
@@ -313,16 +349,18 @@ def render_conversation(
 def merge_conversation(
     stored: List[Dict[str, Any]], fresh: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
-    """Merge stored and freshly-fetched entries, deduping by body content."""
-    seen: set = set()
-    merged: List[Dict[str, Any]] = []
+    """Merge stored and freshly-fetched entries, deduping by body content.
+
+    ``fresh`` (from GitHub) is authoritative over ``stored`` (local cache),
+    so when the same body appears in both the fresh entry (correct login) wins.
+    """
+    by_key: Dict[str, Dict[str, Any]] = {}
     for entry in [*stored, *fresh]:
         key = " ".join((entry.get("body") or "").split())
-        if not key or key in seen:
+        if not key:
             continue
-        seen.add(key)
-        merged.append(entry)
-    merged.sort(key=lambda e: e.get("ts", ""))
+        by_key[key] = entry
+    merged = sorted(by_key.values(), key=lambda e: e.get("ts", ""))
     return merged
 
 
@@ -607,6 +645,220 @@ def normalize_inline_comments(
     return out
 
 
+def _strip_mention(body: str, bot_login: str) -> str:
+    """Remove the leading bot @-mention from the comment body."""
+    candidates = {bot_login}
+    if bot_login.endswith("[bot]"):
+        candidates.add(bot_login[: -len("[bot]")])
+    for candidate in candidates:
+        if candidate:
+            body = body.replace(f"@{candidate}", "", 1)
+    return body.strip()
+
+
+def classify_intent(ai: AIClient, body: str) -> str:
+    """Classify whether a comment asks to improve the prompt, or is a normal reply."""
+    try:
+        result = ai.chat(
+            [
+                {"role": "system", "content": INTENT_CLASSIFIER_PROMPT},
+                {"role": "user", "content": body},
+            ],
+            temperature=0.0,
+        )
+        return result.strip().lower()
+    except Exception as exc:  # noqa: BLE001 - fall back to a normal reply
+        log(f"Warning: intent classification failed ({exc}); defaulting to reply.")
+        return "reply"
+
+
+def handle_improve_prompt(
+    ai: AIClient,
+    gh: GitHubClient,
+    body: str,
+    author: str,
+    owner: str,
+    repo: str,
+    number: int,
+    bot_login: str,
+) -> int:
+    """Generate an improved prompt.md and submit it as a PR to ToolsWorkflow."""
+    feedback = _strip_mention(body, bot_login)
+    if not feedback:
+        gh.post_comment(
+            owner, repo, number,
+            f"@{author} 请补充具体建议，例如：`@perotoolsbot 把评审改得更简洁`",
+        )
+        return 0
+
+    current_prompt = ""
+    if DEFAULT_PROMPT_FILE.is_file():
+        current_prompt = DEFAULT_PROMPT_FILE.read_text(encoding="utf-8")
+    if not current_prompt:
+        gh.post_comment(owner, repo, number, f"@{author} 无法读取当前 prompt.md，请检查。")
+        return 0
+
+    log("Generating improved prompt...")
+    messages = [
+        {"role": "system", "content": IMPROVE_PROMPT_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"Current prompt:\n\n{current_prompt}\n\n---\n\n"
+                f"User feedback: {feedback}\n\nProduce the improved prompt."
+            ),
+        },
+    ]
+    improved = ai.chat(messages, temperature=0.3)
+    if not improved:
+        log("Error: AI returned empty improved prompt.")
+        gh.post_comment(owner, repo, number, f"@{author} 改进失败，AI 返回了空内容。")
+        return 0
+
+    tools_repo = os.environ.get("TOOLS_REPO", "peroperogames/ToolsWorkflow")
+    tools_owner, tools_repo_name = tools_repo.split("/", 1)
+    branch = f"ai-prompt-{int(datetime.now(timezone.utc).timestamp())}"
+
+    try:
+        log(f"Creating branch {branch} in {tools_repo}...")
+        gh.create_branch(tools_owner, tools_repo_name, branch)
+        gh.put_file(
+            tools_owner, tools_repo_name,
+            "review/prompt.md", improved, branch,
+            "ai: improve review prompt based on feedback",
+        )
+        pr = gh.create_pr(
+            tools_owner, tools_repo_name,
+            title="AI: improve review prompt",
+            head=branch,
+            base="main",
+            body=f"根据 @{author} 的反馈自动改进 prompt.md\n\n**反馈**: {feedback}",
+        )
+        pr_url = pr.get("html_url", "")
+        log(f"Prompt PR created: {pr_url}")
+        gh.post_comment(
+            owner, repo, number,
+            f"@{author} 已提交 PR 更新 prompt.md: {pr_url}",
+        )
+    except Exception as exc:
+        log(f"Error creating prompt PR: {exc}")
+        gh.post_comment(
+            owner, repo, number,
+            f"@{author} 提交 PR 失败: {exc}",
+        )
+
+    return 0
+
+
+def _parse_json_response(text: str) -> Dict[str, Any]:
+    """Strip optional markdown fences and parse JSON."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+    return json.loads(text)
+
+
+def handle_code_change(
+    ai: AIClient,
+    gh: GitHubClient,
+    pr: Dict[str, Any],
+    body: str,
+    author: str,
+    owner: str,
+    repo: str,
+    number: int,
+    conversation: str,
+    bot_login: str,
+) -> int:
+    """Generate code changes and submit a PR to the current repository."""
+    instruction = _strip_mention(body, bot_login)
+    if not instruction:
+        gh.post_comment(
+            owner, repo, number,
+            f"@{author} 请说明要做什么改动，例如：`@perotoolsbot 把 src/foo.py 里的 N+1 查询修一下`",
+        )
+        return 0
+
+    head_ref = pr["head"]["ref"]
+    log(f"Reading file contents from {head_ref}...")
+    files = gh.list_files(owner, repo, number)
+    file_contents: List[Dict[str, str]] = []
+    for f in files:
+        try:
+            content = gh.get_file_content(owner, repo, f["filename"], ref=head_ref)
+            file_contents.append({"path": f["filename"], "content": content})
+        except Exception as exc:
+            log(f"Warning: could not read {f['filename']}: {exc}")
+
+    if not file_contents:
+        gh.post_comment(owner, repo, number, f"@{author} 无法读取文件内容，请检查分支权限。")
+        return 0
+
+    log("Generating code changes...")
+    files_text = "\n\n".join(
+        f"### {fc['path']}\n```\n{fc['content']}\n```"
+        for fc in file_contents
+    )
+    messages = [
+        {"role": "system", "content": CODE_CHANGE_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"## Conversation Context\n\n{conversation}\n\n"
+                f"## Current Files\n\n{files_text}\n\n"
+                f"## Instruction\n\n{instruction}\n\n"
+                "Generate the code changes as JSON."
+            ),
+        },
+    ]
+    result = ai.chat(messages, temperature=0.3)
+    if not result:
+        gh.post_comment(owner, repo, number, f"@{author} 代码生成失败，AI 返回了空内容。")
+        return 0
+
+    try:
+        data = _parse_json_response(result)
+    except (ValueError, KeyError) as exc:
+        log(f"Failed to parse code-change JSON: {exc}")
+        gh.post_comment(owner, repo, number, f"@{author} 代码生成失败，AI 返回了无效格式: {exc}")
+        return 0
+
+    commit_msg = (data.get("message") or "ai: apply code changes").strip()
+    changed_files = data.get("files") or []
+    if not isinstance(changed_files, list) or not changed_files:
+        gh.post_comment(owner, repo, number, f"@{author} 代码生成失败，AI 没有返回文件改动。")
+        return 0
+
+    branch = f"ai-change-{int(datetime.now(timezone.utc).timestamp())}"
+    try:
+        log(f"Creating branch {branch} from {head_ref}...")
+        gh.create_branch(owner, repo, branch, base_branch=head_ref)
+        for fc in changed_files:
+            path = fc.get("path")
+            content = fc.get("content")
+            if not path or content is None:
+                continue
+            gh.put_file(owner, repo, path, content, branch, commit_msg)
+        pr_result = gh.create_pr(
+            owner, repo,
+            title=commit_msg,
+            head=branch,
+            base=head_ref,
+            body=f"根据 @{author} 的指令自动生成\n\n**指令**: {instruction}",
+        )
+        pr_url = pr_result.get("html_url", "")
+        log(f"Code-change PR created: {pr_url}")
+        gh.post_comment(owner, repo, number, f"@{author} 已提交 PR: {pr_url}")
+    except Exception as exc:
+        log(f"Error creating code-change PR: {exc}")
+        gh.post_comment(owner, repo, number, f"@{author} 提交 PR 失败: {exc}")
+
+    return 0
+
+
 def determine_event(review_text: str) -> str:
     """Map the review content to a GitHub review event."""
     t = review_text.lower()
@@ -678,14 +930,10 @@ def main() -> int:
     # Reply mode.
     if is_issue_comment:
         body = comment.get("body") or ""
-        # Determine bot login from the conversation (bot-authored entries).
-        bot_login = ""
-        for e in fresh:
-            who = e.get("who") or ""
-            if who.endswith("[bot]"):
-                bot_login = who
-                break
-        if not comment_mentions_bot(body, bot_login):
+        # Determine bot login from the conversation (bot-authored entries),
+        # with an env-var fallback for the first run when no history exists yet.
+        bot_login = os.environ.get("BOT_LOGIN", "").strip() or "perotoolsbot[bot]"
+        if bot_login and not comment_mentions_bot(body, bot_login):
             log(f"Ignoring comment that does not @-mention the bot (@{bot_login}).")
             return 0
 
@@ -705,6 +953,17 @@ def main() -> int:
         entries = merge_conversation(stored, fresh)
         conversation = render_conversation(entries)
 
+        # Classify intent and route.
+        intent = classify_intent(ai, body)
+        if "improve" in intent:
+            return handle_improve_prompt(
+                ai, gh, body, author, owner, repo, number, bot_login
+            )
+        if "code" in intent:
+            return handle_code_change(
+                ai, gh, pr, body, author, owner, repo, number, conversation, bot_login
+            )
+
         reply = generate_reply(ai, reply_prompt, conversation, author, body)
         if not reply:
             log("Error: the AI returned an empty reply.")
@@ -714,13 +973,13 @@ def main() -> int:
             print(reply)
             return 0
 
-        gh.post_comment(owner, repo, number, reply)
+        result = gh.post_comment(owner, repo, number, reply)
         log("Posted reply comment.")
 
         entries.append(
             {
                 "ts": datetime.now(timezone.utc).isoformat(),
-                "who": "ai-reviewer",
+                "who": (result.get("user") or {}).get("login", "") or bot_login,
                 "kind": "comment",
                 "body": reply,
             }
@@ -761,18 +1020,18 @@ def main() -> int:
         return 0
 
     if config.silent:
-        gh.post_comment(owner, repo, number, review_text)
+        result = gh.post_comment(owner, repo, number, review_text)
         log("Posted review as a regular comment (silent mode).")
     else:
         try:
-            gh.post_review(owner, repo, number, review_text, event=event, comments=inline)
+            result = gh.post_review(owner, repo, number, review_text, event=event, comments=inline)
             if inline:
                 log(f"Posted review ({event}) with {len(inline)} inline comment(s).")
             else:
                 log(f"Posted review with event: {event}")
         except Exception as exc:  # noqa: BLE001 - fall back to body-only review
             log(f"Warning: posting review with inline comments failed ({exc}); retrying without them.")
-            gh.post_review(owner, repo, number, review_text, event=event)
+            result = gh.post_review(owner, repo, number, review_text, event=event)
             log(f"Posted review with event: {event}")
 
     for label in labels_for_event(event):
@@ -786,7 +1045,7 @@ def main() -> int:
     entries.append(
         {
             "ts": datetime.now(timezone.utc).isoformat(),
-            "who": "ai-reviewer",
+            "who": (result.get("user") or {}).get("login", "ai-reviewer"),
             "kind": "review",
             "body": review_text,
         }
