@@ -69,3 +69,31 @@ Return your review in Markdown using this exact structure:
 - **Immediate** (before merge)
 - **Short-term** (next sprint)
 - **Long-term** (technical debt)
+
+## Inline Comments (line-level findings)
+
+In addition to the Markdown review, output a JSON code block with precise
+line-level findings for the GitHub review API:
+
+```json
+{
+  "comments": [
+    {
+      "path": "src/example.py",
+      "line": 9,
+      "side": "RIGHT",
+      "start_line": 5,
+      "body": "Describe the issue and the suggested fix."
+    }
+  ]
+}
+```
+
+Rules:
+- `path`: the file path exactly as shown in the diff.
+- `side`: "RIGHT" for the new code (the `+` lines), "LEFT" for the removed code.
+- `line`: the last line number of the finding — in the new file for RIGHT, the old file for LEFT.
+- `start_line` (optional): the first line number for a cross-line comment; the comment then spans `start_line`..`line` (e.g. R5–R9 → `start_line` 5, `line` 9).
+- Each diff line is prefixed with its absolute line number (e.g. `   12: +def foo():`). Use that number as `line`; `side` is `RIGHT` for `+`/context lines and `LEFT` for `-` lines.
+- Only include findings you are confident map to concrete changed lines; otherwise put them in the review body instead.
+- Keep `body` concise and actionable.

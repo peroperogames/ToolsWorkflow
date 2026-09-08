@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -93,13 +93,26 @@ class GitHubClient:
         return reviews
 
     def post_review(
-        self, owner: str, repo: str, number: int, body: str, event: str = "COMMENT"
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        body: str,
+        event: str = "COMMENT",
+        comments: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        """Post a pull request review (APPROVE / REQUEST_CHANGES / COMMENT)."""
+        """Post a pull request review (APPROVE / REQUEST_CHANGES / COMMENT).
+
+        ``comments`` is an optional list of inline review comments, each shaped
+        like ``{"path", "line", "side", "body", "start_line", "start_side"}``.
+        """
+        payload: Dict[str, Any] = {"body": body, "event": event}
+        if comments:
+            payload["comments"] = comments
         return self._request(
             "POST",
             f"/repos/{owner}/{repo}/pulls/{number}/reviews",
-            json={"body": body, "event": event},
+            json=payload,
         )
 
     def post_comment(self, owner: str, repo: str, number: int, body: str) -> Dict[str, Any]:

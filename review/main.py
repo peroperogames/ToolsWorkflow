@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -337,6 +338,40 @@ def comment_mentions_bot(body: str, login: str) -> bool:
     return any(f"@{c}" in lowered for c in candidates)
 
 
+def annotate_diff(patch: str) -> str:
+    """Number each diff line with its absolute file line.
+
+    ``+`` and context lines get the new-file (RIGHT) line number; ``-`` lines
+    get the old-file (LEFT) line number. The model can then reference these
+    numbers directly instead of doing hunk-header arithmetic.
+    """
+    out: List[str] = []
+    old_line: Optional[int] = None
+    new_line: Optional[int] = None
+    for line in patch.splitlines():
+        if line.startswith("@@"):
+            match = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+            if match:
+                old_line = int(match.group(1))
+                new_line = int(match.group(2))
+            out.append(line)
+        elif line.startswith("+") and new_line is not None:
+            out.append(f"{new_line:>5}: +{line[1:]}")
+            new_line += 1
+        elif line.startswith("-") and old_line is not None:
+            out.append(f"{old_line:>5}: -{line[1:]}")
+            old_line += 1
+        elif line.startswith("\\"):
+            out.append(line)
+        elif new_line is not None and old_line is not None:
+            out.append(f"{new_line:>5}: {line[1:]}")
+            new_line += 1
+            old_line += 1
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
 def build_diff_text(
     pr: Dict[str, Any],
     files: List[Dict[str, Any]],
@@ -418,7 +453,7 @@ def build_diff_text(
         lines.append(f"### {filename} ({status}) +{additions} -{deletions}")
         if patch:
             lines.append("```diff")
-            lines.append(patch)
+            lines.append(annotate_diff(patch))
             lines.append("```")
         else:
             lines.append("_(no textual patch available)_")
@@ -514,6 +549,62 @@ def generate_reply(
         {"role": "user", "content": "\n\n".join(parts)},
     ]
     return ai.chat(messages)
+
+
+def _as_int(value: Any) -> Optional[int]:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def extract_inline_comments(review_text: str) -> Tuple[str, List[Dict[str, Any]]]:
+    """Extract a JSON ``{"comments": [...]}`` block from the review.
+
+    Returns the cleaned review text (JSON block removed) and the list of raw
+    inline comments.
+    """
+    comments: List[Dict[str, Any]] = []
+    cleaned = review_text
+    pattern = re.compile(r"```[^\n`]*\n([\s\S]*?)\n```")
+    for match in pattern.finditer(review_text):
+        try:
+            data = json.loads(match.group(1))
+        except ValueError:
+            continue
+        if isinstance(data, dict) and isinstance(data.get("comments"), list):
+            comments.extend(c for c in data["comments"] if isinstance(c, dict))
+            cleaned = cleaned.replace(match.group(0), "")
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, comments
+
+
+def normalize_inline_comments(
+    raw: List[Dict[str, Any]], files: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Validate/normalize raw findings into GitHub review-comment objects."""
+    valid_paths = {f.get("filename") for f in files}
+    out: List[Dict[str, Any]] = []
+    for c in raw:
+        path = c.get("path")
+        body = c.get("body")
+        line = _as_int(c.get("line"))
+        if not isinstance(path, str) or not isinstance(body, str):
+            continue
+        if path not in valid_paths or not line or line <= 0:
+            continue
+        side = c.get("side", "RIGHT")
+        if side not in ("LEFT", "RIGHT"):
+            side = "RIGHT"
+        comment: Dict[str, Any] = {"path": path, "line": line, "side": side, "body": body}
+        start_line = _as_int(c.get("start_line"))
+        if start_line and 0 < start_line < line:
+            comment["start_line"] = start_line
+            start_side = c.get("start_side", side)
+            comment["start_side"] = start_side if start_side in ("LEFT", "RIGHT") else side
+        out.append(comment)
+    return out
 
 
 def determine_event(review_text: str) -> str:
@@ -657,19 +748,32 @@ def main() -> int:
         log("Error: the AI returned an empty review.")
         return 1
 
-    event = determine_event(review)
+    review_text, raw_comments = extract_inline_comments(review)
+    inline = normalize_inline_comments(raw_comments, files)
+    if inline:
+        log(f"Found {len(inline)} inline comment(s).")
+
+    event = determine_event(review_text)
     log(f"Review event: {event}")
 
     if config.dry_run:
-        print(review)
+        print(review_text)
         return 0
 
     if config.silent:
-        gh.post_comment(owner, repo, number, review)
+        gh.post_comment(owner, repo, number, review_text)
         log("Posted review as a regular comment (silent mode).")
     else:
-        gh.post_review(owner, repo, number, review, event=event)
-        log(f"Posted review with event: {event}")
+        try:
+            gh.post_review(owner, repo, number, review_text, event=event, comments=inline)
+            if inline:
+                log(f"Posted review ({event}) with {len(inline)} inline comment(s).")
+            else:
+                log(f"Posted review with event: {event}")
+        except Exception as exc:  # noqa: BLE001 - fall back to body-only review
+            log(f"Warning: posting review with inline comments failed ({exc}); retrying without them.")
+            gh.post_review(owner, repo, number, review_text, event=event)
+            log(f"Posted review with event: {event}")
 
     for label in labels_for_event(event):
         try:
@@ -684,7 +788,7 @@ def main() -> int:
             "ts": datetime.now(timezone.utc).isoformat(),
             "who": "ai-reviewer",
             "kind": "review",
-            "body": review,
+            "body": review_text,
         }
     )
     history.save(owner, repo, number, entries[-MAX_CONVERSATION_ENTRIES:])

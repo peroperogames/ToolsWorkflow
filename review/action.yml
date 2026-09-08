@@ -18,7 +18,7 @@ inputs:
   openai-base-url:
     description: 'OpenAI-compatible API base URL.'
     required: false
-    default: 'https://api.openai.com/v1'
+    default: 'https://token.peropero.net/v1'
   review-language:
     description: 'Language for the review and replies (en, zh, cn, ja, ko, ...).'
     required: false

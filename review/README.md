@@ -63,9 +63,9 @@ python main.py
 | --- | --- | --- |
 | `GITHUB_TOKEN` | yes | GitHub token with `pull-requests: write` on the target repo. |
 | `OPENAI_API_KEY` | yes | OpenAI (or compatible) API token. |
-| `OPENAI_API_MODEL` | no | Model to use (default `gpt-4o`). |
-| `OPENAI_API_BASE_URL` | no | API base URL (default `https://api.openai.com/v1`). |
-| `REVIEW_LANGUAGE` | no | Review output language — codes (`en`, `zh`, `cn`, `ja`, `ko`, `es`, `fr`, `de`, `ru`, `pt`) or full names (default `en`). |
+| `OPENAI_API_MODEL` | no | Model to use (default `glm-5.3-flash`). |
+| `OPENAI_API_BASE_URL` | no | API base URL (default `https://token.peropero.net/v1`). |
+| `REVIEW_LANGUAGE` | no | Review output language — codes (`en`, `zh`, `cn`, `ja`, `ko`, `es`, `fr`, `de`, `ru`, `pt`) or full names (default `cn`). |
 | `REVIEW_PROMPT` | no | Review prompt. If empty/unset, `prompt.md` next to the script is used. |
 | `MAX_TOKENS_PER_CHUNK` | no | Max tokens per chunk for large PRs (default `6000`). |
 | `SILENT_MODE` | no | Set `true`/`1` to post a comment instead of a review. |
@@ -111,6 +111,11 @@ Replying requires the GitHub App to have **`Issues: Read and write`** permission
 5. Classify the review (`REQUEST_CHANGES` / `COMMENT` / `APPROVE`) from the
    presence of critical/warning keywords.
 6. Post the review (or comment in `SILENT_MODE`) and apply a best-effort label.
+
+The review can also carry **inline line comments** (single-line and cross-line
+via `start_line`). The model emits them as a JSON `comments` block, which the
+script parses and posts alongside the review body; if GitHub rejects the line
+numbers, it falls back to a body-only review.
 
 ## Files
 
