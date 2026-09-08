@@ -36,7 +36,7 @@ jobs:
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PK }}
-          repositories: ${{ github.event.repository.name }}
+          repositories: ${{ github.event.repository.name }}, ToolsWorkflow
 
       - name: Run AI code review
         uses: peroperogames/ToolsWorkflow/review@main

@@ -66,6 +66,26 @@ REPLY_SYSTEM_PROMPT = (
     "files or code only when it helps."
 )
 
+INTENT_CLASSIFIER_PROMPT = (
+    "Classify the intent of this GitHub comment directed at you (a code review bot).\n"
+    "Reply with EXACTLY one word:\n"
+    "- 'improve_prompt' if the user is asking to improve, update, refine, shorten, "
+    "or otherwise change the review prompt (prompt.md).\n"
+    "- 'reply' for anything else (questions, review requests, etc.)."
+)
+
+IMPROVE_PROMPT_SYSTEM_PROMPT = (
+    "You are an expert at improving AI prompts for code review. "
+    "You will be given the current review prompt and user feedback. "
+    "Produce an improved version that addresses the feedback while "
+    "preserving the core structure and purpose.\n\n"
+    "Rules:\n"
+    "- Keep the same overall structure (sections, headings).\n"
+    "- Address the feedback specifically.\n"
+    "- Do NOT remove existing useful content.\n"
+    "- Return ONLY the improved prompt in markdown. No explanation, no code fences."
+)
+
 # Common language codes/names -> human-readable label used in the directive.
 LANGUAGE_ALIASES = {
     "en": "English",
@@ -607,6 +627,111 @@ def normalize_inline_comments(
     return out
 
 
+def _strip_mention(body: str, bot_login: str) -> str:
+    """Remove the leading bot @-mention from the comment body."""
+    candidates = {bot_login}
+    if bot_login.endswith("[bot]"):
+        candidates.add(bot_login[: -len("[bot]")])
+    for candidate in candidates:
+        if candidate:
+            body = body.replace(f"@{candidate}", "", 1)
+    return body.strip()
+
+
+def classify_intent(ai: AIClient, body: str) -> str:
+    """Classify whether a comment asks to improve the prompt, or is a normal reply."""
+    try:
+        result = ai.chat(
+            [
+                {"role": "system", "content": INTENT_CLASSIFIER_PROMPT},
+                {"role": "user", "content": body},
+            ],
+            temperature=0.0,
+        )
+        return result.strip().lower()
+    except Exception as exc:  # noqa: BLE001 - fall back to a normal reply
+        log(f"Warning: intent classification failed ({exc}); defaulting to reply.")
+        return "reply"
+
+
+def handle_improve_prompt(
+    ai: AIClient,
+    gh: GitHubClient,
+    body: str,
+    author: str,
+    owner: str,
+    repo: str,
+    number: int,
+    bot_login: str,
+) -> int:
+    """Generate an improved prompt.md and submit it as a PR to ToolsWorkflow."""
+    feedback = _strip_mention(body, bot_login)
+    if not feedback:
+        gh.post_comment(
+            owner, repo, number,
+            f"@{author} 请补充具体建议，例如：`@perotoolsbot 把评审改得更简洁`",
+        )
+        return 0
+
+    current_prompt = ""
+    if DEFAULT_PROMPT_FILE.is_file():
+        current_prompt = DEFAULT_PROMPT_FILE.read_text(encoding="utf-8")
+    if not current_prompt:
+        gh.post_comment(owner, repo, number, f"@{author} 无法读取当前 prompt.md，请检查。")
+        return 0
+
+    log("Generating improved prompt...")
+    messages = [
+        {"role": "system", "content": IMPROVE_PROMPT_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"Current prompt:\n\n{current_prompt}\n\n---\n\n"
+                f"User feedback: {feedback}\n\nProduce the improved prompt."
+            ),
+        },
+    ]
+    improved = ai.chat(messages, temperature=0.3)
+    if not improved:
+        log("Error: AI returned empty improved prompt.")
+        gh.post_comment(owner, repo, number, f"@{author} 改进失败，AI 返回了空内容。")
+        return 0
+
+    tools_repo = os.environ.get("TOOLS_REPO", "peroperogames/ToolsWorkflow")
+    tools_owner, tools_repo_name = tools_repo.split("/", 1)
+    branch = f"ai-prompt-{int(datetime.now(timezone.utc).timestamp())}"
+
+    try:
+        log(f"Creating branch {branch} in {tools_repo}...")
+        gh.create_branch(tools_owner, tools_repo_name, branch)
+        gh.put_file(
+            tools_owner, tools_repo_name,
+            "review/prompt.md", improved, branch,
+            "ai: improve review prompt based on feedback",
+        )
+        pr = gh.create_pr(
+            tools_owner, tools_repo_name,
+            title="AI: improve review prompt",
+            head=branch,
+            base="main",
+            body=f"根据 @{author} 的反馈自动改进 prompt.md\n\n**反馈**: {feedback}",
+        )
+        pr_url = pr.get("html_url", "")
+        log(f"Prompt PR created: {pr_url}")
+        gh.post_comment(
+            owner, repo, number,
+            f"@{author} 已提交 PR 更新 prompt.md: {pr_url}",
+        )
+    except Exception as exc:
+        log(f"Error creating prompt PR: {exc}")
+        gh.post_comment(
+            owner, repo, number,
+            f"@{author} 提交 PR 失败: {exc}",
+        )
+
+    return 0
+
+
 def determine_event(review_text: str) -> str:
     """Map the review content to a GitHub review event."""
     t = review_text.lower()
@@ -690,6 +815,13 @@ def main() -> int:
             return 0
 
         author = (comment.get("user") or {}).get("login", "unknown")
+
+        # Classify intent: prompt-improvement vs. regular reply.
+        intent = classify_intent(ai, body)
+        if "improve" in intent:
+            return handle_improve_prompt(
+                ai, gh, body, author, owner, repo, number, bot_login
+            )
 
         # Drop the triggering comment from the context (it is injected below).
         body_key = " ".join(body.split())

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -129,4 +130,59 @@ class GitHubClient:
             "POST",
             f"/repos/{owner}/{repo}/issues/{number}/labels",
             json={"labels": labels},
+        )
+
+    def create_branch(self, owner: str, repo: str, branch_name: str) -> Dict[str, Any]:
+        """Create a new branch from the current main HEAD."""
+        ref = self._request("GET", f"/repos/{owner}/{repo}/git/ref/heads/main")
+        sha = ref["object"]["sha"]
+        return self._request(
+            "POST",
+            f"/repos/{owner}/{repo}/git/refs",
+            json={"ref": f"refs/heads/{branch_name}", "sha": sha},
+        )
+
+    def put_file(
+        self,
+        owner: str,
+        repo: str,
+        path: str,
+        content: str,
+        branch: str,
+        message: str,
+    ) -> Dict[str, Any]:
+        """Create or update a file on a branch (auto-handles the blob SHA)."""
+        sha = None
+        try:
+            existing = self._request(
+                "GET", f"/repos/{owner}/{repo}/contents/{path}?ref={branch}"
+            )
+            sha = existing.get("sha")
+        except Exception:
+            pass
+        payload: Dict[str, Any] = {
+            "message": message,
+            "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+            "branch": branch,
+        }
+        if sha:
+            payload["sha"] = sha
+        return self._request(
+            "PUT", f"/repos/{owner}/{repo}/contents/{path}", json=payload
+        )
+
+    def create_pr(
+        self,
+        owner: str,
+        repo: str,
+        title: str,
+        head: str,
+        base: str,
+        body: str = "",
+    ) -> Dict[str, Any]:
+        """Create a pull request."""
+        return self._request(
+            "POST",
+            f"/repos/{owner}/{repo}/pulls",
+            json={"title": title, "head": head, "base": base, "body": body},
         )

@@ -1,15 +1,10 @@
 # GitHub AI Code Review
 
-An AI-powered GitHub pull request reviewer. It fetches a pull request's diff via
-the GitHub REST API, sends it to an OpenAI-compatible chat completions endpoint,
-and posts the review back to the pull request (as `APPROVE`,
-`REQUEST_CHANGES`, or `COMMENT`).
+An AI-powered GitHub pull request reviewer. It fetches a pull request's diff via the GitHub REST API, sends it to an OpenAI-compatible chat completions endpoint, and posts the review back to the pull request (as `APPROVE`, `REQUEST_CHANGES`, or `COMMENT`).
 
 ## Usage (GitHub Action)
 
-Consumers reuse the `code-review.yml` reusable workflow (existing callers keep
-working unchanged). Internally it delegates to the `review` composite action, so
-there is no repository clone:
+Consumers reuse the `code-review.yml` reusable workflow (existing callers keep working unchanged). Internally it delegates to the `review` composite action, so there is no repository clone:
 
 ```yaml
 # .github/workflows/ai-code-review.yml
@@ -33,13 +28,7 @@ jobs:
       APP_PK: ${{ secrets.APP_PK }}
 ```
 
-The GitHub App token is generated in `code-review.yml` via
-`actions/create-github-app-token` and passed to the composite action as
-`github-token`. Per-PR session history is stored on the runner (not inside the
-action), keyed by PR and removed when the PR closes.
-
-Per-PR session history is stored on the runner (not inside the action), keyed by
-PR and removed automatically when the PR closes.
+The GitHub App token is generated in `code-review.yml` via `actions/create-github-app-token` and passed to the composite action as `github-token`. Per-PR session history is stored on the runner (not inside the action), keyed by PR and removed when the PR closes.
 
 ## Requirements
 
@@ -71,6 +60,7 @@ python main.py
 | `SILENT_MODE` | no | Set `true`/`1` to post a comment instead of a review. |
 | `DRY_RUN` | no | Set `true`/`1` to print the review without posting. |
 | `REVIEW_STATE_DIR` | no | Directory for local per-PR history files (default `<tmp>/ai-code-review`). |
+| `TOOLS_REPO` | no | Target repo for prompt-improvement PRs (default `peroperogames/ToolsWorkflow`). |
 
 ### Pull request resolution
 
@@ -89,16 +79,17 @@ python main.py
 
 ### Reply mode (answering comments)
 
-Triggering the workflow on `issue_comment` makes the bot answer comments that
-**@-mention it**. GitHub does not expose threading for issue comments, so an
-@-mention is the reliable trigger:
+Triggering the workflow on `issue_comment` makes the bot answer comments that **@-mention it**. GitHub does not expose threading for issue comments, so an @-mention is the reliable trigger:
 
 - A human comment that @-mentions the bot → the bot posts an AI-generated reply.
-- Comments on non-PR issues, bot comments, and comments that don't mention the
-  bot are ignored.
+- Comments on non-PR issues, bot comments, and comments that don't mention the bot are ignored.
 
-Replying requires the GitHub App to have **`Issues: Read and write`** permission
-(issue comments use the Issues API, which is separate from `Pull requests`).
+#### Special commands
+
+- **Improve the prompt** — e.g. `@perotoolsbot improved prompt.md and submits it as a PR`. The bot classifies
+  the comment intent; if it's a prompt-improvement request it generates an updated `prompt.md` and submits it as a PR `TOOLS_REPO` (default `peroperogames/ToolsWorkflow`). No clone needed — GitHub Contents + Pulls API.
+
+Replying requires the GitHub App to have **`Issues: Read and write`** permission (issue comments use the Issues API, which is separate from `Pull requests`).
 
 ## Review pipeline
 
@@ -112,16 +103,14 @@ Replying requires the GitHub App to have **`Issues: Read and write`** permission
    presence of critical/warning keywords.
 6. Post the review (or comment in `SILENT_MODE`) and apply a best-effort label.
 
-The review can also carry **inline line comments** (single-line and cross-line
-via `start_line`). The model emits them as a JSON `comments` block, which the
-script parses and posts alongside the review body; if GitHub rejects the line
-numbers, it falls back to a body-only review.
+The review can also carry **inline line comments** (single-line and cross-line via `start_line`). The model emits them as a JSON `comments` block, which the script parses and posts alongside the review body; if GitHub rejects the line numbers, it falls back to a body-only review.
 
 ## Files
 
 - `main.py` — entry point and orchestration.
+- `action.yml` — composite action definition.
 - `github_client.py` — GitHub REST API client.
 - `ai_client.py` — OpenAI-compatible chat completions client.
 - `history.py` — local per-PR history persistence (temp files).
-- `prompt.md` — default review prompt.
+- `prompt.md` — default review prompt (auto-improveable via natural language).
 - `requirements.txt` — Python dependencies.
