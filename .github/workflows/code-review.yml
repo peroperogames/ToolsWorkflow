@@ -7,7 +7,7 @@ on:
         description: 'OpenAI model to use for the review'
         required: false
         type: string
-        default: 'glm-5.3-flash'
+        default: 'deepseek-v4-flash'
       openai-base-url:
         description: 'OpenAI API base URL (for custom endpoints or proxies)'
         required: false

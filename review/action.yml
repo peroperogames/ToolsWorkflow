@@ -14,7 +14,7 @@ inputs:
   openai-model:
     description: 'Model to use.'
     required: false
-    default: 'gpt-4o'
+    default: 'deepseek-v4-flash'
   openai-base-url:
     description: 'OpenAI-compatible API base URL.'
     required: false

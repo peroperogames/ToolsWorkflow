@@ -52,7 +52,7 @@ python main.py
 | --- | --- | --- |
 | `GITHUB_TOKEN` | yes | GitHub token with `pull-requests: write` on the target repo. |
 | `OPENAI_API_KEY` | yes | OpenAI (or compatible) API token. |
-| `OPENAI_API_MODEL` | no | Model to use (default `glm-5.3-flash`). |
+| `OPENAI_API_MODEL` | no | Model to use (default `deepseek-v4-flash`). |
 | `OPENAI_API_BASE_URL` | no | API base URL (default `https://token.peropero.net/v1`). |
 | `REVIEW_LANGUAGE` | no | Review output language — codes (`en`, `zh`, `cn`, `ja`, `ko`, `es`, `fr`, `de`, `ru`, `pt`) or full names (default `cn`). |
 | `REVIEW_PROMPT` | no | Review prompt. If empty/unset, `prompt.md` next to the script is used. |
