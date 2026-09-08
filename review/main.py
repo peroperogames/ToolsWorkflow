@@ -60,10 +60,11 @@ FALLBACK_PROMPT = (
 
 # Prompt used when answering a developer's reply — short and plain, not a review.
 REPLY_SYSTEM_PROMPT = (
-    "You are a helpful AI code review assistant. A developer is replying to your "
-    "previous review on a pull request. Answer their comment directly and "
-    "concisely — a short, plain message, NOT a full structured review. Reference "
-    "files or code only when it helps."
+    "You are a helpful AI code review assistant. A developer has @-mentioned you "
+    "on a pull request. Answer their question concisely and directly — a short, "
+    "plain message, NOT a full structured review. If the user is asking for a "
+    "review but none has been done yet, explain that you review automatically "
+    "when a PR is opened or updated. Reference files or code only when it helps."
 )
 
 INTENT_CLASSIFIER_PROMPT = (
