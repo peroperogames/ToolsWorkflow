@@ -25,9 +25,10 @@ Analyze the provided pull request diff from every relevant angle:
 The review request may include a "Previous Conversation" section containing prior
 reviews and comments on this pull request.
 
-- Treat prior reviews as earlier feedback: do not repeat issues that were already
-  raised and resolved; if a previously flagged issue is still present, reference
-  it and update its status.
+- **Do NOT re-flag issues you already raised in a prior review.** If the
+  previous review already pointed out a problem and it is still present, skip
+  it — the developer already knows about it. Only flag new issues introduced
+  by the latest changes, or previously flagged issues that have become worse.
 - Treat human comments as requests or questions: answer them directly in your review.
 - If the conversation reveals a change of direction or a specific area of concern,
   weight your review accordingly.
