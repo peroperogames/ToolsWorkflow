@@ -12,7 +12,6 @@ The tool is fully configured through environment variables (no CLI arguments):
     OPENAI_API_MODEL      (optional) Model to use (default: gpt-4o).
     OPENAI_API_BASE_URL   (optional) API base URL (default: https://api.openai.com/v1).
     REVIEW_LANGUAGE       (optional) Review output language (default: en).
-    REVIEW_PROMPT         (optional) Review prompt; defaults to prompt.md next to this script.
     MAX_TOKENS_PER_CHUNK  (optional) Max tokens per chunk for large PRs (default: 6000).
     SILENT_MODE           (optional) "true"/"1" posts a comment instead of a review.
     DRY_RUN               (optional) "true"/"1" prints the review without posting.
@@ -50,7 +49,7 @@ DEFAULT_MAX_TOKENS_PER_CHUNK = 6000
 MAX_CONVERSATION_ENTRIES = 50
 MAX_CONVERSATION_ENTRY_CHARS = 4000
 
-# Minimal fallback used only when both REVIEW_PROMPT and prompt.md are empty.
+# Minimal fallback used only when prompt.md is empty.
 FALLBACK_PROMPT = (
     "You are an expert software engineer performing a thorough code review. "
     "Identify bugs, security issues, performance problems, and maintainability "
@@ -165,13 +164,10 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 
 def load_prompt() -> str:
-    """Resolve the review prompt from REVIEW_PROMPT, then prompt.md."""
-    explicit = os.environ.get("REVIEW_PROMPT", "").strip()
-    if explicit:
-        return explicit
-
-    if DEFAULT_PROMPT_FILE.is_file():
-        content = DEFAULT_PROMPT_FILE.read_text(encoding="utf-8").strip()
+    """Resolve the review prompt from prompt.md."""
+    path = DEFAULT_PROMPT_FILE
+    if path.is_file():
+        content = path.read_text(encoding="utf-8").strip()
         if content:
             return content
 
@@ -718,20 +714,20 @@ def handle_improve_prompt(
         gh.post_comment(owner, repo, number, f"@{author} 改进失败，AI 返回了空内容。")
         return 0
 
-    tools_repo = os.environ.get("TOOLS_REPO", "peroperogames/ToolsWorkflow")
-    tools_owner, tools_repo_name = tools_repo.split("/", 1)
+    prompt_target = os.environ.get("PROMPT_TARGET", "peroperogames/ToolsWorkflow/review/prompt.md")
+    prompt_owner, prompt_repo, prompt_path = prompt_target.split("/", 2)
     branch = f"ai-prompt-{int(datetime.now(timezone.utc).timestamp())}"
 
     try:
-        log(f"Creating branch {branch} in {tools_repo}...")
-        gh.create_branch(tools_owner, tools_repo_name, branch)
+        log(f"Creating branch {branch} in {prompt_owner}/{prompt_repo}...")
+        gh.create_branch(prompt_owner, prompt_repo, branch)
         gh.put_file(
-            tools_owner, tools_repo_name,
-            "review/prompt.md", improved, branch,
+            prompt_owner, prompt_repo,
+            prompt_path, improved, branch,
             "ai: improve review prompt based on feedback",
         )
         pr = gh.create_pr(
-            tools_owner, tools_repo_name,
+            prompt_owner, prompt_repo,
             title="AI: improve review prompt",
             head=branch,
             base="main",

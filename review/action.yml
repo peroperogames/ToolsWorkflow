@@ -23,10 +23,6 @@ inputs:
     description: 'Language for the review and replies (en, zh, cn, ja, ko, ...).'
     required: false
     default: 'en'
-  review-prompt:
-    description: 'Optional review prompt override (defaults to the bundled prompt.md).'
-    required: false
-    default: ''
   max-tokens-per-chunk:
     description: 'Max tokens per chunk for large PRs.'
     required: false
@@ -55,7 +51,6 @@ runs:
         OPENAI_API_MODEL: ${{ inputs.openai-model }}
         OPENAI_API_BASE_URL: ${{ inputs.openai-base-url }}
         REVIEW_LANGUAGE: ${{ inputs.review-language }}
-        REVIEW_PROMPT: ${{ inputs.review-prompt }}
         MAX_TOKENS_PER_CHUNK: ${{ inputs.max-tokens-per-chunk }}
         SILENT_MODE: ${{ inputs.silent-mode }}
         REVIEW_STATE_DIR: ${{ inputs.state-dir }}

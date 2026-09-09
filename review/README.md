@@ -55,13 +55,11 @@ python main.py
 | `OPENAI_API_MODEL` | no | Model to use (default `deepseek-v4-flash`). |
 | `OPENAI_API_BASE_URL` | no | API base URL (default `https://token.peropero.net/v1`). |
 | `REVIEW_LANGUAGE` | no | Review output language — codes (`en`, `zh`, `cn`, `ja`, `ko`, `es`, `fr`, `de`, `ru`, `pt`) or full names (default `cn`). |
-| `REVIEW_PROMPT` | no | Review prompt. If empty/unset, `prompt.md` next to the script is used. |
 | `MAX_TOKENS_PER_CHUNK` | no | Max tokens per chunk for large PRs (default `6000`). |
 | `SILENT_MODE` | no | Set `false`/`0` to post a review instead of a comment (default `true`). |
 | `DRY_RUN` | no | Set `true`/`1` to print the review without posting. |
 | `REVIEW_STATE_DIR` | no | Directory for local per-PR history files (default `<tmp>/ai-code-review`). |
-| `TOOLS_REPO` | no | Target repo for prompt-improvement PRs (default `peroperogames/ToolsWorkflow`). |
-| `BOT_LOGIN` | no | Bot account login override (default `perotoolsbot[bot]`). |
+| `PROMPT_TARGET` | no | `owner/repo/path` for prompt-improvement PRs (default `peroperogames/ToolsWorkflow/review/prompt.md`). |
 
 ### Pull request resolution
 
@@ -89,7 +87,7 @@ Triggering the workflow on `issue_comment` makes the bot answer comments that **
 
 - **Improve the prompt** — e.g. `@perotoolsbot improve review`. The bot
   classifies the comment intent; if it's a prompt-improvement request it
-  generates an updated `prompt.md` and submits it as a PR to `TOOLS_REPO`.
+  generates an updated `prompt.md` and submits it as a PR to `PROMPT_TARGET`.
 
 - **Code changes** — e.g. `@perotoolsbot fix src/foo.py`.
   The bot reads the current file contents, generates code changes, and
