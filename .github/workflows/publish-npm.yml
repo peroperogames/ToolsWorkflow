@@ -13,6 +13,11 @@ on:
         required: false
         type: string
         default: '20'
+      working-directory:
+        description: 'Subdirectory to cd into after checkout (relative to repo root). Defaults to repo root.'
+        required: false
+        type: string
+        default: '.'
     secrets:
       NPM_URL:
         required: true   # NPM registry URL
@@ -31,6 +36,9 @@ permissions:
 jobs:
   publish:
     runs-on: [build-server, unitypkg-share]
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
     env:
       EXPECTED_PACKAGE_PREFIX: ${{ inputs.expected-package-prefix || 'com.prpr' }}
       NPM_URL: ${{ secrets.NPM_URL }}
@@ -58,7 +66,7 @@ jobs:
 
       - name: Change folder name
         env:
-          CI_PROJECT_DIR: ${{ github.workspace }}
+          CI_PROJECT_DIR: ${{ github.workspace }}/${{ inputs.working-directory }}
         run: |
           bash /devops/ToolsWorkflow/publish/changefoldername.sh
 

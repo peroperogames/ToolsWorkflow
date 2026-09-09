@@ -40,8 +40,8 @@ for i in "${arr[@]}"; do
         mv "$CI_PROJECT_DIR/${i}" "$CI_PROJECT_DIR/${i}~"
         ii="${i}.meta"
         echo "将删除meta文件${ii}"
-        ls | grep "$ii"
-        rm -f "$ii"
+        ls "$CI_PROJECT_DIR" | grep "$ii"
+        rm -f "$CI_PROJECT_DIR/$ii"
         same=true
       fi
    done
