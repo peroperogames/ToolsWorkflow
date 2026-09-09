@@ -36,9 +36,6 @@ permissions:
 jobs:
   publish:
     runs-on: [build-server, unitypkg-share]
-    defaults:
-      run:
-        working-directory: ${{ inputs.working-directory }}
     env:
       EXPECTED_PACKAGE_PREFIX: ${{ inputs.expected-package-prefix || 'com.prpr' }}
       NPM_URL: ${{ secrets.NPM_URL }}
@@ -65,12 +62,14 @@ jobs:
           git clone https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/peroperogames/ToolsWorkflow.git
 
       - name: Change folder name
+        working-directory: ${{ inputs.working-directory }}
         env:
-          CI_PROJECT_DIR: ${{ github.workspace }}/${{ inputs.working-directory }}
+          CI_PROJECT_DIR: ${{ github.workspace }}
         run: |
           bash /devops/ToolsWorkflow/publish/changefoldername.sh
 
       - name: Package preprocess
+        working-directory: ${{ inputs.working-directory }}
         env:
           CI_COMMIT_TAG: ${{ github.ref_name }}
         run: |
