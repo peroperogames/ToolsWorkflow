@@ -7,12 +7,12 @@ on:
         description: 'OpenAI model to use for the review'
         required: false
         type: string
-        default: 'deepseek-v4-flash'
+        default: 'glm-5.3-flash'
       openai-base-url:
         description: 'OpenAI API base URL (for custom endpoints or proxies)'
         required: false
         type: string
-        default: 'https://token.peropero.net/v1'
+        default: 'https://tokenhub.tencentmaas.com/plan/v3'
       review-language:
         description: 'Language of the review comment (e.g. en, zh, ja, ko, es, fr, de, ru, pt)'
         required: false

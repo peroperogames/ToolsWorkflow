@@ -19,9 +19,9 @@ jobs:
   review:
     uses: peroperogames/ToolsWorkflow/.github/workflows/code-review.yml@main
     with:
-      openai-model: glm-5.3-flash
-      openai-base-url: https://token.peropero.net/v1
-      review-language: cn
+      openai-model: 'glm-5.3-flash'
+      openai-base-url: 'https://tokenhub.tencentmaas.com/plan/v3'
+      review-language: 'cn'
     secrets:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       APP_ID: ${{ secrets.APP_ID }}
@@ -52,8 +52,8 @@ python main.py
 | --- | --- | --- |
 | `GITHUB_TOKEN` | yes | GitHub token with `pull-requests: write` on the target repo. |
 | `OPENAI_API_KEY` | yes | OpenAI (or compatible) API token. |
-| `OPENAI_API_MODEL` | no | Model to use (default `deepseek-v4-flash`). |
-| `OPENAI_API_BASE_URL` | no | API base URL (default `https://token.peropero.net/v1`). |
+| `OPENAI_API_MODEL` | no | Model to use (default `glm-5.3-flash`). |
+| `OPENAI_API_BASE_URL` | no | API base URL (default `https://tokenhub.tencentmaas.com/plan/v3`). |
 | `REVIEW_LANGUAGE` | no | Review output language — codes (`en`, `zh`, `cn`, `ja`, `ko`, `es`, `fr`, `de`, `ru`, `pt`) or full names (default `cn`). |
 | `MAX_TOKENS_PER_CHUNK` | no | Max tokens per chunk for large PRs (default `6000`). |
 | `SILENT_MODE` | no | Set `false`/`0` to post a review instead of a comment (default `true`). |

@@ -995,6 +995,13 @@ def main() -> int:
         log(f"Pull Request #{number} is closed; removed any local review history.")
         return 0
 
+    # Merges from release branches back to master/main don't need review.
+    head_ref = pr.get("head", {}).get("ref", "")
+    base_ref = pr.get("base", {}).get("ref", "")
+    if head_ref.startswith("release/") and base_ref in ("master", "main"):
+        log(f"Skipping review: merge from {head_ref} to {base_ref}.")
+        return 0
+
     stored = history.load(owner, repo, number)
     fresh = fetch_conversation(gh, owner, repo, number)
 
