@@ -1,28 +1,34 @@
 #!/bin/bash
 
-# 先处理 tag 后缀（base/variant），得到 CLEAN_TAG
-tag_type=$(echo "$CI_COMMIT_TAG" | awk -F'-' '{print $NF}')
-if [ "$tag_type" = "base" ]; then
-    CLEAN_TAG=$(echo "$CI_COMMIT_TAG" | sed 's/-base$//')
-elif [ "$tag_type" = "variant" ]; then
-    CLEAN_TAG="$CI_COMMIT_TAG"
-else
-    echo "Tag suffix not 'base' or 'variant', exiting..."
-    exit 1
-fi
-
-# 从 CLEAN_TAG 提取纯数字版本号
+# 从 tag 中提取版本号
+# 从 CI_COMMIT_TAG 提取版本号，规则如下：
+#   1) x.x.x-base       -> 提取纯数字版本 x.x.x
+#   2) x.x.x-x-variant  -> 直接使用完整版本 x.x.x-x-variant
+#   3) 其他格式          -> 报错并中断
 extract_version() {
     local tag="$1"
+
+    # 兼容可选的 v/V 前缀
     tag="${tag#v}"
     tag="${tag#V}"
-    if [[ $tag =~ ^([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+
+    # 规则 1：x.x.x-base -> x.x.x
+    if [[ $tag =~ ^([0-9]+\.[0-9]+\.[0-9]+)-base$ ]]; then
         echo "${BASH_REMATCH[1]}"
-    else
-        echo "$tag"   # 降级
+        return 0
     fi
+
+    # 规则 2：x.x.x-x-variant -> 原样使用
+    if [[ $tag =~ ^[0-9]+\.[0-9]+\.[0-9]+-.+-variant$ ]]; then
+        echo "$tag"
+        return 0
+    fi
+
+    # 规则 3：其他形式直接报错中断
+    echo "Error: invalid version tag '$CI_COMMIT_TAG' (expected <version>-base or <version>-<x>-variant)" >&2
+    return 1
 }
-CLEAN_VERSION=$(extract_version "$CLEAN_TAG")
+CLEAN_VERSION=$(extract_version "$CI_COMMIT_TAG") || exit 1
 echo "Extracted version: $CLEAN_VERSION"
 
 # 包名处理
