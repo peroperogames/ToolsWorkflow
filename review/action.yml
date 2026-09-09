@@ -34,7 +34,7 @@ inputs:
   silent-mode:
     description: "Set 'true' to post a comment instead of a review."
     required: false
-    default: 'false'
+    default: 'true'
   state-dir:
     description: 'Directory for per-PR session/history files (default: <tmp>/ai-code-review).'
     required: false

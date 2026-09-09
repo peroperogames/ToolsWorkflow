@@ -204,7 +204,7 @@ def load_config() -> Config:
         language=os.environ.get("REVIEW_LANGUAGE", "en").strip() or "en",
         prompt=load_prompt(),
         max_tokens_per_chunk=max_tokens_per_chunk,
-        silent=env_bool("SILENT_MODE"),
+        silent=env_bool("SILENT_MODE", default=True),
         dry_run=env_bool("DRY_RUN"),
     )
 

@@ -57,7 +57,7 @@ python main.py
 | `REVIEW_LANGUAGE` | no | Review output language — codes (`en`, `zh`, `cn`, `ja`, `ko`, `es`, `fr`, `de`, `ru`, `pt`) or full names (default `cn`). |
 | `REVIEW_PROMPT` | no | Review prompt. If empty/unset, `prompt.md` next to the script is used. |
 | `MAX_TOKENS_PER_CHUNK` | no | Max tokens per chunk for large PRs (default `6000`). |
-| `SILENT_MODE` | no | Set `true`/`1` to post a comment instead of a review. |
+| `SILENT_MODE` | no | Set `false`/`0` to post a review instead of a comment (default `true`). |
 | `DRY_RUN` | no | Set `true`/`1` to print the review without posting. |
 | `REVIEW_STATE_DIR` | no | Directory for local per-PR history files (default `<tmp>/ai-code-review`). |
 | `TOOLS_REPO` | no | Target repo for prompt-improvement PRs (default `peroperogames/ToolsWorkflow`). |
