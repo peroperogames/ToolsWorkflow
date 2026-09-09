@@ -103,6 +103,7 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
 
+      - name: Publish with retry
         run: |
           for i in {1..3}; do
             npm publish --registry "$NPM_URL" --verbose && exit 0
