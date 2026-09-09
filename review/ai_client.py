@@ -44,7 +44,7 @@ class AIClient:
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.3,
-        max_tokens: int = 4000,
+        max_tokens: Optional[int] = None,
     ) -> str:
         """Send a chat request and return the assistant's text content.
 
@@ -59,8 +59,9 @@ class AIClient:
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
 
         last_error: Optional[Exception] = None
         for attempt in range(self.max_retries + 1):
@@ -102,6 +103,10 @@ class AIClient:
 
             message: Dict[str, Any] = choices[0].get("message") or {}
             content: str = message.get("content") or ""
+            # DeepSeek / reasoning models may put the actual output in
+            # reasoning_content when content is empty.
+            if not content:
+                content = message.get("reasoning_content") or ""
 
             usage = data.get("usage")
             if usage:

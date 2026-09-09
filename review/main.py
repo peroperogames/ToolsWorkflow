@@ -70,10 +70,12 @@ REPLY_SYSTEM_PROMPT = (
 INTENT_CLASSIFIER_PROMPT = (
     "Classify the intent of this GitHub comment directed at you (a code review bot).\n"
     "Reply with EXACTLY one word:\n"
+    "- 'review' if the user is asking you to review the PR, check the code, or "
+    "provide review feedback.\n"
     "- 'improve_prompt' if the user is asking to improve the review prompt.\n"
     "- 'code_change' if the user is asking you to write code, fix a bug, add a "
     "feature, refactor, or submit a PR with code changes.\n"
-    "- 'reply' for anything else (questions, review requests, etc.)."
+    "- 'reply' for anything else (questions, follow-ups, etc.)."
 )
 
 IMPROVE_PROMPT_SYSTEM_PROMPT = (
@@ -860,6 +862,78 @@ def handle_code_change(
     return 0
 
 
+def handle_review_request(
+    ai: AIClient,
+    gh: GitHubClient,
+    pr: Dict[str, Any],
+    body: str,
+    author: str,
+    owner: str,
+    repo: str,
+    number: int,
+    config: Config,
+    system_prompt: str,
+    conversation: str,
+    bot_login: str,
+) -> int:
+    """Run a full review when the user explicitly asks for one via @-mention."""
+    files = gh.list_files(owner, repo, number)
+    if not files:
+        gh.post_comment(owner, repo, number, f"@{author} 没有找到变更文件，无法评审。")
+        return 0
+
+    log(f"Review requested via @-mention ({len(files)} files, ~{len(conversation)} chars context)...")
+    review = perform_review(
+        ai, system_prompt, pr, files, config.max_tokens_per_chunk, conversation
+    )
+    if not review:
+        log("Error: perform_review returned empty — model may have hit a limit or returned no content.")
+        gh.post_comment(owner, repo, number, f"@{author} 评审失败，AI 返回了空内容。请稍后重试。")
+        return 0
+
+    review_text, raw_comments = extract_inline_comments(review)
+    inline = normalize_inline_comments(raw_comments, files)
+    event = determine_event(review_text)
+
+    if config.dry_run:
+        print(review_text)
+        return 0
+
+    try:
+        result = gh.post_review(
+            owner, repo, number, review_text, event=event, comments=inline
+        )
+    except Exception as exc:
+        log(f"Warning: posting review with inline comments failed ({exc}); retrying.")
+        result = gh.post_review(owner, repo, number, review_text, event=event)
+
+    posted_login = (result.get("user") or {}).get("login", "") or bot_login
+
+    for label in labels_for_event(event):
+        try:
+            gh.add_labels(owner, repo, number, [label])
+        except Exception:
+            pass
+
+    entries = merge_conversation(
+        history.load(owner, repo, number),
+        fetch_conversation(gh, owner, repo, number),
+    )
+    entries.append(
+        {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "who": posted_login,
+            "kind": "review",
+            "body": review_text,
+        }
+    )
+    history.save(owner, repo, number, entries[-MAX_CONVERSATION_ENTRIES:])
+
+    gh.post_comment(owner, repo, number, f"@{author} 评审已发布。")
+    log(f"Review posted on request ({event}).")
+    return 0
+
+
 def determine_event(review_text: str) -> str:
     """Map the review content to a GitHub review event."""
     t = review_text.lower()
@@ -963,6 +1037,10 @@ def main() -> int:
         if "code" in intent:
             return handle_code_change(
                 ai, gh, pr, body, author, owner, repo, number, conversation, bot_login
+            )
+        if "review" in intent:
+            return handle_review_request(
+                ai, gh, pr, body, author, owner, repo, number, config, system_prompt, conversation, bot_login
             )
 
         reply = generate_reply(ai, reply_prompt, conversation, author, body)
