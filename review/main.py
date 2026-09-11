@@ -905,12 +905,6 @@ def handle_review_request(
 
     posted_login = (result.get("user") or {}).get("login", "") or bot_login
 
-    for label in labels_for_event(event):
-        try:
-            gh.add_labels(owner, repo, number, [label])
-        except Exception:
-            pass
-
     entries = merge_conversation(
         history.load(owner, repo, number),
         fetch_conversation(gh, owner, repo, number),
@@ -943,14 +937,6 @@ def determine_event(review_text: str) -> str:
     if approved:
         return "APPROVE"
     return "COMMENT"
-
-
-def labels_for_event(event: str) -> List[str]:
-    if event == "REQUEST_CHANGES":
-        return ["needs-changes"]
-    if event == "APPROVE":
-        return ["ai-approved"]
-    return []
 
 
 def main() -> int:
@@ -1115,13 +1101,6 @@ def main() -> int:
             log(f"Warning: posting review with inline comments failed ({exc}); retrying without them.")
             result = gh.post_review(owner, repo, number, review_text, event=event)
             log(f"Posted review with event: {event}")
-
-    for label in labels_for_event(event):
-        try:
-            gh.add_labels(owner, repo, number, [label])
-            log(f"Added label: {label}")
-        except Exception as exc:  # noqa: BLE001 - labels are best-effort
-            log(f"Warning: failed to add label '{label}': {exc}")
 
     # Persist this run's review so the next run can build on it.
     entries.append(
