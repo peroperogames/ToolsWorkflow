@@ -996,7 +996,7 @@ def main() -> int:
         body = comment.get("body") or ""
         # Determine bot login from the conversation (bot-authored entries),
         # with an env-var fallback for the first run when no history exists yet.
-        bot_login = os.environ.get("BOT_LOGIN", "").strip() or "perotoolsbot[bot]"
+        bot_login = "perotoolsbot[bot]"
         if bot_login and not comment_mentions_bot(body, bot_login):
             log(f"Ignoring comment that does not @-mention the bot (@{bot_login}).")
             return 0

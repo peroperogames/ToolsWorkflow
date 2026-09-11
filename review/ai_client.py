@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from typing import Any, Dict, List, Optional
@@ -24,14 +25,14 @@ class AIClient:
         token: str,
         model: str = DEFAULT_MODEL,
         base_url: str = DEFAULT_BASE_URL,
-        timeout: int = 120,
-        max_retries: int = 3,
+        timeout: int = 180,
+        max_retries: int = 5,
     ) -> None:
         self.token = token
         self.model = model
         self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
-        self.max_retries = max_retries
+        self.timeout = int(os.environ.get("OPENAI_TIMEOUT", timeout))
+        self.max_retries = int(os.environ.get("OPENAI_MAX_RETRIES", max_retries))
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -75,7 +76,24 @@ class AIClient:
                     continue
                 raise RuntimeError(f"Network error calling OpenAI API: {exc}") from exc
 
-            # HTTP-level error: include the body and do not retry.
+            # Rate limit (429) and transient server errors (5xx): retry with
+            # backoff. TPM windows reset every minute, so wait longer for 429.
+            if resp.status_code == 429 or resp.status_code >= 500:
+                last_error = RuntimeError(
+                    f"OpenAI API error ({resp.status_code}): {resp.text[:200]}"
+                )
+                if attempt < self.max_retries:
+                    delay = min(30 * (2 ** attempt), 120)
+                    print(
+                        f"  Transient OpenAI error ({resp.status_code}), "
+                        f"retrying in {delay}s ({attempt + 1}/{self.max_retries + 1})...",
+                        file=sys.stderr,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise last_error
+
+            # Other HTTP errors (4xx): no retry.
             if resp.status_code >= 400:
                 raise RuntimeError(
                     f"OpenAI API error ({resp.status_code}): {resp.text[:500]}"

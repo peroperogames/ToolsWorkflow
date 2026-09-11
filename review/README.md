@@ -1,6 +1,6 @@
 # GitHub AI Code Review
 
-An AI-powered GitHub pull request reviewer. It fetches a pull request's diff via the GitHub REST API, sends it to an OpenAI-compatible chat completions endpoint, and posts the review back to the pull request (as `APPROVE`, `REQUEST_CHANGES`, or `COMMENT`).
+An AI-powered GitHub pull request reviewer. It fetches a pull request's diff via the GitHub REST API, sends it to an OpenAI-compatible chat completions endpoint, and posts the review back to the pull request as a comment (or as a review when `SILENT_MODE=false`).
 
 ## Usage (GitHub Action)
 
@@ -54,6 +54,8 @@ python main.py
 | `OPENAI_API_KEY` | yes | OpenAI (or compatible) API token. |
 | `OPENAI_API_MODEL` | no | Model to use (default `glm-5.3-flash`). |
 | `OPENAI_API_BASE_URL` | no | API base URL (default `https://tokenhub.tencentmaas.com/plan/v3`). |
+| `OPENAI_TIMEOUT` | no | API request timeout in seconds (default `180`). |
+| `OPENAI_MAX_RETRIES` | no | Retry count for timeouts/429/5xx errors (default `5`). |
 | `REVIEW_LANGUAGE` | no | Review output language — codes (`en`, `zh`, `cn`, `ja`, `ko`, `es`, `fr`, `de`, `ru`, `pt`) or full names (default `cn`). |
 | `MAX_TOKENS_PER_CHUNK` | no | Max tokens per chunk for large PRs (default `6000`). |
 | `SILENT_MODE` | no | Set `false`/`0` to post a review instead of a comment (default `true`). |
@@ -93,11 +95,15 @@ Triggering the workflow on `issue_comment` makes the bot answer comments that **
   The bot reads the current file contents, generates code changes, and
   submits a PR to the current repository's feature branch.
 
+- **Review request** — e.g. `@perotoolsbot review this PR for me.`. Runs a full
+  review on demand and posts it.
+
 Replying requires the GitHub App to have **`Issues: Read and write`** permission (issue comments use the Issues API, which is separate from `Pull requests`).
 
 ## Review pipeline
 
 1. Fetch PR metadata; if the PR is closed, delete any local history and stop.
+   Merges from `release/*` back to `master`/`main` are skipped.
 2. Load local per-PR history and fetch prior reviews/comments, merging them into
    conversation context.
 3. Build a diff payload from the per-file patches.
@@ -105,7 +111,7 @@ Replying requires the GitHub App to have **`Issues: Read and write`** permission
    (passing the full file list and conversation as context), and combine the results.
 5. Classify the review (`REQUEST_CHANGES` / `COMMENT` / `APPROVE`) from the
    presence of critical/warning keywords.
-6. Post the review (or comment in `SILENT_MODE`) and apply a best-effort label.
+6. Post the review (or comment in `SILENT_MODE`). No labels are applied.
 
 The review can also carry **inline line comments** (single-line and cross-line via `start_line`). The model emits them as a JSON `comments` block, which the script parses and posts alongside the review body; if GitHub rejects the line numbers, it falls back to a body-only review.
 
