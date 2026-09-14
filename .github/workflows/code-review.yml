@@ -7,6 +7,11 @@ on:
         description: 'OpenAI model to use for the review'
         required: false
         type: string
+        default: 'deepseek-v4-flash'
+      openai-fallback-model:
+        description: 'Fallback model used if the primary model fails or times out.'
+        required: false
+        type: string
         default: 'glm-5.3-flash'
       openai-base-url:
         description: 'OpenAI API base URL (for custom endpoints or proxies)'

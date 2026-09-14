@@ -10,6 +10,7 @@ The tool is fully configured through environment variables (no CLI arguments):
     GITHUB_TOKEN          (required) GitHub token with pull-requests write access.
     OPENAI_API_KEY        (required) OpenAI-compatible API token.
     OPENAI_API_MODEL      (optional) Model to use (default: gpt-4o).
+    OPENAI_API_MODEL_FALLBACK (optional) Fallback model used if the primary fails.
     OPENAI_API_BASE_URL   (optional) API base URL (default: https://api.openai.com/v1).
     REVIEW_LANGUAGE       (optional) Review output language (default: en).
     MAX_TOKENS_PER_CHUNK  (optional) Max tokens per chunk for large PRs (default: 6000).
@@ -147,6 +148,7 @@ class Config:
     github_token: str
     openai_token: str
     model: str
+    fallback_model: str
     base_url: str
     language: str
     prompt: str
@@ -196,6 +198,7 @@ def load_config() -> Config:
         github_token=github_token,
         openai_token=openai_token,
         model=os.environ.get("OPENAI_API_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL,
+        fallback_model=os.environ.get("OPENAI_API_MODEL_FALLBACK", "").strip(),
         base_url=os.environ.get("OPENAI_API_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL,
         language=os.environ.get("REVIEW_LANGUAGE", "en").strip() or "en",
         prompt=load_prompt(),
@@ -966,7 +969,12 @@ def main() -> int:
     owner, repo, number = resolve_pull_request(event_name, payload)
 
     gh = GitHubClient(config.github_token)
-    ai = AIClient(config.openai_token, model=config.model, base_url=config.base_url)
+    ai = AIClient(
+        config.openai_token,
+        model=config.model,
+        base_url=config.base_url,
+        fallback_model=config.fallback_model,
+    )
 
     log(f"Repository: {owner}/{repo}")
     log(f"Pull Request: #{number}")

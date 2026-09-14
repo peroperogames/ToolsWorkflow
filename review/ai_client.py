@@ -27,12 +27,16 @@ class AIClient:
         base_url: str = DEFAULT_BASE_URL,
         timeout: int = 180,
         max_retries: int = 5,
+        fallback_model: Optional[str] = None,
     ) -> None:
         self.token = token
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = int(os.environ.get("OPENAI_TIMEOUT", timeout))
         self.max_retries = int(os.environ.get("OPENAI_MAX_RETRIES", max_retries))
+        self.fallback_model = (
+            fallback_model or os.environ.get("OPENAI_API_MODEL_FALLBACK", "")
+        ).strip()
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -49,15 +53,44 @@ class AIClient:
     ) -> str:
         """Send a chat request and return the assistant's text content.
 
-        Network/timeout errors are retried with exponential backoff; HTTP API
-        errors (4xx/5xx) are raised immediately without retrying.
+        Tries the primary model first; if it fails (timeout, 429, 5xx, or any
+        other error) and a fallback model is configured, retries with that.
         """
+        models = [self.model]
+        if self.fallback_model and self.fallback_model != self.model:
+            models.append(self.fallback_model)
+
+        last_error: Optional[Exception] = None
+        for index, model in enumerate(models):
+            try:
+                return self._chat_with_model(model, messages, temperature, max_tokens)
+            except RuntimeError as exc:
+                last_error = exc
+                if index + 1 < len(models):
+                    print(
+                        f"  Model '{model}' failed ({exc}); "
+                        f"falling back to '{models[index + 1]}'...",
+                        file=sys.stderr,
+                    )
+                    continue
+                raise
+
+        raise last_error or RuntimeError("No model configured")
+
+    def _chat_with_model(
+        self,
+        model: str,
+        messages: List[Dict[str, str]],
+        temperature: float,
+        max_tokens: Optional[int],
+    ) -> str:
+        """Run the request/retry loop for a single model."""
         url = self.base_url
         if not url.endswith("/chat/completions"):
             url = f"{url}/chat/completions"
 
         payload = {
-            "model": self.model,
+            "model": model,
             "messages": messages,
             "temperature": temperature,
         }
@@ -70,7 +103,10 @@ class AIClient:
                 resp = self.session.post(url, json=payload, timeout=self.timeout)
             except (requests.Timeout, requests.ConnectionError) as exc:
                 last_error = exc
-                if attempt < self.max_retries:
+                # With a fallback model configured, fail over quickly instead
+                # of burning many retries on a slow/hanging primary model.
+                limit = 1 if self.fallback_model else self.max_retries
+                if attempt < limit:
                     delay = min(2 * (2 ** attempt), 16)
                     time.sleep(delay)
                     continue

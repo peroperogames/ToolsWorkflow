@@ -19,7 +19,7 @@ jobs:
   review:
     uses: peroperogames/ToolsWorkflow/.github/workflows/code-review.yml@main
     with:
-      openai-model: 'glm-5.3-flash'
+      openai-model: 'deepseek-v4-flash'
       openai-base-url: 'https://tokenhub.tencentmaas.com/plan/v3'
       review-language: 'cn'
     secrets:
@@ -52,7 +52,8 @@ python main.py
 | --- | --- | --- |
 | `GITHUB_TOKEN` | yes | GitHub token with `pull-requests: write` on the target repo. |
 | `OPENAI_API_KEY` | yes | OpenAI (or compatible) API token. |
-| `OPENAI_API_MODEL` | no | Model to use (default `glm-5.3-flash`). |
+| `OPENAI_API_MODEL` | no | Model to use (default `deepseek-v4-flash`). |
+| `OPENAI_API_MODEL_FALLBACK` | no | Fallback model used if the primary fails or times out (default `glm-5.3-flash`). |
 | `OPENAI_API_BASE_URL` | no | API base URL (default `https://tokenhub.tencentmaas.com/plan/v3`). |
 | `OPENAI_TIMEOUT` | no | API request timeout in seconds (default `180`). |
 | `OPENAI_MAX_RETRIES` | no | Retry count for timeouts/429/5xx errors (default `5`). |

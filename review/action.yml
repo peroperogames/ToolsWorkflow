@@ -14,6 +14,10 @@ inputs:
   openai-model:
     description: 'Model to use.'
     required: false
+    default: 'deepseek-v4-flash'
+  openai-fallback-model:
+    description: 'Fallback model used if the primary model fails or times out.'
+    required: false
     default: 'glm-5.3-flash'
   openai-base-url:
     description: 'OpenAI-compatible API base URL.'
@@ -49,6 +53,7 @@ runs:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         OPENAI_API_KEY: ${{ inputs.openai-api-key }}
         OPENAI_API_MODEL: ${{ inputs.openai-model }}
+        OPENAI_API_MODEL_FALLBACK: ${{ inputs.openai-fallback-model }}
         OPENAI_API_BASE_URL: ${{ inputs.openai-base-url }}
         REVIEW_LANGUAGE: ${{ inputs.review-language }}
         MAX_TOKENS_PER_CHUNK: ${{ inputs.max-tokens-per-chunk }}
