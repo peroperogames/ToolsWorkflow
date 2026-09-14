@@ -602,22 +602,61 @@ def _as_int(value: Any) -> Optional[int]:
 def extract_inline_comments(review_text: str) -> Tuple[str, List[Dict[str, Any]]]:
     """Extract a JSON ``{"comments": [...]}`` block from the review.
 
-    Returns the cleaned review text (JSON block removed) and the list of raw
-    inline comments.
+    Returns the cleaned review text (JSON block and its heading removed) and
+    the list of raw inline comments.
     """
     comments: List[Dict[str, Any]] = []
     cleaned = review_text
     pattern = re.compile(r"```[^\n`]*\n([\s\S]*?)\n```")
     for match in pattern.finditer(review_text):
-        try:
-            data = json.loads(match.group(1))
-        except ValueError:
+        body = match.group(1)
+        # Only touch fenced blocks that are meant to be the comments payload;
+        # remove them even if the JSON is malformed so raw JSON is never posted.
+        if '"comments"' not in body:
             continue
+        try:
+            data = json.loads(body)
+        except ValueError:
+            data = None
         if isinstance(data, dict) and isinstance(data.get("comments"), list):
             comments.extend(c for c in data["comments"] if isinstance(c, dict))
-            cleaned = cleaned.replace(match.group(0), "")
+        cleaned = cleaned.replace(match.group(0), "")
+
+    # Drop the now-empty "Inline Comments" heading and any trailing separator.
+    cleaned = re.sub(
+        r"(?:\n+-{3,})?\s*\n*#{1,6}\s*inline comments\s*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\n+-{3,}\s*$", "", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return cleaned, comments
+
+
+def post_inline_comments(
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    commit_id: str,
+    comments: List[Dict[str, Any]],
+) -> int:
+    """Post inline comments individually (used when there is no review to attach them to)."""
+    if not comments:
+        return 0
+    if not commit_id:
+        log("Warning: no commit id available; skipping inline comments.")
+        return 0
+    posted = 0
+    for c in comments:
+        try:
+            gh.post_review_comment(owner, repo, number, commit_id, c)
+            posted += 1
+        except Exception as exc:  # noqa: BLE001 - one bad comment shouldn't stop the rest
+            log(f"Warning: inline comment failed ({c.get('path')}:{c.get('line')}): {exc}")
+    log(f"Posted {posted}/{len(comments)} inline comment(s).")
+    return posted
 
 
 def normalize_inline_comments(
@@ -905,6 +944,9 @@ def handle_review_request(
     except Exception as exc:
         log(f"Warning: posting review with inline comments failed ({exc}); retrying.")
         result = gh.post_review(owner, repo, number, review_text, event=event)
+        post_inline_comments(
+            gh, owner, repo, number, pr.get("head", {}).get("sha", ""), inline
+        )
 
     posted_login = (result.get("user") or {}).get("login", "") or bot_login
 
@@ -1098,6 +1140,10 @@ def main() -> int:
     if config.silent:
         result = gh.post_comment(owner, repo, number, review_text)
         log("Posted review as a regular comment (silent mode).")
+        # A regular comment cannot carry inline comments, so post them one by one.
+        post_inline_comments(
+            gh, owner, repo, number, pr.get("head", {}).get("sha", ""), inline
+        )
     else:
         try:
             result = gh.post_review(owner, repo, number, review_text, event=event, comments=inline)
@@ -1109,6 +1155,9 @@ def main() -> int:
             log(f"Warning: posting review with inline comments failed ({exc}); retrying without them.")
             result = gh.post_review(owner, repo, number, review_text, event=event)
             log(f"Posted review with event: {event}")
+            post_inline_comments(
+                gh, owner, repo, number, pr.get("head", {}).get("sha", ""), inline
+            )
 
     # Persist this run's review so the next run can build on it.
     entries.append(

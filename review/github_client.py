@@ -116,6 +116,20 @@ class GitHubClient:
             json=payload,
         )
 
+    def post_review_comment(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        commit_id: str,
+        comment: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Post a single inline review comment (no review state attached)."""
+        payload = {"commit_id": commit_id, **comment}
+        return self._request(
+            "POST", f"/repos/{owner}/{repo}/pulls/{number}/comments", json=payload
+        )
+
     def post_comment(self, owner: str, repo: str, number: int, body: str) -> Dict[str, Any]:
         """Post a regular issue comment (used in silent mode)."""
         return self._request(
