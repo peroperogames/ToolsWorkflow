@@ -69,13 +69,19 @@ REPLY_SYSTEM_PROMPT = (
 
 INTENT_CLASSIFIER_PROMPT = (
     "Classify the intent of this GitHub comment directed at you (a code review bot).\n"
-    "Reply with EXACTLY one word:\n"
-    "- 'review' if the user is asking you to review the PR, check the code, or "
-    "provide review feedback.\n"
-    "- 'improve_prompt' if the user is asking to improve the review prompt.\n"
-    "- 'code_change' if the user is asking you to write code, fix a bug, add a "
-    "feature, refactor, or submit a PR with code changes.\n"
-    "- 'reply' for anything else (questions, follow-ups, etc.)."
+    "Reply with EXACTLY one of these four words, nothing else:\n"
+    "- 'improve_prompt' — the user wants you to change HOW you review: your "
+    "instructions, your prompt, prompt.md, your review style, wording, or format.\n"
+    "- 'review' — the user wants you to review this PR now.\n"
+    "- 'code_change' — the user wants the SOURCE CODE of the repo under review "
+    "changed (fix a bug, add a feature, refactor).\n"
+    "- 'reply' — anything else: questions, acknowledgements, discussion.\n"
+    "Rules:\n"
+    "- Feedback about your own reviewing behaviour (too long, use inline "
+    "comments, be stricter, ...) is 'improve_prompt', NOT 'code_change'.\n"
+    "- Only choose 'code_change' when the repo's actual source code must change.\n"
+    "- If a comment contains an acknowledgement or quoted reply and no clear "
+    "request, choose 'reply'."
 )
 
 IMPROVE_PROMPT_SYSTEM_PROMPT = (
@@ -697,6 +703,18 @@ def _strip_mention(body: str, bot_login: str) -> str:
     return body.strip()
 
 
+def pick_intent(raw: str) -> str:
+    """Map a classifier response to one of the known intents."""
+    text = (raw or "").strip().lower()
+    # Most specific first — "improve_prompt" must win over a loose "review" match.
+    for intent in ("improve_prompt", "code_change", "review"):
+        if intent in text:
+            return intent
+    if "improve" in text or "prompt" in text:
+        return "improve_prompt"
+    return "reply"
+
+
 def classify_intent(ai: AIClient, body: str) -> str:
     """Classify whether a comment asks to improve the prompt, or is a normal reply."""
     try:
@@ -707,7 +725,9 @@ def classify_intent(ai: AIClient, body: str) -> str:
             ],
             temperature=0.0,
         )
-        return result.strip().lower()
+        intent = pick_intent(result)
+        log(f"Classified intent: {intent}")
+        return intent
     except Exception as exc:  # noqa: BLE001 - fall back to a normal reply
         log(f"Warning: intent classification failed ({exc}); defaulting to reply.")
         return "reply"
@@ -1069,15 +1089,15 @@ def main() -> int:
 
         # Classify intent and route.
         intent = classify_intent(ai, body)
-        if "improve" in intent:
+        if intent == "improve_prompt":
             return handle_improve_prompt(
                 ai, gh, body, author, owner, repo, number, bot_login
             )
-        if "code" in intent:
+        if intent == "code_change":
             return handle_code_change(
                 ai, gh, pr, body, author, owner, repo, number, conversation, bot_login
             )
-        if "review" in intent:
+        if intent == "review":
             return handle_review_request(
                 ai, gh, pr, body, author, owner, repo, number, config, system_prompt, conversation, bot_login
             )
