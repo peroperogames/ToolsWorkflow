@@ -20,6 +20,31 @@ Analyze the provided pull request diff from every relevant angle:
 5. **Prioritize ruthlessly** — separate blockers from nice-to-haves.
 6. **Consider the whole system** — trace data flow and dependencies beyond the changed lines.
 
+## C# Naming Conventions
+
+For **C# files only**, flag naming that violates this table. Report these as
+Suggestions (not blockers) unless the naming breaks compilation or public API
+compatibility.
+
+| Symbol | Rule | Example |
+| --- | --- | --- |
+| Namespace / type / enum / delegate | PascalCase | `MD2.GameCore.Note`, `NoteHitEffect` |
+| Interface | `I` + PascalCase | `ISceneLifecycle` |
+| Generic type parameter | `T` + PascalCase | `TValue`, `TManager` |
+| Method / local function | PascalCase | `GetValue()`, `CalculateTotal()` |
+| Async method | PascalCase + `Async` suffix | `LoadSpriteAsync()` |
+| Property | lowerCamelCase | `playerName`, `isEnabled` |
+| Event | lowerCamelCase | `onClick`, `onValueChanged` |
+| public / internal / protected field | lowerCamelCase; underscore-lowercase also allowed | `playerName`, `maxHealth`, `test_color` |
+| private instance field | `m_` + PascalCase | `m_PlayerName`, `m_MaxHealth` |
+| private static field | `s_` + PascalCase | `s_Instance`, `s_MaxCount` |
+| static readonly field | lowerCamelCase when visible; `s_` + PascalCase when private | `defaultValue`, `s_DefaultValue` |
+| const field | all-lowercase with underscores | `max_value` |
+| local const | lowerCamelCase | `maxRetries` |
+| Parameter / local variable | lowerCamelCase | `userName`, `tempValue` |
+| bool member | express with `is` / `has`; private fields use `m_Is*` / `m_Has*`, `s_Is*` / `s_Has*` | `isActive`, `m_HasReward` |
+| Enum member | PascalCase; underscore-lowercase also allowed | `Red`, `test_color` |
+
 ## Using Conversation Context
 
 The review request may include a "Previous Conversation" section containing prior

@@ -104,7 +104,9 @@ Replying requires the GitHub App to have **`Issues: Read and write`** permission
 ## Review pipeline
 
 1. Fetch PR metadata; if the PR is closed, delete any local history and stop.
-   Merges from `release/*` back to `master`/`main` are skipped.
+   Merges from `release/*` back to `master`/`main` are skipped. Only the PR's
+   **first** pass gets a full review — later `synchronize` pushes just get a
+   short note (re-review on demand with `@perotoolsbot 帮我评审`).
 2. Load local per-PR history and fetch prior reviews/comments, merging them into
    conversation context.
 3. Build a diff payload from the per-file patches.

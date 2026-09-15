@@ -703,6 +703,22 @@ def _strip_mention(body: str, bot_login: str) -> str:
     return body.strip()
 
 
+# Comments containing these target the bot's own review setup rather than the
+# repo's source code, so they are prompt improvements regardless of what the
+# LLM classifier guesses.
+PROMPT_INTENT_HINTS = (
+    "toolsworkflow",
+    "prompt.md",
+    "提示词",
+    "评审规范",
+    "评审标准",
+    "评审规则",
+    "代码规范",
+    "review prompt",
+    "review standard",
+)
+
+
 def pick_intent(raw: str) -> str:
     """Map a classifier response to one of the known intents."""
     text = (raw or "").strip().lower()
@@ -717,6 +733,14 @@ def pick_intent(raw: str) -> str:
 
 def classify_intent(ai: AIClient, body: str) -> str:
     """Classify whether a comment asks to improve the prompt, or is a normal reply."""
+    # Deterministic guard: anything that clearly targets the bot's own review
+    # setup is prompt improvement, whatever the LLM would have guessed.
+    text = (body or "").lower()
+    for hint in PROMPT_INTENT_HINTS:
+        if hint in text:
+            log(f"Intent: improve_prompt (matched hint '{hint}').")
+            return "improve_prompt"
+
     try:
         result = ai.chat(
             [
@@ -1126,6 +1150,20 @@ def main() -> int:
         return 0
 
     # Review mode.
+    # Only the PR's first pass gets a full review. Later pushes (synchronize)
+    # just get a brief note — a re-review can be requested with an @-mention.
+    if (
+        event_name in ("pull_request", "pull_request_target")
+        and payload.get("action") == "synchronize"
+        and any((e.get("who") or "").endswith("[bot]") for e in fresh)
+    ):
+        gh.post_comment(
+            owner, repo, number,
+            "代码已更新。如需重新评审，请 `@perotoolsbot 帮我评审`。",
+        )
+        log("Skipping full review on synchronize (this PR was already reviewed).")
+        return 0
+
     files = gh.list_files(owner, repo, number)
     log(f"Changed files: {len(files)}")
 
