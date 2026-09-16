@@ -59,7 +59,6 @@ python main.py
 | `OPENAI_MAX_RETRIES` | no | Retry count for timeouts/429/5xx errors (default `5`). |
 | `REVIEW_LANGUAGE` | no | Review output language — codes (`en`, `zh`, `cn`, `ja`, `ko`, `es`, `fr`, `de`, `ru`, `pt`) or full names (default `cn`). |
 | `MAX_TOKENS_PER_CHUNK` | no | Max tokens per chunk for large PRs (default `6000`). |
-| `DIFF_CHANGED_ONLY` | no | Send only changed (`+`/`-`) lines to the model. Set to `0`/`false` to include unchanged context lines (default: on). |
 | `SILENT_MODE` | no | Post a comment instead of a review. Set to `0`/`false` to post a review with `APPROVE`/`REQUEST_CHANGES` (default: on). |
 | `DRY_RUN` | no | Print the review without posting. Set to `1`/`true` to enable (default: off). |
 | `REVIEW_STATE_DIR` | no | Directory for local per-PR history files (default `<tmp>/ai-code-review`). |
@@ -110,14 +109,16 @@ Replying requires the GitHub App to have **`Issues: Read and write`** permission
    incremental pass (short plain summary + inline comments) instead.
 2. Load local per-PR history and fetch prior reviews/comments, merging them into
    conversation context.
-3. Build the diff payload from the per-file patches — by default only the
-   changed (`+`/`-`) lines are sent, each prefixed with its absolute line number
-   (`DIFF_CHANGED_ONLY=0` restores the unchanged context lines).
+3. Build the diff payload from the per-file patches — only the changed (`+`/`-`)
+   lines are sent, each prefixed with its absolute line number.
 4. If the payload still exceeds `MAX_TOKENS_PER_CHUNK`, review it in chunks and
    then merge the chunk reviews back into a **single** review body.
 5. Classify the review (`REQUEST_CHANGES` / `COMMENT` / `APPROVE`) from the
    presence of critical/warning keywords.
 6. Post the review (or comment in `SILENT_MODE`). No labels are applied.
+7. On a later push, also ask the model which of its own unresolved review
+   threads the new code has addressed, and resolve those. Thread resolution
+   uses the GraphQL API — the REST API cannot do it.
 
 The review can also carry **inline line comments** (single-line and cross-line via `start_line`). The model emits them as a JSON `comments` block, which the script parses and posts alongside the review body; if GitHub rejects the line numbers, it falls back to a body-only review.
 

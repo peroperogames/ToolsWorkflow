@@ -7,6 +7,36 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+# Review-thread resolution is GraphQL-only — the REST API cannot do it.
+REVIEW_THREADS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 50, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          comments(first: 5) {
+            nodes { body author { login } }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+RESOLVE_THREAD_MUTATION = """
+mutation($threadId: ID!) {
+  resolveReviewThread(input: {threadId: $threadId}) {
+    thread { id isResolved }
+  }
+}
+"""
+
 
 class GitHubClient:
     """Minimal GitHub REST API client for pull request reviews."""
@@ -34,6 +64,48 @@ class GitHubClient:
                 f"GitHub API error ({resp.status_code}) {method} {path}: {detail}"
             )
         return resp.json()
+
+    def graphql(
+        self, query: str, variables: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Run a GraphQL query/mutation (review threads need GraphQL)."""
+        resp = self.session.post(
+            f"{self.api_url}/graphql",
+            json={"query": query, "variables": variables or {}},
+            timeout=60,
+        )
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"GitHub GraphQL error ({resp.status_code}): {resp.text[:500]}"
+            )
+        data = resp.json()
+        if data.get("errors"):
+            raise RuntimeError(f"GitHub GraphQL error: {data['errors']}")
+        return data.get("data") or {}
+
+    def list_review_threads(
+        self, owner: str, repo: str, number: int
+    ) -> List[Dict[str, Any]]:
+        """List the pull request's review threads, resolved ones included."""
+        threads: List[Dict[str, Any]] = []
+        cursor: Optional[str] = None
+        while True:
+            data = self.graphql(
+                REVIEW_THREADS_QUERY,
+                {"owner": owner, "name": repo, "number": number, "cursor": cursor},
+            )
+            pull = ((data.get("repository") or {}).get("pullRequest")) or {}
+            connection = pull.get("reviewThreads") or {}
+            threads.extend(connection.get("nodes") or [])
+            page = connection.get("pageInfo") or {}
+            if not page.get("hasNextPage"):
+                break
+            cursor = page.get("endCursor")
+        return threads
+
+    def resolve_review_thread(self, thread_id: str) -> Dict[str, Any]:
+        """Mark a review thread as resolved."""
+        return self.graphql(RESOLVE_THREAD_MUTATION, {"threadId": thread_id})
 
     def get_pull_request(self, owner: str, repo: str, number: int) -> Dict[str, Any]:
         """Fetch metadata for a single pull request."""

@@ -50,14 +50,6 @@ DEFAULT_MAX_TOKENS_PER_CHUNK = 6000
 MAX_CONVERSATION_ENTRIES = 50
 MAX_CONVERSATION_ENTRY_CHARS = 4000
 
-# Send only changed (+/-) lines to the model; set DIFF_CHANGED_ONLY=0 to include
-# the unchanged context lines as well (larger payload, more context).
-DIFF_CHANGED_ONLY = os.environ.get("DIFF_CHANGED_ONLY", "1").strip().lower() not in (
-    "0",
-    "false",
-    "no",
-    "off",
-)
 
 # Minimal fallback used only when prompt.md is empty.
 FALLBACK_PROMPT = (
@@ -393,14 +385,13 @@ def comment_mentions_bot(body: str, login: str) -> bool:
     return any(f"@{c}" in lowered for c in candidates)
 
 
-def annotate_diff(patch: str, changed_only: bool = True) -> str:
-    """Number each diff line with its absolute file line.
+def annotate_diff(patch: str) -> str:
+    """Number each changed diff line with its absolute file line.
 
     ``+`` lines get the new-file (RIGHT) line number, ``-`` lines the old-file
     (LEFT) one, so the model can quote a line instead of doing hunk-header
-    arithmetic. With ``changed_only`` the unchanged context lines are dropped
-    to keep the payload small — the counters still advance, so the numbers stay
-    correct.
+    arithmetic. Unchanged context lines are dropped to keep the payload small —
+    the counters still advance, so the numbers stay correct.
     """
     out: List[str] = []
     old_line: Optional[int] = None
@@ -421,8 +412,6 @@ def annotate_diff(patch: str, changed_only: bool = True) -> str:
         elif line.startswith("\\"):
             out.append(line)
         elif new_line is not None and old_line is not None:
-            if not changed_only:
-                out.append(f"{new_line:>5}: {line[1:]}")
             new_line += 1
             old_line += 1
         else:
@@ -511,7 +500,7 @@ def build_diff_text(
         lines.append(f"### {filename} ({status}) +{additions} -{deletions}")
         if patch:
             lines.append("```diff")
-            lines.append(annotate_diff(patch, changed_only=DIFF_CHANGED_ONLY))
+            lines.append(annotate_diff(patch))
             lines.append("```")
         else:
             lines.append("_(no textual patch available)_")
@@ -553,6 +542,20 @@ def review_files(
     ]
     return ai.chat(messages)
 
+
+RESOLVE_DECIDER_PROMPT = (
+    "Earlier review comments of yours on a pull request are listed below as "
+    "unresolved threads, and new commits have just been pushed.\n"
+    "Decide which of those threads are now ADDRESSED by the current code and "
+    "can be marked resolved.\n"
+    'Reply with ONLY a JSON object: {"resolved": ["<thread id>", ...]}\n'
+    "Rules:\n"
+    "- Include a thread only when the current code clearly fixes or removes the "
+    "issue it raised.\n"
+    "- If the concern is still present, or you cannot tell, LEAVE IT OUT — an "
+    "unresolved thread costs nothing, a wrongly resolved one hides a bug.\n"
+    "- Never include ids that are not in the list."
+)
 
 INCREMENTAL_DIRECTIVE = (
     "\n\n## Incremental Review Mode\n\n"
@@ -1033,6 +1036,107 @@ def _parse_json_response(text: str) -> Dict[str, Any]:
     return json.loads(text)
 
 
+def _first_json_object(text: str) -> Optional[Dict[str, Any]]:
+    """Return the first JSON object embedded in ``text``, if any."""
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text or ""):
+        if char != "{":
+            continue
+        try:
+            obj, _ = decoder.raw_decode(text, index)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
+def decide_resolved_threads(
+    ai: AIClient,
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    pr: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    bot_login: str,
+) -> int:
+    """Resolve the review threads that the latest changes have addressed."""
+    try:
+        threads = gh.list_review_threads(owner, repo, number)
+    except Exception as exc:  # noqa: BLE001 - best-effort, never block the review
+        log(f"Warning: could not list review threads: {exc}")
+        return 0
+
+    candidates: List[Dict[str, Any]] = []
+    for thread in threads:
+        if thread.get("isResolved"):
+            continue
+        nodes = (thread.get("comments") or {}).get("nodes") or []
+        if not nodes:
+            continue
+        author = ((nodes[0].get("author") or {}).get("login")) or ""
+        # Only resolve our own threads, never a human reviewer's.
+        if not author.endswith("[bot]"):
+            continue
+        candidates.append(
+            {
+                "id": thread.get("id"),
+                "path": thread.get("path"),
+                "outdated": bool(thread.get("isOutdated")),
+                "body": " ".join((nodes[0].get("body") or "").split())[:600],
+            }
+        )
+
+    if not candidates:
+        log("No unresolved bot review threads to consider.")
+        return 0
+
+    log(f"Judging {len(candidates)} unresolved thread(s)...")
+    listing = "\n".join(
+        f"- id: {c['id']}\n  path: {c['path']}\n  outdated: {c['outdated']}\n"
+        f"  comment: {c['body']}"
+        for c in candidates
+    )
+    messages = [
+        {"role": "system", "content": RESOLVE_DECIDER_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                "## Unresolved threads\n\n"
+                + listing
+                + "\n\n## Current changes\n\n"
+                + build_diff_text(pr, files)
+            ),
+        },
+    ]
+    try:
+        raw = ai.chat(messages, temperature=0.0)
+    except Exception as exc:  # noqa: BLE001
+        log(f"Warning: thread-resolution decision failed: {exc}")
+        return 0
+
+    data = _first_json_object(raw or "")
+    if not data or not isinstance(data.get("resolved"), list):
+        log("Thread-resolution decision returned no usable JSON; resolving nothing.")
+        return 0
+
+    wanted = {str(x) for x in data["resolved"]}
+    known = {str(c["id"]) for c in candidates}
+    resolved = 0
+    for c in candidates:
+        if str(c["id"]) not in wanted or str(c["id"]) not in known:
+            continue
+        try:
+            gh.resolve_review_thread(c["id"])
+            resolved += 1
+            log(f"Resolved thread on {c['path']}.")
+        except Exception as exc:  # noqa: BLE001 - one failure shouldn't stop the rest
+            log(f"Warning: failed to resolve thread on {c['path']}: {exc}")
+    log(f"Resolved {resolved}/{len(candidates)} thread(s).")
+    return resolved
+
+
 def handle_code_change(
     ai: AIClient,
     gh: GitHubClient,
@@ -1398,6 +1502,12 @@ def main() -> int:
             post_inline_comments(
                 gh, owner, repo, number, pr.get("head", {}).get("sha", ""), inline
             )
+
+    # On a later push, let the model retire the threads the new code fixed.
+    if incremental:
+        decide_resolved_threads(
+            ai, gh, owner, repo, number, pr, files, "perotoolsbot[bot]"
+        )
 
     # Persist this run's review so the next run can build on it.
     entries.append(
