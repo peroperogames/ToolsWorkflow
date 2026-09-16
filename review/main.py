@@ -605,20 +605,59 @@ def _as_int(value: Any) -> Optional[int]:
     return None
 
 
-def extract_inline_comments(review_text: str) -> Tuple[str, List[Dict[str, Any]]]:
-    """Extract a JSON ``{"comments": [...]}`` block from the review.
+def _heading_start_above(text: str, index: int) -> int:
+    """Offset of the markdown heading directly above ``index``.
 
-    Returns the cleaned review text (JSON block and its heading removed) and
-    the list of raw inline comments.
+    Returns ``index`` unchanged when no heading sits right above it (only blank
+    lines may separate them). The heading's wording does not matter — whatever
+    label the model invented for the comments block goes away with it.
+    """
+    lines = text[:index].split("\n")
+    i = len(lines) - 1
+    while i >= 0 and not lines[i].strip():
+        i -= 1
+    if i < 0 or not re.match(r"^#{1,6}\s+\S", lines[i]):
+        return index
+    return len("\n".join(lines[:i])) + (1 if i > 0 else 0)
+
+
+def is_comments_payload(body: str) -> bool:
+    """Is this fenced block the inline-comments payload we asked for?
+
+    Requires the ``comments`` key *and* the per-entry ``path``/``body`` fields,
+    so a JSON sample in the review that merely happens to contain a ``comments``
+    key is left alone.
+    """
+    if '"comments"' not in body:
+        return False
+    try:
+        data = json.loads(body)
+    except ValueError:
+        # Malformed payload: fall back to the structural signature.
+        return '"path"' in body and '"body"' in body
+    if not isinstance(data, dict) or not isinstance(data.get("comments"), list):
+        return False
+    entries = [c for c in data["comments"] if isinstance(c, dict)]
+    if not entries:
+        # An empty payload is only accepted when it carries nothing else.
+        return set(data) == {"comments"}
+    return all("path" in c and "body" in c for c in entries)
+
+
+def extract_inline_comments(review_text: str) -> Tuple[str, List[Dict[str, Any]]]:
+    """Extract the JSON ``{"comments": [...]}`` block(s) from the review.
+
+    Returns the review text with those blocks (and their section headings)
+    removed, plus the raw inline comments.
     """
     comments: List[Dict[str, Any]] = []
-    cleaned = review_text
+    spans: List[Tuple[int, int]] = []
     pattern = re.compile(r"```[^\n`]*\n([\s\S]*?)\n```")
     for match in pattern.finditer(review_text):
         body = match.group(1)
-        # Only touch fenced blocks that are meant to be the comments payload;
-        # remove them even if the JSON is malformed so raw JSON is never posted.
-        if '"comments"' not in body:
+        # Blocks that are not our payload — including malformed ones — are
+        # removed anyway, so raw JSON never ends up in the posted review.
+        if not is_comments_payload(body):
             continue
         try:
             data = json.loads(body)
@@ -626,15 +665,14 @@ def extract_inline_comments(review_text: str) -> Tuple[str, List[Dict[str, Any]]
             data = None
         if isinstance(data, dict) and isinstance(data.get("comments"), list):
             comments.extend(c for c in data["comments"] if isinstance(c, dict))
-        cleaned = cleaned.replace(match.group(0), "")
+        spans.append((match.start(), match.end()))
 
-    # Drop the now-empty "Inline Comments" heading and any trailing separator.
-    cleaned = re.sub(
-        r"(?:\n+-{3,})?\s*\n*#{1,6}\s*inline comments\s*$",
-        "",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
+    # Remove from the end backwards so earlier offsets stay valid.
+    cleaned = review_text
+    for start, end in reversed(spans):
+        cleaned = cleaned[: _heading_start_above(cleaned, start)] + cleaned[end:]
+
+    cleaned = re.sub(r"\n+-{3,}\s*\n+-{3,}\s*$", "", cleaned)
     cleaned = re.sub(r"\n+-{3,}\s*$", "", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return cleaned, comments
@@ -665,29 +703,116 @@ def post_inline_comments(
     return posted
 
 
+def index_diff_lines(patch: str) -> List[Dict[str, Any]]:
+    """Index every line of a patch as ``{"side", "line", "text"}``.
+
+    Context lines appear on both sides; ``+`` lines are RIGHT, ``-`` are LEFT.
+    """
+    out: List[Dict[str, Any]] = []
+    old_line: Optional[int] = None
+    new_line: Optional[int] = None
+    for raw in patch.splitlines():
+        if raw.startswith("@@"):
+            match = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", raw)
+            if match:
+                old_line = int(match.group(1))
+                new_line = int(match.group(2))
+            continue
+        if raw.startswith("+") and new_line is not None:
+            out.append({"side": "RIGHT", "line": new_line, "text": raw[1:]})
+            new_line += 1
+        elif raw.startswith("-") and old_line is not None:
+            out.append({"side": "LEFT", "line": old_line, "text": raw[1:]})
+            old_line += 1
+        elif raw.startswith("\\"):
+            continue
+        elif new_line is not None and old_line is not None:
+            text = raw[1:]
+            out.append({"side": "RIGHT", "line": new_line, "text": text})
+            out.append({"side": "LEFT", "line": old_line, "text": text})
+            new_line += 1
+            old_line += 1
+    return out
+
+
+def resolve_from_quote(
+    comment: Dict[str, Any],
+    index: List[Dict[str, Any]],
+    side: str,
+    line_hint: Optional[int],
+) -> Optional[Dict[str, Any]]:
+    """Locate a comment's target line by matching its quoted text in the diff."""
+    quote = " ".join((comment.get("quote") or "").split())
+    if not quote:
+        return None
+    matches = [e for e in index if " ".join(e["text"].split()) == quote]
+    if not matches:
+        return None
+    same_side = [e for e in matches if e["side"] == side]
+    if same_side:
+        matches = same_side
+    if line_hint:
+        matches.sort(key=lambda e: abs(e["line"] - line_hint))
+    return matches[0]
+
+
 def normalize_inline_comments(
     raw: List[Dict[str, Any]], files: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
-    """Validate/normalize raw findings into GitHub review-comment objects."""
-    valid_paths = {f.get("filename") for f in files}
+    """Validate/normalize raw findings into GitHub review-comment objects.
+
+    Line numbers are resolved from the model's quoted source line (reliable)
+    and every comment is checked against the diff, so a comment can never land
+    on a line that is not part of the change.
+    """
+    indexes = {
+        f.get("filename"): index_diff_lines(f.get("patch") or "") for f in files
+    }
+    valid = {
+        path: {(e["side"], e["line"]) for e in entries}
+        for path, entries in indexes.items()
+    }
+
     out: List[Dict[str, Any]] = []
     for c in raw:
         path = c.get("path")
         body = c.get("body")
-        line = _as_int(c.get("line"))
         if not isinstance(path, str) or not isinstance(body, str):
             continue
-        if path not in valid_paths or not line or line <= 0:
+        if path not in indexes:
             continue
         side = c.get("side", "RIGHT")
         if side not in ("LEFT", "RIGHT"):
             side = "RIGHT"
+        line = _as_int(c.get("line"))
+
+        # Prefer the quoted source line — the model only has to copy text,
+        # not compute line numbers.
+        located = resolve_from_quote(c, indexes[path], side, line)
+        if located:
+            side, line = located["side"], located["line"]
+
+        if not line or line <= 0:
+            continue
+        if (side, line) not in valid[path]:
+            log(f"Warning: dropping inline comment off the diff: {path}:{line} ({side}).")
+            continue
+
         comment: Dict[str, Any] = {"path": path, "line": line, "side": side, "body": body}
+
+        # Cross-line range: resolve the first line the same way.
         start_line = _as_int(c.get("start_line"))
-        if start_line and 0 < start_line < line:
+        start_quote = c.get("start_quote")
+        if isinstance(start_quote, str) and start_quote.strip():
+            located_start = resolve_from_quote(
+                {"quote": start_quote}, indexes[path], side, start_line
+            )
+            if located_start:
+                start_line = located_start["line"]
+        if start_line and 0 < start_line < line and (side, start_line) in valid[path]:
             comment["start_line"] = start_line
-            start_side = c.get("start_side", side)
-            comment["start_side"] = start_side if start_side in ("LEFT", "RIGHT") else side
+            comment["start_side"] = side
+
         out.append(comment)
     return out
 

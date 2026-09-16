@@ -106,9 +106,8 @@ line-level findings for the GitHub review API:
   "comments": [
     {
       "path": "src/example.py",
-      "line": 9,
+      "quote": "the exact source line you are commenting on",
       "side": "RIGHT",
-      "start_line": 5,
       "body": "Describe the issue and the suggested fix."
     }
   ]
@@ -117,9 +116,15 @@ line-level findings for the GitHub review API:
 
 Rules:
 - `path`: the file path exactly as shown in the diff.
-- `side`: "RIGHT" for the new code (the `+` lines), "LEFT" for the removed code.
-- `line`: the last line number of the finding — in the new file for RIGHT, the old file for LEFT.
-- `start_line` (optional): the first line number for a cross-line comment; the comment then spans `start_line`..`line` (e.g. R5–R9 → `start_line` 5, `line` 9).
-- Each diff line is prefixed with its absolute line number (e.g. `   12: +def foo():`). Use that number as `line`; `side` is `RIGHT` for `+`/context lines and `LEFT` for `-` lines.
-- Only include findings you are confident map to concrete changed lines; otherwise put them in the review body instead.
+- `quote`: **copy the target line verbatim from the diff** — the code text only,
+  without the line-number prefix and without the leading `+`/`-`/space marker.
+  This is how the comment is positioned, so it must match the diff character for
+  character. Do NOT invent or paraphrase it.
+- `side`: `"RIGHT"` (default) for added/context lines, `"LEFT"` for removed lines.
+- `start_quote` (optional): the first line's text, for a cross-line comment; the
+  comment then spans from that line to the `quote` line.
+- `line` (optional): a line-number hint used only to disambiguate when the same
+  text appears more than once. `quote` always wins.
+- Only include findings you are confident map to a concrete changed line;
+  otherwise put them in the review body instead.
 - Keep `body` concise and actionable.
