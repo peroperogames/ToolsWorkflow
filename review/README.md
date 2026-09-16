@@ -59,8 +59,9 @@ python main.py
 | `OPENAI_MAX_RETRIES` | no | Retry count for timeouts/429/5xx errors (default `5`). |
 | `REVIEW_LANGUAGE` | no | Review output language — codes (`en`, `zh`, `cn`, `ja`, `ko`, `es`, `fr`, `de`, `ru`, `pt`) or full names (default `cn`). |
 | `MAX_TOKENS_PER_CHUNK` | no | Max tokens per chunk for large PRs (default `6000`). |
-| `SILENT_MODE` | no | Set `false`/`0` to post a review instead of a comment (default `true`). |
-| `DRY_RUN` | no | Set `true`/`1` to print the review without posting. |
+| `DIFF_CHANGED_ONLY` | no | Send only changed (`+`/`-`) lines to the model. Set to `0`/`false` to include unchanged context lines (default: on). |
+| `SILENT_MODE` | no | Post a comment instead of a review. Set to `0`/`false` to post a review with `APPROVE`/`REQUEST_CHANGES` (default: on). |
+| `DRY_RUN` | no | Print the review without posting. Set to `1`/`true` to enable (default: off). |
 | `REVIEW_STATE_DIR` | no | Directory for local per-PR history files (default `<tmp>/ai-code-review`). |
 | `PROMPT_TARGET` | no | `owner/repo/path` for prompt-improvement PRs (default `peroperogames/ToolsWorkflow/review/prompt.md`). |
 
@@ -104,14 +105,16 @@ Replying requires the GitHub App to have **`Issues: Read and write`** permission
 ## Review pipeline
 
 1. Fetch PR metadata; if the PR is closed, delete any local history and stop.
-   Merges from `release/*` back to `master`/`main` are skipped. Only the PR's
-   **first** pass gets a full review — later `synchronize` pushes just get a
-   short note (re-review on demand with `@perotoolsbot 帮我评审`).
+   Merges from `release/*` back to `master`/`main` are skipped. The PR's **first**
+   pass gets the full structured review; later `synchronize` pushes get a light
+   incremental pass (short plain summary + inline comments) instead.
 2. Load local per-PR history and fetch prior reviews/comments, merging them into
    conversation context.
-3. Build a diff payload from the per-file patches.
-4. Chunk the diff when it exceeds `MAX_TOKENS_PER_CHUNK`, review each chunk
-   (passing the full file list and conversation as context), and combine the results.
+3. Build the diff payload from the per-file patches — by default only the
+   changed (`+`/`-`) lines are sent, each prefixed with its absolute line number
+   (`DIFF_CHANGED_ONLY=0` restores the unchanged context lines).
+4. If the payload still exceeds `MAX_TOKENS_PER_CHUNK`, review it in chunks and
+   then merge the chunk reviews back into a **single** review body.
 5. Classify the review (`REQUEST_CHANGES` / `COMMENT` / `APPROVE`) from the
    presence of critical/warning keywords.
 6. Post the review (or comment in `SILENT_MODE`). No labels are applied.

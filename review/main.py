@@ -50,6 +50,15 @@ DEFAULT_MAX_TOKENS_PER_CHUNK = 6000
 MAX_CONVERSATION_ENTRIES = 50
 MAX_CONVERSATION_ENTRY_CHARS = 4000
 
+# Send only changed (+/-) lines to the model; set DIFF_CHANGED_ONLY=0 to include
+# the unchanged context lines as well (larger payload, more context).
+DIFF_CHANGED_ONLY = os.environ.get("DIFF_CHANGED_ONLY", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+
 # Minimal fallback used only when prompt.md is empty.
 FALLBACK_PROMPT = (
     "You are an expert software engineer performing a thorough code review. "
@@ -384,12 +393,14 @@ def comment_mentions_bot(body: str, login: str) -> bool:
     return any(f"@{c}" in lowered for c in candidates)
 
 
-def annotate_diff(patch: str) -> str:
+def annotate_diff(patch: str, changed_only: bool = True) -> str:
     """Number each diff line with its absolute file line.
 
-    ``+`` and context lines get the new-file (RIGHT) line number; ``-`` lines
-    get the old-file (LEFT) line number. The model can then reference these
-    numbers directly instead of doing hunk-header arithmetic.
+    ``+`` lines get the new-file (RIGHT) line number, ``-`` lines the old-file
+    (LEFT) one, so the model can quote a line instead of doing hunk-header
+    arithmetic. With ``changed_only`` the unchanged context lines are dropped
+    to keep the payload small — the counters still advance, so the numbers stay
+    correct.
     """
     out: List[str] = []
     old_line: Optional[int] = None
@@ -410,7 +421,8 @@ def annotate_diff(patch: str) -> str:
         elif line.startswith("\\"):
             out.append(line)
         elif new_line is not None and old_line is not None:
-            out.append(f"{new_line:>5}: {line[1:]}")
+            if not changed_only:
+                out.append(f"{new_line:>5}: {line[1:]}")
             new_line += 1
             old_line += 1
         else:
@@ -499,7 +511,7 @@ def build_diff_text(
         lines.append(f"### {filename} ({status}) +{additions} -{deletions}")
         if patch:
             lines.append("```diff")
-            lines.append(annotate_diff(patch))
+            lines.append(annotate_diff(patch, changed_only=DIFF_CHANGED_ONLY))
             lines.append("```")
         else:
             lines.append("_(no textual patch available)_")
@@ -542,6 +554,49 @@ def review_files(
     return ai.chat(messages)
 
 
+INCREMENTAL_DIRECTIVE = (
+    "\n\n## Incremental Review Mode\n\n"
+    "This is a re-review after new commits were pushed. Do NOT use the "
+    "structured report format above. Return only:\n"
+    "1. A short, plain summary (2-4 sentences) of issues NEWLY introduced by "
+    "the latest changes. If there are none, say so in one sentence.\n"
+    "2. The JSON comments block for any line-level findings.\n"
+    "Never repeat issues already raised in the earlier reviews."
+)
+
+CONSOLIDATE_INSTRUCTION = (
+    "The following are partial reviews of the SAME pull request, one per file "
+    "group. Merge them into a SINGLE review in the required output format: "
+    "combine matching sections, drop duplicates and contradictions, and keep "
+    "every distinct finding. Do not invent findings, and do not mention "
+    "'chunks', 'parts' or file groups in the result."
+)
+
+
+def consolidate_reviews(
+    ai: AIClient, system_prompt: str, parts: List[str]
+) -> str:
+    """Merge per-chunk reviews into one review body."""
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": "\n\n---\n\n".join(parts) + "\n\n" + CONSOLIDATE_INSTRUCTION,
+        },
+    ]
+    try:
+        merged = ai.chat(messages)
+        if merged:
+            # The merged body must not carry a JSON block of its own — the
+            # per-chunk comments were already collected.
+            merged, _ = extract_inline_comments(merged)
+            return merged
+        log("Warning: consolidation returned empty; keeping concatenated chunks.")
+    except Exception as exc:  # noqa: BLE001 - fall back to the raw chunks
+        log(f"Warning: consolidation failed ({exc}); keeping concatenated chunks.")
+    return "# AI Code Review\n\n" + "\n\n---\n\n".join(parts)
+
+
 def perform_review(
     ai: AIClient,
     system_prompt: str,
@@ -549,27 +604,34 @@ def perform_review(
     files: List[Dict[str, Any]],
     max_tokens_per_chunk: int,
     conversation: str = "",
-) -> str:
-    """Review the whole PR, chunking large diffs and combining the results."""
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """Review the whole PR.
+
+    Returns ``(review body, raw inline comments)``. Large diffs are reviewed in
+    chunks and then merged back into a single review body.
+    """
     max_chars = max_tokens_per_chunk * CHARS_PER_TOKEN
     chunks = chunk_files(files, max_chars)
 
     if len(chunks) <= 1:
-        return review_files(ai, system_prompt, pr, files, conversation=conversation)
+        raw = review_files(ai, system_prompt, pr, files, conversation=conversation)
+        return extract_inline_comments(raw)
 
     log(f"Large PR: reviewing in {len(chunks)} chunks.")
-    reviews = []
+    parts: List[str] = []
+    comments: List[Dict[str, Any]] = []
     for i, chunk in enumerate(chunks, start=1):
         log(f"Reviewing chunk {i}/{len(chunks)} ({len(chunk)} files)...")
-        chunk_review = review_files(
+        raw = review_files(
             ai, system_prompt, pr, chunk, all_files=files, conversation=conversation
         )
+        body, chunk_comments = extract_inline_comments(raw)
+        comments.extend(chunk_comments)
         filenames = "\n".join(f"  - {f['filename']}" for f in chunk)
-        reviews.append(
-            f"## Chunk {i}/{len(chunks)}\n\nFiles:\n{filenames}\n\n{chunk_review}"
-        )
+        parts.append(f"### Part {i}/{len(chunks)}\n\nFiles:\n{filenames}\n\n{body}")
 
-    return "# AI Code Review (multi-part)\n\n" + "\n\n---\n\n".join(reviews)
+    log("Consolidating chunk reviews into a single review...")
+    return consolidate_reviews(ai, system_prompt, parts), comments
 
 
 def generate_reply(
@@ -1090,15 +1152,14 @@ def handle_review_request(
         return 0
 
     log(f"Review requested via @-mention ({len(files)} files, ~{len(conversation)} chars context)...")
-    review = perform_review(
+    review_text, raw_comments = perform_review(
         ai, system_prompt, pr, files, config.max_tokens_per_chunk, conversation
     )
-    if not review:
+    if not review_text:
         log("Error: perform_review returned empty — model may have hit a limit or returned no content.")
         gh.post_comment(owner, repo, number, f"@{author} 评审失败，AI 返回了空内容。请稍后重试。")
         return 0
 
-    review_text, raw_comments = extract_inline_comments(review)
     inline = normalize_inline_comments(raw_comments, files)
     event = determine_event(review_text)
 
@@ -1275,19 +1336,16 @@ def main() -> int:
         return 0
 
     # Review mode.
-    # Only the PR's first pass gets a full review. Later pushes (synchronize)
-    # just get a brief note — a re-review can be requested with an @-mention.
-    if (
+    # The PR's first pass gets the full structured review. Later pushes only
+    # get a light incremental pass: a short plain summary plus inline comments.
+    incremental = (
         event_name in ("pull_request", "pull_request_target")
         and payload.get("action") == "synchronize"
         and any((e.get("who") or "").endswith("[bot]") for e in fresh)
-    ):
-        gh.post_comment(
-            owner, repo, number,
-            "代码已更新。如需重新评审，请 `@perotoolsbot 帮我评审`。",
-        )
-        log("Skipping full review on synchronize (this PR was already reviewed).")
-        return 0
+    )
+    review_prompt = system_prompt + INCREMENTAL_DIRECTIVE if incremental else system_prompt
+    if incremental:
+        log("Later push detected: running an incremental (unstructured) review.")
 
     files = gh.list_files(owner, repo, number)
     log(f"Changed files: {len(files)}")
@@ -1301,14 +1359,13 @@ def main() -> int:
     if conversation:
         log(f"Using {len(entries)} prior review/comment entry(ies) as context.")
 
-    review = perform_review(
-        ai, system_prompt, pr, files, config.max_tokens_per_chunk, conversation
+    review_text, raw_comments = perform_review(
+        ai, review_prompt, pr, files, config.max_tokens_per_chunk, conversation
     )
-    if not review:
+    if not review_text:
         log("Error: the AI returned an empty review.")
         return 1
 
-    review_text, raw_comments = extract_inline_comments(review)
     inline = normalize_inline_comments(raw_comments, files)
     if inline:
         log(f"Found {len(inline)} inline comment(s).")
