@@ -19,8 +19,8 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
           isResolved
           isOutdated
           path
-          comments(first: 5) {
-            nodes { body author { login } }
+          comments(first: 50) {
+            nodes { databaseId body author { login } }
           }
         }
       }
@@ -137,6 +137,26 @@ class GitHubClient:
             data = self._request(
                 "GET",
                 f"/repos/{owner}/{repo}/issues/{number}/comments",
+                params={"per_page": 100, "page": page},
+            )
+            if not data:
+                break
+            comments.extend(data)
+            if len(data) < 100:
+                break
+            page += 1
+        return comments
+
+    def list_review_comments(
+        self, owner: str, repo: str, number: int
+    ) -> List[Dict[str, Any]]:
+        """List inline review comments (the ones attached to diff lines)."""
+        comments: List[Dict[str, Any]] = []
+        page = 1
+        while True:
+            data = self._request(
+                "GET",
+                f"/repos/{owner}/{repo}/pulls/{number}/comments",
                 params={"per_page": 100, "page": page},
             )
             if not data:

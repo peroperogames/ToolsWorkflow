@@ -114,8 +114,8 @@ Replying requires the GitHub App to have **`Issues: Read and write`** permission
    Merges from `release/*` back to `master`/`main` are skipped. The PR's **first**
    pass gets the full structured review; later `synchronize` pushes get a light
    incremental pass (short plain summary + inline comments) instead.
-2. Load local per-PR history and fetch prior reviews/comments, merging them into
-   conversation context.
+2. Load local per-PR history and fetch prior reviews, conversation comments
+   **and inline review comments**, merging them into the conversation context.
 3. Build the diff payload from the per-file patches — only the changed (`+`/`-`)
    lines are sent, each prefixed with its absolute line number.
 4. If the payload still exceeds `MAX_TOKENS_PER_CHUNK`, review it in chunks and

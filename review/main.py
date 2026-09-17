@@ -68,7 +68,11 @@ REPLY_SYSTEM_PROMPT = (
     "on a pull request. Answer their question concisely and directly — a short, "
     "plain message, NOT a full structured review. If the user is asking for a "
     "review but none has been done yet, explain that you review automatically "
-    "when a PR is opened or updated. Reference files or code only when it helps."
+    "when a PR is opened or updated. Reference files or code only when it helps.\n"
+    "When the developer asks about a comment you left, quote or paraphrase that "
+    "specific finding and explain the reasoning behind it. Never claim to have "
+    "said something that is not in the conversation above, and never guess at "
+    "what you 'previously replied' — if the context is missing, say so plainly."
 )
 
 INTENT_CLASSIFIER_PROMPT = (
@@ -338,6 +342,29 @@ def fetch_conversation(
             )
     except Exception as exc:  # noqa: BLE001 - context is best-effort
         log(f"Warning: could not fetch prior comments: {exc}")
+
+    # Inline comments live on their own endpoint; without them the bot cannot
+    # explain or follow up on the findings it posted on individual lines.
+    try:
+        for comment in gh.list_review_comments(owner, repo, number):
+            body = (comment.get("body") or "").strip()
+            if not body:
+                continue
+            where = comment.get("path") or ""
+            line = comment.get("line") or comment.get("original_line")
+            if where and line:
+                body = f"[inline {where}:{line}]\n{body}"
+            entries.append(
+                {
+                    "ts": comment.get("created_at") or "",
+                    "who": (comment.get("user") or {}).get("login", "unknown"),
+                    "kind": "comment",
+                    "id": comment.get("id"),
+                    "body": body,
+                }
+            )
+    except Exception as exc:  # noqa: BLE001 - context is best-effort
+        log(f"Warning: could not fetch inline review comments: {exc}")
 
     entries.sort(key=lambda e: e["ts"])
     return entries
@@ -650,6 +677,7 @@ def generate_reply(
     conversation: str,
     author: str,
     comment_body: str,
+    thread_context: str = "",
 ) -> str:
     """Generate a short, plain reply to a human comment on the pull request."""
     parts: List[str] = []
@@ -657,6 +685,12 @@ def generate_reply(
         parts.append(
             "## Previous Conversation\n\nThe following prior reviews and comments "
             f"on this pull request are provided for context:\n\n{conversation}"
+        )
+    if thread_context:
+        parts.append(
+            "## The Comment Being Replied To\n\n"
+            "The developer replied inside this thread of yours:\n\n"
+            f"{thread_context}"
         )
     parts.append(
         f"## New Comment\n\n**{author}** just wrote:\n\n{comment_body}\n\n"
@@ -1060,6 +1094,31 @@ def _parse_json_response(text: str) -> Dict[str, Any]:
     return json.loads(text)
 
 
+def thread_has_bot_comment(
+    gh: GitHubClient, owner: str, repo: str, number: int, comment_id: int
+) -> bool:
+    """Does the review thread containing ``comment_id`` involve the bot?
+
+    The immediate parent is not enough: once a thread has several turns the
+    reply's ``in_reply_to_id`` may point at another human comment, yet the
+    thread is still a conversation with the bot.
+    """
+    try:
+        threads = gh.list_review_threads(owner, repo, number)
+    except Exception as exc:  # noqa: BLE001 - best-effort
+        log(f"Warning: could not inspect review threads: {exc}")
+        return False
+    for thread in threads:
+        nodes = (thread.get("comments") or {}).get("nodes") or []
+        if comment_id not in {n.get("databaseId") for n in nodes}:
+            continue
+        return any(
+            (((n.get("author") or {}).get("login")) or "").endswith("[bot]")
+            for n in nodes
+        )
+    return False
+
+
 def _first_json_object(text: str) -> Optional[Dict[str, Any]]:
     """Return the first JSON object embedded in ``text``, if any."""
     decoder = json.JSONDecoder()
@@ -1409,16 +1468,31 @@ def main() -> int:
         # with an env-var fallback for the first run when no history exists yet.
         bot_login = "perotoolsbot[bot]"
         addressed = comment_mentions_bot(body, bot_login)
-        if not addressed and is_review_comment:
+        thread_context = ""
+        if is_review_comment:
             # An inline reply inside one of our own threads is already aimed at
             # us — review comments are the one place GitHub exposes the thread
-            # relationship, so no @-mention is needed there.
+            # relationship, so no @-mention is needed there. The parent comment
+            # is also the thing the developer is asking about, so hand it to the
+            # model explicitly instead of making it dig through the transcript.
             parent_id = comment.get("in_reply_to_id")
             if parent_id:
                 try:
                     parent = gh.get_review_comment(owner, repo, parent_id)
                     parent_author = (parent.get("user") or {}).get("login", "")
-                    addressed = parent_author.endswith("[bot]")
+                    addressed = addressed or parent_author.endswith("[bot]")
+                    if not addressed and comment.get("id"):
+                        # The parent may be another human comment in a thread the
+                        # bot is part of — the thread as a whole is what counts.
+                        addressed = thread_has_bot_comment(
+                            gh, owner, repo, number, comment["id"]
+                        )
+                    parent_body = (parent.get("body") or "").strip()
+                    if parent_body:
+                        where = parent.get("path") or ""
+                        line = parent.get("line") or parent.get("original_line")
+                        location = f" ({where}:{line})" if where and line else ""
+                        thread_context = f"{parent_author}{location}:\n\n{parent_body}"
                 except Exception as exc:  # noqa: BLE001 - fall back to the mention check
                     log(f"Warning: could not look up the parent review comment: {exc}")
         if not addressed:
@@ -1456,9 +1530,20 @@ def main() -> int:
                 ai, gh, pr, body, author, owner, repo, number, config, system_prompt, conversation, bot_login
             )
 
-        reply = generate_reply(ai, reply_prompt, conversation, author, body)
+        try:
+            reply = generate_reply(
+                ai, reply_prompt, conversation, author, body, thread_context
+            )
+        except Exception as exc:  # noqa: BLE001 - report instead of going silent
+            log(f"Error: reply generation failed: {exc}")
+            reply = ""
         if not reply:
-            log("Error: the AI returned an empty reply.")
+            log("Error: no reply was produced (empty content or a failed call).")
+            if not config.dry_run:
+                gh.post_comment(
+                    owner, repo, number,
+                    f"⚠️ @{author} 生成回复失败（模型返回空内容或调用出错），请查看 workflow 日志。",
+                )
             return 1
 
         if config.dry_run:
