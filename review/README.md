@@ -81,10 +81,17 @@ python main.py
 
 ### Reply mode (answering comments)
 
-Triggering the workflow on `issue_comment` makes the bot answer comments that **@-mention it**. GitHub does not expose threading for issue comments, so an @-mention is the reliable trigger:
+The bot answers comments in two places, which arrive as two different events:
 
-- A human comment that @-mentions the bot → the bot posts an AI-generated reply.
-- Comments on non-PR issues, bot comments, and comments that don't mention the bot are ignored.
+- **PR conversation** (`issue_comment`) — GitHub exposes no thread relationship
+  there, so the comment must **@-mention the bot**.
+- **Inline review comments** (`pull_request_review_comment`) — replying inside
+  one of the bot's own threads is enough; no @-mention needed. A brand-new
+  inline comment still has to mention it.
+
+Comments on non-PR issues, bot comments, and comments that address neither the
+bot nor one of its threads are ignored. When the trigger came from an inline
+thread, the bot replies inside that same thread.
 
 #### Special commands
 

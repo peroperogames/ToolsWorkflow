@@ -202,6 +202,24 @@ class GitHubClient:
             "POST", f"/repos/{owner}/{repo}/pulls/{number}/comments", json=payload
         )
 
+    def get_review_comment(
+        self, owner: str, repo: str, comment_id: int
+    ) -> Dict[str, Any]:
+        """Fetch a single inline review comment."""
+        return self._request(
+            "GET", f"/repos/{owner}/{repo}/pulls/comments/{comment_id}"
+        )
+
+    def post_review_comment_reply(
+        self, owner: str, repo: str, number: int, comment_id: int, body: str
+    ) -> Dict[str, Any]:
+        """Reply inside an existing inline review-comment thread."""
+        return self._request(
+            "POST",
+            f"/repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies",
+            json={"body": body},
+        )
+
     def post_comment(self, owner: str, repo: str, number: int, body: str) -> Dict[str, Any]:
         """Post a regular issue comment (used in silent mode)."""
         return self._request(

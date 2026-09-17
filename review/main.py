@@ -42,6 +42,9 @@ import history
 # of the caller's current working directory.
 DEFAULT_PROMPT_FILE = Path(__file__).resolve().parent / "prompt.md"
 
+# Bumped whenever behaviour changes, so the job log shows which build ran.
+VERSION = "2026-09-17"
+
 # Rough heuristic: ~4 characters per token, used for chunking large PRs.
 CHARS_PER_TOKEN = 4
 DEFAULT_MAX_TOKENS_PER_CHUNK = 6000
@@ -265,7 +268,11 @@ def resolve_pull_request(event_name: str, payload: Dict[str, Any]) -> Tuple[str,
         repo = repo or repository.get("name")
 
     number: Optional[int] = None
-    if event_name in ("pull_request", "pull_request_target"):
+    if event_name in (
+        "pull_request",
+        "pull_request_target",
+        "pull_request_review_comment",
+    ):
         number = (payload.get("pull_request") or {}).get("number")
     elif event_name == "issue_comment":
         if (payload.get("issue") or {}).get("pull_request"):
@@ -1342,18 +1349,20 @@ def main() -> int:
 
     event_name, payload = load_event()
 
-    # issue_comment: respond only to a human comment that @-mentions the bot.
-    # GitHub does not expose threading for issue comments (in_reply_to_id only
-    # exists for PR review comments), so a "reply" cannot be detected — an
-    # @-mention is the reliable trigger.
+    # Comments reach us as `issue_comment` (the PR conversation) or as
+    # `pull_request_review_comment` (an inline review-comment thread). GitHub
+    # exposes no threading for the former, so an @-mention is the trigger in
+    # both cases.
     is_issue_comment = event_name == "issue_comment"
+    is_review_comment = event_name == "pull_request_review_comment"
     comment: Dict[str, Any] = {}
-    if is_issue_comment:
-        issue = payload.get("issue") or {}
+    if is_issue_comment or is_review_comment:
         comment = payload.get("comment") or {}
-        if not issue.get("pull_request"):
-            log("Ignoring comment on a non-pull-request issue.")
-            return 0
+        if is_issue_comment:
+            issue = payload.get("issue") or {}
+            if not issue.get("pull_request"):
+                log("Ignoring comment on a non-pull-request issue.")
+                return 0
         author = (comment.get("user") or {}).get("login", "")
         if author.endswith("[bot]"):
             log("Ignoring comment from a bot (prevents reply loops).")
@@ -1369,6 +1378,7 @@ def main() -> int:
         fallback_model=config.fallback_model,
     )
 
+    log(f"ai-review {VERSION}")
     log(f"Repository: {owner}/{repo}")
     log(f"Pull Request: #{number}")
     log(f"Model: {config.model}")
@@ -1393,12 +1403,25 @@ def main() -> int:
     fresh = fetch_conversation(gh, owner, repo, number)
 
     # Reply mode.
-    if is_issue_comment:
+    if is_issue_comment or is_review_comment:
         body = comment.get("body") or ""
         # Determine bot login from the conversation (bot-authored entries),
         # with an env-var fallback for the first run when no history exists yet.
         bot_login = "perotoolsbot[bot]"
-        if bot_login and not comment_mentions_bot(body, bot_login):
+        addressed = comment_mentions_bot(body, bot_login)
+        if not addressed and is_review_comment:
+            # An inline reply inside one of our own threads is already aimed at
+            # us — review comments are the one place GitHub exposes the thread
+            # relationship, so no @-mention is needed there.
+            parent_id = comment.get("in_reply_to_id")
+            if parent_id:
+                try:
+                    parent = gh.get_review_comment(owner, repo, parent_id)
+                    parent_author = (parent.get("user") or {}).get("login", "")
+                    addressed = parent_author.endswith("[bot]")
+                except Exception as exc:  # noqa: BLE001 - fall back to the mention check
+                    log(f"Warning: could not look up the parent review comment: {exc}")
+        if not addressed:
             log(f"Ignoring comment that does not @-mention the bot (@{bot_login}).")
             return 0
 
@@ -1442,8 +1465,15 @@ def main() -> int:
             print(reply)
             return 0
 
-        result = gh.post_comment(owner, repo, number, reply)
-        log("Posted reply comment.")
+        if is_review_comment and comment.get("id"):
+            # Answer inside the inline thread the user wrote in.
+            result = gh.post_review_comment_reply(
+                owner, repo, number, comment["id"], reply
+            )
+            log("Posted reply in the review-comment thread.")
+        else:
+            result = gh.post_comment(owner, repo, number, reply)
+            log("Posted reply comment.")
 
         entries.append(
             {
