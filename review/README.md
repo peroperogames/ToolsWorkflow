@@ -58,7 +58,7 @@ python main.py
 | `OPENAI_TIMEOUT` | no | API request timeout in seconds (default `180`). |
 | `OPENAI_MAX_RETRIES` | no | Retry count for timeouts/429/5xx errors (default `5`). |
 | `REVIEW_LANGUAGE` | no | Review output language — codes (`en`, `zh`, `cn`, `ja`, `ko`, `es`, `fr`, `de`, `ru`, `pt`) or full names (default `cn`). |
-| `MAX_TOKENS_PER_CHUNK` | no | Max tokens per chunk for large PRs (default `6000`). |
+| `MAX_TOKENS_PER_CHUNK` | no | Max tokens of diff per review call (default `131072`). |
 | `SILENT_MODE` | no | Post a comment instead of a review. Set to `0`/`false` to post a review with `APPROVE`/`REQUEST_CHANGES` (default: on). |
 | `DRY_RUN` | no | Print the review without posting. Set to `1`/`true` to enable (default: off). |
 | `REVIEW_STATE_DIR` | no | Directory for local per-PR history files (default `<tmp>/ai-code-review`). |

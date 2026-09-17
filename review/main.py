@@ -13,7 +13,7 @@ The tool is fully configured through environment variables (no CLI arguments):
     OPENAI_API_MODEL_FALLBACK (optional) Fallback model used if the primary fails.
     OPENAI_API_BASE_URL   (optional) API base URL (default: https://api.openai.com/v1).
     REVIEW_LANGUAGE       (optional) Review output language (default: en).
-    MAX_TOKENS_PER_CHUNK  (optional) Max tokens per chunk for large PRs (default: 6000).
+    MAX_TOKENS_PER_CHUNK  (optional) Max tokens per chunk for large PRs (default: 131072).
     SILENT_MODE           (optional) "true"/"1" posts a comment instead of a review.
     DRY_RUN               (optional) "true"/"1" prints the review without posting.
 
@@ -47,7 +47,7 @@ VERSION = "2026-09-17"
 
 # Rough heuristic: ~4 characters per token, used for chunking large PRs.
 CHARS_PER_TOKEN = 4
-DEFAULT_MAX_TOKENS_PER_CHUNK = 6000
+DEFAULT_MAX_TOKENS_PER_CHUNK = 131072  # DeepSeek V4's max_tokens ceiling
 
 # Conversation transcript limits, to avoid unbounded context growth.
 MAX_CONVERSATION_ENTRIES = 50

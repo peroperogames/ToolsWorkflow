@@ -30,7 +30,7 @@ inputs:
   max-tokens-per-chunk:
     description: 'Max tokens per chunk for large PRs.'
     required: false
-    default: '6000'
+    default: '131072'
   silent-mode:
     description: "Set 'true' to post a comment instead of a review."
     required: false
