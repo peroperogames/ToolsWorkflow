@@ -119,7 +119,9 @@ Rules:
 - `quote`: **copy the target line verbatim from the diff** — the code text only,
   without the line-number prefix and without the leading `+`/`-`/space marker.
   This is how the comment is positioned, so it must match the diff character for
-  character. Do NOT invent or paraphrase it.
+  character. Do NOT invent or paraphrase it, and quote a SINGLE line: if the
+  finding spans several lines, quote only the last line of the range and use
+  `start_quote` for the first.
 - `side`: `"RIGHT"` (default) for added/context lines, `"LEFT"` for removed lines.
 - `start_quote` (optional): the first line's text, for a cross-line comment; the
   comment then spans from that line to the `quote` line.

@@ -696,7 +696,7 @@ def is_comments_payload(body: str) -> bool:
     if '"comments"' not in body:
         return False
     try:
-        data = json.loads(body)
+        data = json.loads(body, strict=False)
     except ValueError:
         # Malformed payload: fall back to the structural signature.
         return '"path"' in body and '"body"' in body
@@ -725,7 +725,7 @@ def extract_inline_comments(review_text: str) -> Tuple[str, List[Dict[str, Any]]
         if not is_comments_payload(body):
             continue
         try:
-            data = json.loads(body)
+            data = json.loads(body, strict=False)
         except ValueError:
             data = None
         if isinstance(data, dict) and isinstance(data.get("comments"), list):
@@ -806,16 +806,33 @@ def resolve_from_quote(
     side: str,
     line_hint: Optional[int],
 ) -> Optional[Dict[str, Any]]:
-    """Locate a comment's target line by matching its quoted text in the diff."""
+    """Locate a comment's target line by matching its quoted text in the diff.
+
+    The model sometimes quotes several lines at once, so a quote that matches no
+    single line is retried against windows of consecutive lines.
+    """
     quote = " ".join((comment.get("quote") or "").split())
     if not quote:
         return None
-    matches = [e for e in index if " ".join(e["text"].split()) == quote]
+
+    same_side = [e for e in index if e["side"] == side]
+    matches = [e for e in same_side if " ".join(e["text"].split()) == quote]
+    if not matches:
+        matches = [e for e in index if " ".join(e["text"].split()) == quote]
+
+    if not matches:
+        for width in range(2, min(8, len(same_side)) + 1):
+            for start in range(len(same_side) - width + 1):
+                window = same_side[start : start + width]
+                joined = " ".join(" ".join(e["text"].split()) for e in window)
+                if joined == quote:
+                    matches = [window[-1]]  # anchor on the last line of the range
+                    break
+            if matches:
+                break
+
     if not matches:
         return None
-    same_side = [e for e in matches if e["side"] == side]
-    if same_side:
-        matches = same_side
     if line_hint:
         matches.sort(key=lambda e: abs(e["line"] - line_hint))
     return matches[0]
