@@ -95,8 +95,10 @@ jobs:
 
       - name: Push changes
         if: ${{ env.committed == 'true' }}
+        env:
+            TAG: ${{ github.event.release.tag_name }}
+            TARGET_BRANCH: ${{ github.event.release.target_commitish }}
         run: |
-           TARGET_BRANCH="${{ github.event.release.target_commitish }}"
            git push https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/${{ github.repository }} HEAD:"$TARGET_BRANCH"
            git tag -f "$TAG"
            git push -f origin "$TAG"
