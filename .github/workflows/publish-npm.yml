@@ -98,6 +98,8 @@ jobs:
         run: |
            TARGET_BRANCH="${{ github.event.release.target_commitish }}"
            git push https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/${{ github.repository }} HEAD:"$TARGET_BRANCH"
+           git tag -f "$TAG"
+           git push -f origin "$TAG"
 
       - name: Show .npmrc
         run: |
