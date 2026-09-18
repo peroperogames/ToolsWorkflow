@@ -97,9 +97,22 @@ jobs:
         if: ${{ env.committed == 'true' }}
         env:
             TAG: ${{ github.event.release.tag_name }}
-            TARGET_BRANCH: ${{ github.event.release.target_commitish }}
         run: |
-           git push https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/${{ github.repository }} HEAD:"$TARGET_BRANCH"
+          # The branch which the release was cut from, which is the one it names, and failing that the one which holds
+          # the commit which was tagged. A release published from a tag which was pushed by hand names the tag here
+          # rather than a branch, so what it names is not taken on trust.
+          TARGET="${{ github.event.release.target_commitish }}"
+          if ! git ls-remote --exit-code --heads origin "$TARGET" > /dev/null 2>&1; then
+            TAGGED=$(git rev-parse "$TAG^{commit}")
+          # The branch which points at the tagged commit, which is the branch the tag was cut from.
+           TARGET=$(git for-each-ref --format='%(refname:short) %(objectname)' refs/remotes/origin \
+                       | sed 's|^origin/||' | grep -v '^HEAD ' \
+                       | awk -v commit="$TAGGED" '$2 == commit { print $1 }' | head -1)
+           if [ -z "$TARGET" ]; then
+              TARGET=$(git branch -r --contains "$TAG" --format='%(refname:short)' | sed 's|^origin/||' | grep -v '^HEAD$' | head -1)
+           fi
+           echo "pushing to $TARGET"
+           git push https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/${{ github.repository }} HEAD:"$TARGET"
            git tag -f "$TAG"
            git push -f origin "$TAG"
 
