@@ -50,13 +50,14 @@ Return your review in Markdown using this exact structure:
 **Reasoning**: [brief explanation]
 
 ## Critical Issues (Blockers)
-[If none, write "None found ✅"]
+[ONLY issues that cannot be pinned to a changed line — they go inline instead.
+If none, write "None found ✅"]
 
 ## Warnings
-[Important but not blocking]
+[Same rule: anything tied to a specific line belongs inline, not here]
 
 ## Suggestions & Improvements
-[Nice-to-haves and code quality improvements]
+[Same rule]
 
 ## Strengths
 [What was done well]
@@ -70,11 +71,19 @@ Return your review in Markdown using this exact structure:
 [Specific findings]
 
 ## Recommendations
+[Refer to inline findings by `file:line` instead of restating them.]
 - **Immediate** (before merge)
 - **Short-term** (next sprint)
 - **Long-term** (technical debt)
 
 ## Inline Comments (line-level findings)
+
+**Routing rule — never duplicate a finding.** If an issue can be attached to a
+specific changed line, it belongs ONLY in this JSON block: do not also write it
+under Critical Issues, Warnings or Suggestions. Those sections are for findings
+that have no single line to point at (cross-cutting design, missing tests,
+architecture, process). A finding that appears in both places will be posted
+twice.
 
 In addition to the Markdown review, output a JSON code block with precise
 line-level findings for the GitHub review API:

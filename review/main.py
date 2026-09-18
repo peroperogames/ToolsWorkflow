@@ -43,7 +43,7 @@ import history
 DEFAULT_PROMPT_FILE = Path(__file__).resolve().parent / "prompt.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-09-17"
+VERSION = "2026-09-18"
 
 # Rough heuristic: ~4 characters per token, used for chunking large PRs.
 CHARS_PER_TOKEN = 4
@@ -420,12 +420,12 @@ def comment_mentions_bot(body: str, login: str) -> bool:
 
 
 def annotate_diff(patch: str) -> str:
-    """Number each changed diff line with its absolute file line.
+    """Number each diff line with its absolute file line.
 
     ``+`` lines get the new-file (RIGHT) line number, ``-`` lines the old-file
     (LEFT) one, so the model can quote a line instead of doing hunk-header
-    arithmetic. Unchanged context lines are dropped to keep the payload small —
-    the counters still advance, so the numbers stay correct.
+    arithmetic. Context lines are kept — the model needs the surrounding code
+    to judge what it is looking at.
     """
     out: List[str] = []
     old_line: Optional[int] = None
@@ -446,6 +446,7 @@ def annotate_diff(patch: str) -> str:
         elif line.startswith("\\"):
             out.append(line)
         elif new_line is not None and old_line is not None:
+            out.append(f"{new_line:>5}: {line[1:]}")
             new_line += 1
             old_line += 1
         else:
@@ -758,7 +759,10 @@ def extract_inline_comments(review_text: str) -> Tuple[str, List[Dict[str, Any]]
     """
     comments: List[Dict[str, Any]] = []
     spans: List[Tuple[int, int]] = []
-    pattern = re.compile(r"```[^\n`]*\n([\s\S]*?)\n```")
+    # Fences may be indented (the model often nests code blocks inside list
+    # items), so leading whitespace must be allowed on both fences — otherwise
+    # an indented closer is skipped and the following block gets swallowed.
+    pattern = re.compile(r"(?m)^[ \t]*```[^\n`]*\n([\s\S]*?)\n[ \t]*```[ \t]*$")
     for match in pattern.finditer(review_text):
         body = match.group(1)
         # Blocks that are not our payload — including malformed ones — are
@@ -772,6 +776,12 @@ def extract_inline_comments(review_text: str) -> Tuple[str, List[Dict[str, Any]]
         if isinstance(data, dict) and isinstance(data.get("comments"), list):
             comments.extend(c for c in data["comments"] if isinstance(c, dict))
         spans.append((match.start(), match.end()))
+
+    log(
+        f"Inline comments block: found {len(spans)}, parsed {len(comments)} comment(s)."
+        if spans
+        else "Inline comments block: none found in the review body."
+    )
 
     # Remove from the end backwards so earlier offsets stay valid.
     cleaned = review_text

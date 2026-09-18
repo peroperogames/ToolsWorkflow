@@ -116,8 +116,9 @@ Replying requires the GitHub App to have **`Issues: Read and write`** permission
    incremental pass (short plain summary + inline comments) instead.
 2. Load local per-PR history and fetch prior reviews, conversation comments
    **and inline review comments**, merging them into the conversation context.
-3. Build the diff payload from the per-file patches — only the changed (`+`/`-`)
-   lines are sent, each prefixed with its absolute line number.
+3. Build the diff payload from the per-file patches — every line is prefixed
+   with its absolute line number so the model can quote a line instead of
+   computing line numbers itself.
 4. If the payload still exceeds `MAX_TOKENS_PER_CHUNK`, review it in chunks and
    then merge the chunk reviews back into a **single** review body.
 5. Classify the review (`REQUEST_CHANGES` / `COMMENT` / `APPROVE`) from the
