@@ -45,6 +45,20 @@ DEFAULT_PROMPT_FILE = Path(__file__).resolve().parent / "prompt.md"
 # Bumped whenever behaviour changes, so the job log shows which build ran.
 VERSION = "2026-09-18"
 
+# Sections the review body is assembled from when the model only returns
+# comments (JSON-only prompt) rather than ready-made Markdown.
+REVIEW_SECTIONS = (
+    ("blocker", "🔴 Blockers"),
+    ("warning", "⚠️ Warnings"),
+    ("suggestion", "💡 Suggestions"),
+    ("security", "🔒 Security"),
+    ("performance", "⚡ Performance"),
+    ("recommendation_immediate", "Immediate (before merge)"),
+    ("recommendation_short", "Short-term (next sprint)"),
+    ("recommendation_long", "Long-term (technical debt)"),
+    ("strength", "✅ Strengths"),
+)
+
 # Rough heuristic: ~4 characters per token, used for chunking large PRs.
 CHARS_PER_TOKEN = 4
 DEFAULT_MAX_TOKENS_PER_CHUNK = 131072  # DeepSeek V4's max_tokens ceiling
@@ -635,6 +649,62 @@ def consolidate_reviews(
     return "# AI Code Review\n\n" + "\n\n---\n\n".join(parts)
 
 
+def split_comments(
+    comments: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Split comments into line-anchored ones and general (no line) ones."""
+    inline: List[Dict[str, Any]] = []
+    general: List[Dict[str, Any]] = []
+    for c in comments:
+        if c.get("path") and c.get("quote"):
+            inline.append(c)
+        else:
+            general.append(c)
+    return inline, general
+
+
+def render_review_body(general: List[Dict[str, Any]], leftover: str = "") -> str:
+    """Build the posted review body.
+
+    A prompt that returns Markdown plus a comments block produces ``leftover``
+    prose, which is used verbatim. With the JSON-only prompt there is no prose,
+    so the general findings are grouped back into sections here.
+    """
+    if leftover.strip():
+        return leftover.strip()
+    if not general:
+        return ""
+
+    known = {key for key, _ in REVIEW_SECTIONS}
+    lines: List[str] = []
+    for key, title in REVIEW_SECTIONS:
+        items = [
+            (c.get("body") or "").strip()
+            for c in general
+            if (c.get("type") or "").lower() == key
+        ]
+        items = [i for i in items if i]
+        if not items:
+            continue
+        lines.append(f"## {title}")
+        lines.append("")
+        lines.extend(f"- {item}" for item in items)
+        lines.append("")
+
+    other = [
+        (c.get("body") or "").strip()
+        for c in general
+        if (c.get("type") or "").lower() not in known
+    ]
+    other = [i for i in other if i]
+    if other:
+        lines.append("## Other")
+        lines.append("")
+        lines.extend(f"- {item}" for item in other)
+
+    return "\n".join(lines).strip()
+
+
 def perform_review(
     ai: AIClient,
     system_prompt: str,
@@ -642,18 +712,21 @@ def perform_review(
     files: List[Dict[str, Any]],
     max_tokens_per_chunk: int,
     conversation: str = "",
-) -> Tuple[str, List[Dict[str, Any]]]:
+) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Review the whole PR.
 
-    Returns ``(review body, raw inline comments)``. Large diffs are reviewed in
-    chunks and then merged back into a single review body.
+    Returns ``(review body, raw line comments, general comments)``. Large diffs
+    are reviewed in chunks; general findings are grouped into one body and line
+    findings are merged into a single comment list.
     """
     max_chars = max_tokens_per_chunk * CHARS_PER_TOKEN
     chunks = chunk_files(files, max_chars)
 
     if len(chunks) <= 1:
         raw = review_files(ai, system_prompt, pr, files, conversation=conversation)
-        return extract_inline_comments(raw)
+        leftover, comments = extract_inline_comments(raw)
+        inline, general = split_comments(comments)
+        return render_review_body(general, leftover), inline, general
 
     log(f"Large PR: reviewing in {len(chunks)} chunks.")
     parts: List[str] = []
@@ -663,13 +736,22 @@ def perform_review(
         raw = review_files(
             ai, system_prompt, pr, chunk, all_files=files, conversation=conversation
         )
-        body, chunk_comments = extract_inline_comments(raw)
+        leftover, chunk_comments = extract_inline_comments(raw)
         comments.extend(chunk_comments)
-        filenames = "\n".join(f"  - {f['filename']}" for f in chunk)
-        parts.append(f"### Part {i}/{len(chunks)}\n\nFiles:\n{filenames}\n\n{body}")
+        if leftover.strip():
+            filenames = "\n".join(f"  - {f['filename']}" for f in chunk)
+            parts.append(
+                f"### Part {i}/{len(chunks)}\n\nFiles:\n{filenames}\n\n{leftover}"
+            )
 
-    log("Consolidating chunk reviews into a single review...")
-    return consolidate_reviews(ai, system_prompt, parts), comments
+    inline, general = split_comments(comments)
+    if parts:
+        log("Consolidating chunk reviews into a single review...")
+        body = consolidate_reviews(ai, system_prompt, parts)
+    else:
+        # JSON-only output: the general findings already merge cleanly.
+        body = ""
+    return render_review_body(general, body), inline, general
 
 
 def generate_reply(
@@ -741,14 +823,15 @@ def is_comments_payload(body: str) -> bool:
         data = json.loads(body, strict=False)
     except ValueError:
         # Malformed payload: fall back to the structural signature.
-        return '"path"' in body and '"body"' in body
+        return '"body"' in body
     if not isinstance(data, dict) or not isinstance(data.get("comments"), list):
         return False
     entries = [c for c in data["comments"] if isinstance(c, dict)]
     if not entries:
         # An empty payload is only accepted when it carries nothing else.
         return set(data) == {"comments"}
-    return all("path" in c and "body" in c for c in entries)
+    # Only `body` is mandatory — a finding without a line has no `path`.
+    return all(isinstance(c.get("body"), str) for c in entries)
 
 
 def extract_inline_comments(review_text: str) -> Tuple[str, List[Dict[str, Any]]]:
