@@ -43,7 +43,7 @@ import history
 DEFAULT_PROMPT_FILE = Path(__file__).resolve().parent / "prompt.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-09-18.5"
+VERSION = "2026-09-18.6"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -727,7 +727,7 @@ def perform_review(
         raw = review_files(ai, system_prompt, pr, files, conversation=conversation)
         leftover, comments = extract_inline_comments(raw)
         inline, general = split_comments(comments)
-        return render_review_body(general, leftover), inline, general
+        return _with_body(render_review_body(general, leftover), inline), inline, general
 
     log(f"Large PR: reviewing in {len(chunks)} chunks.")
     parts: List[str] = []
@@ -752,7 +752,17 @@ def perform_review(
     else:
         # JSON-only output: the general findings already merge cleanly.
         body = ""
-    return render_review_body(general, body), inline, general
+    return _with_body(render_review_body(general, body), inline), inline, general
+
+
+def _with_body(body: str, inline: List[Dict[str, Any]]) -> str:
+    """Every review needs a body — a comment can carry neither inline notes nor
+    an approval, so fall back to a stub when all findings are line-level."""
+    if body:
+        return body
+    if inline:
+        return "已把发现直接标注在对应代码行上，请查看 inline comments。"
+    return ""
 
 
 def generate_reply(
@@ -811,6 +821,58 @@ def _heading_start_above(text: str, index: int) -> int:
     return len("\n".join(lines[:i])) + (1 if i > 0 else 0)
 
 
+def repair_json(text: str) -> str:
+    """Best-effort repair of JSON produced by a language model.
+
+    The usual damage is a double quote inside a string value that the model
+    forgot to escape (quoting code or a word), plus the occasional trailing
+    comma. A quote only closes a string when what follows could end a value.
+    """
+    out: List[str] = []
+    in_string = False
+    i = 0
+    size = len(text)
+    while i < size:
+        char = text[i]
+        if in_string:
+            if char == "\\":
+                out.append(char)
+                if i + 1 < size:
+                    out.append(text[i + 1])
+                    i += 2
+                    continue
+                i += 1
+                continue
+            if char == '"':
+                j = i + 1
+                while j < size and text[j] in " \t\r\n":
+                    j += 1
+                if j >= size or text[j] in ",:}]":
+                    in_string = False
+                    out.append(char)
+                else:
+                    out.append('\\"')
+                i += 1
+                continue
+        elif char == '"':
+            in_string = True
+        out.append(char)
+        i += 1
+
+    repaired = "".join(out)
+    return re.sub(r",(\s*[}\]])", r"\1", repaired)
+
+
+def load_json_lenient(body: str) -> Optional[Any]:
+    """Parse JSON, repairing the common model slips if the first try fails."""
+    for candidate in (body, repair_json(body)):
+        try:
+            return json.loads(candidate, strict=False)
+        except ValueError:
+            continue
+    return None
+
+
 def is_comments_object(data: Any) -> bool:
     """Is this parsed JSON the comments payload we asked for?"""
     if not isinstance(data, dict):
@@ -830,16 +892,35 @@ def find_json_object(text: str) -> Optional[Tuple[Dict[str, Any], int, int]]:
     The model does not always wrap its JSON in a code fence, so the raw text has
     to be searched as well.
     """
-    decoder = json.JSONDecoder(strict=False)
-    for index, char in enumerate(text or ""):
+    size = len(text or "")
+    for start, char in enumerate(text or ""):
         if char != "{":
             continue
-        try:
-            obj, end = decoder.raw_decode(text, index)
-        except ValueError:
-            continue
-        if isinstance(obj, dict):
-            return obj, index, index + end
+        # Brace matching rather than raw_decode: the payload is frequently
+        # invalid JSON that only parses after repair.
+        depth = 0
+        in_string = False
+        i = start
+        while i < size:
+            ch = text[i]
+            if in_string:
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == '"':
+                    in_string = False
+            elif ch == '"':
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    data = load_json_lenient(text[start : i + 1])
+                    if isinstance(data, dict):
+                        return data, start, i + 1
+                    break
+            i += 1
     return None
 
 
@@ -852,19 +933,12 @@ def is_comments_payload(body: str) -> bool:
     """
     if '"comments"' not in body:
         return False
-    try:
-        data = json.loads(body, strict=False)
-    except ValueError:
-        # Malformed payload: fall back to the structural signature.
+    data = load_json_lenient(body)
+    if data is None:
+        # Unparseable payload: fall back to the structural signature so the raw
+        # JSON is still stripped from the posted review.
         return '"body"' in body
-    if not isinstance(data, dict) or not isinstance(data.get("comments"), list):
-        return False
-    entries = [c for c in data["comments"] if isinstance(c, dict)]
-    if not entries:
-        # An empty payload is only accepted when it carries nothing else.
-        return set(data) == {"comments"}
-    # Only `body` is mandatory — a finding without a line has no `path`.
-    return all(isinstance(c.get("body"), str) for c in entries)
+    return is_comments_object(data)
 
 
 def extract_inline_comments(review_text: str) -> Tuple[str, List[Dict[str, Any]]]:
@@ -885,22 +959,26 @@ def extract_inline_comments(review_text: str) -> Tuple[str, List[Dict[str, Any]]
         # removed anyway, so raw JSON never ends up in the posted review.
         if not is_comments_payload(body):
             continue
-        try:
-            data = json.loads(body, strict=False)
-        except ValueError:
-            data = None
-        if isinstance(data, dict) and isinstance(data.get("comments"), list):
+        data = load_json_lenient(body)
+        if data is None:
+            log(f"Warning: could not parse the comments payload: {body[:200]!r}")
+        elif is_comments_object(data):
             comments.extend(c for c in data["comments"] if isinstance(c, dict))
         spans.append((match.start(), match.end()))
 
     if not spans:
         # No fenced block — the JSON-only prompt often returns the payload bare.
-        found = find_json_object(review_text)
-        if found and is_comments_object(found[0]):
-            comments = [
-                c for c in found[0]["comments"] if isinstance(c, dict)
-            ]
-            spans.append((found[1], found[2]))
+        whole = load_json_lenient((review_text or "").strip())
+        if is_comments_object(whole):
+            comments = [c for c in whole["comments"] if isinstance(c, dict)]
+            spans.append((0, len(review_text)))
+        else:
+            found = find_json_object(review_text)
+            if found and is_comments_object(found[0]):
+                comments = [
+                    c for c in found[0]["comments"] if isinstance(c, dict)
+                ]
+                spans.append((found[1], found[2]))
 
     if spans:
         log(f"Inline comments block: found {len(spans)}, parsed {len(comments)} comment(s).")
