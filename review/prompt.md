@@ -32,51 +32,45 @@ The review request may include a "Previous Conversation" section containing prio
 
 ## Output Format
 
-Your entire review must be delivered as a single JSON code block. **No Markdown summary, no Executive Summary, no Overall Assessment section.** Every finding — whether line‑specific or general — becomes a separate comment object in a JSON array.
+Deliver your review as a series of inline comments. Each comment must be presented as a separate block. For line‑specific findings, include the file path, line number (if available), and the exact source line text (quote) inside a code block. For general findings (e.g., cross‑cutting architecture issues), omit the file path and quote.
 
-The JSON has a single top‑level key `"comments"` which is an array of objects. Each object represents one comment. Use the following fields:
+Use the following template for every comment:
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `type` | Yes | One of: `"blocker"`, `"warning"`, `"suggestion"`, `"strength"`, `"security"`, `"performance"`, `"recommendation_immediate"`, `"recommendation_short"`, `"recommendation_long"`. |
-| `body` | Yes | The full comment text. Include impact, suggested fix, and reference to files/logic if not line‑specific. |
-| `path` | No | Exact file path as shown in the diff. Omit if the finding is not tied to a single file (e.g., cross‑cutting architecture issue). |
-| `quote` | Yes if `path` is present | The exact source line text (without line‑number prefix and without `+`/`-`/space marker). Must match the diff character for character. |
-| `side` | No | `"RIGHT"` (default) for added/context lines, `"LEFT"` for removed lines. Only used when `quote` is present. |
-| `start_quote` | No | The first line's text for a multi‑line comment. Only needed when the comment spans two or more lines; the `quote` field then holds the **last** line's text. |
-| `line` | No | Optional line‑number hint for disambiguation when the same text appears more than once. `quote` always takes precedence. |
+```
+[Type] - File: <path> (Line: <line>)  
+> <quote>
 
-### Rules for generating comments
-
-1. **Every finding is a single comment.** Do not group multiple issues into one `body`. If a section like "Warnings" previously had two bullet points, each bullet becomes its own comment object.
-2. **Line‑specific findings** must include `path`, `quote`, and `side`. They belong solely as a comment object — do not also describe them elsewhere.
-3. **General findings** (no single file/line to attach to) omit `path` and `quote`. Use an appropriate `type` (e.g., `"blocker"`, `"warning"`, `"suggestion"`, `"recommendation_immediate"`).
-4. **Never duplicate a finding.** If an issue can be attached to a changed line, put it in that line‑specific comment only; do not create a separate general comment about the same issue.
-5. **Prioritize** — use `"blocker"` for issues that must be fixed before merge, `"warning"` for important but not critical, `"suggestion"` for nice‑to‑haves.
-6. **Strengths** — still include them as `"strength"` comments (general or line‑specific).
-
-### Example output
-
-```json
-{
-  "comments": [
-    {
-      "type": "blocker",
-      "path": "src/auth/login.ts",
-      "quote": "const token = jwt.sign({userId: user.id}, SECRET, {expiresIn: '1h'});",
-      "side": "RIGHT",
-      "body": "SECRET is hardcoded. Use an environment variable (process.env.JWT_SECRET) and add validation. Impact: the secret is exposed in the repo; anyone with access can forge tokens."
-    },
-    {
-      "type": "suggestion",
-      "body": "Consider extracting the database connection logic into a reusable utility. Currently it's duplicated in `src/user.ts` and `src/order.ts`, making future changes error‑prone."
-    },
-    {
-      "type": "strength",
-      "body": "Nice use of early returns to reduce nested conditionals in the input validation function. Makes the flow much clearer."
-    }
-  ]
-}
+<Comment body>
 ```
 
-Return **only** the JSON block. No surrounding text, no explanation.
+Where `[Type]` is one of: `Blockler`, `Warning`, `Suggestion`, `Strength`, `Security`, `Performance`, `RecommendationImmediate`, `RecommendationShort`, `RecommendationLong`.
+
+- For line‑specific comments, the `quote` line must match the diff character for character (without the diff prefix `+`, `-`, or space). If the comment spans multiple lines, include a `start_quote` at the beginning of the quote block (after a blank line) and the `quote` as the last line.
+- **Every finding is a single comment.** Do not group multiple issues into one body.
+- **Do not duplicate findings.** If an issue can be attached to a changed line, put it only in that line‑specific comment.
+- **Strengths** are also delivered as separate `Strength` type comments (line‑specific or general).
+
+### Example
+
+```
+Blocker - File: src/auth/login.ts (Line: 42)
+> const token = jwt.sign({userId: user.id}, SECRET, {expiresIn: '1h'});
+
+SECRET is hardcoded. Use an environment variable (process.env.JWT_SECRET) and add validation. Impact: the secret is exposed in the repo; anyone with access can forge tokens.
+```
+
+```
+Suggestion - File: src/user.ts / src/order.ts (general)
+> (no quote)
+
+Consider extracting the database connection logic into a reusable utility. Currently it's duplicated in both files, making future changes error‑prone.
+```
+
+```
+Strength  
+> (no quote)
+
+Nice use of early returns to reduce nested conditionals in the input validation function. Makes the flow much clearer.
+```
+
+Return **only** the list of comments in the format above, with no extra text, no Markdown formatting beyond the code blocks used for quotes, and no JSON. Order the comments by priority (blockers first, then warnings, then suggestions, etc.).
