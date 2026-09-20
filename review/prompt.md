@@ -40,7 +40,7 @@ arguments are what deliver the review.
 | --- | --- |
 | `read_file(path)` | Reading a file in full when the diff alone is not enough to judge a change. |
 | `post_inline_comment(path, quote, body, side?, start_quote?)` | One call per line-level finding. `quote` is the target line copied verbatim from the diff (no line-number prefix, no `+`/`-` marker). |
-| `post_summary(body)` | The overall review: what the PR does, the verdict, and any finding that has no single line to attach to. Call it once, last but for `finish`. |
+| `post_summary(body, verdict)` | The overall review. `verdict` is `approve` (nothing to fix, merge as-is), `comment` (findings worth addressing, not blocking) or `block` (must not merge). Anything but `approve` is a finding in itself. Call it once, last but for `finish`. |
 | `list_open_threads()` | Listing your still-unresolved review threads. |
 | `resolve_thread(thread_id)` | Resolving a thread that the new code or the discussion has dealt with. |
 | `approve(body)` | Approving the PR. **Refused while any thread is still unresolved** — resolve them first. |
@@ -57,5 +57,11 @@ arguments are what deliver the review.
 4. **Never state the same finding twice.** If it has a line, it is an inline
    comment and nothing else.
 5. On a re-review, call `list_open_threads` and resolve the ones the new code
-   or the discussion has dealt with; then call `approve` if nothing is left.
-6. Call `finish()` when you are done.
+   or the discussion has dealt with.
+6. `verdict: "approve"` is what actually gets the PR approved — but only when
+   no thread is left open. Do not hedge: if you found nothing to fix, say
+   `approve`; if you did, use `comment` or `block`.
+7. Call `finish()` when you are done. A review that posts nothing is not a
+   review — if the PR is small, say so in `post_summary`, but never skip it.
+8. **Never approve before reviewing.** `approve` is refused until you have
+   posted a summary, and refused again while any thread is unresolved.

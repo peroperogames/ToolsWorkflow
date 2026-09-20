@@ -20,7 +20,7 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
           isOutdated
           path
           comments(first: 50) {
-            nodes { databaseId body author { login } }
+            nodes { databaseId body author { login __typename } }
           }
         }
       }

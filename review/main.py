@@ -24,11 +24,12 @@ The pull request is resolved from the GitHub Actions environment
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -43,7 +44,7 @@ import history
 DEFAULT_PROMPT_FILE = Path(__file__).resolve().parent / "prompt.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-09-20"
+VERSION = "2026-09-20.9"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -1324,6 +1325,25 @@ def _parse_json_response(text: str) -> Dict[str, Any]:
     return json.loads(text)
 
 
+def is_bot_author(author: Optional[Dict[str, Any]]) -> bool:
+    """Is this comment authored by a bot/app account?
+
+    The two APIs disagree on how a bot is represented: REST reports the login as
+    ``name[bot]``, GraphQL reports plain ``name`` with ``__typename: Bot``. Both
+    have to be recognised or the bot never finds its own comments.
+    """
+    if not author:
+        return False
+    if (author.get("__typename") or "") == "Bot":
+        return True
+    return (author.get("login") or "").endswith("[bot]")
+
+
+def _thread_is_bot_authored(thread: Dict[str, Any]) -> bool:
+    nodes = (thread.get("comments") or {}).get("nodes") or []
+    return any(is_bot_author(n.get("author")) for n in nodes)
+
+
 def thread_has_bot_comment(
     gh: GitHubClient, owner: str, repo: str, number: int, comment_id: int
 ) -> bool:
@@ -1342,10 +1362,7 @@ def thread_has_bot_comment(
         nodes = (thread.get("comments") or {}).get("nodes") or []
         if comment_id not in {n.get("databaseId") for n in nodes}:
             continue
-        return any(
-            (((n.get("author") or {}).get("login")) or "").endswith("[bot]")
-            for n in nodes
-        )
+        return any(is_bot_author(n.get("author")) for n in nodes)
     return False
 
 
@@ -1371,17 +1388,11 @@ def settle_threads_and_approve(
         log("New findings were raised; not approving.")
         return
 
-    remaining = unresolved_bot_thread_count(gh, owner, repo, number)
-    if remaining != 0:
-        log(f"{remaining} thread(s) still open; not approving.")
-        return
-    try:
-        gh.post_review(
-            owner, repo, number, "所有遗留问题已解决 ✅", event="APPROVE"
-        )
-        log("Approved: no unresolved threads remain.")
-    except Exception as exc:  # noqa: BLE001 - approving is best-effort
-        log(f"Warning: could not approve: {exc}")
+    approve_if_clean(
+        gh, owner, repo, number,
+        pr.get("head", {}).get("sha", ""),
+        "所有遗留问题已解决 ✅",
+    )
 
 
 def unresolved_bot_thread_count(
@@ -1405,7 +1416,7 @@ def unresolved_bot_thread_count(
         log(f"  {thread.get('path')} resolved={resolved} comments=[{authors}]")
         if resolved:
             continue
-        if any(a.endswith("[bot]") for a in authors.split(",") if a):
+        if any(is_bot_author(n.get("author")) for n in nodes):
             count += 1
     return count
 
@@ -1456,9 +1467,8 @@ def decide_resolved_threads(
         nodes = (thread.get("comments") or {}).get("nodes") or []
         if not nodes:
             continue
-        author = ((nodes[0].get("author") or {}).get("login")) or ""
         # Only resolve our own threads, never a human reviewer's.
-        if not author.endswith("[bot]"):
+        if not is_bot_author(nodes[0].get("author")):
             continue
         candidates.append(
             {
@@ -1790,10 +1800,28 @@ REVIEW_TOOLS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "get_file_diff",
+            "description": (
+                "Show one file's diff with every line's absolute line number. Call "
+                "it before commenting if you are unsure which line is which — do not "
+                "guess line numbers or quote text from memory."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "File path as shown in the diff."}},
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "post_summary",
             "description": (
-                "Post the overall review: what the PR does, the verdict, and any "
-                "finding that has no single line to attach to. Call it once, at the end."
+                "Optional. Post a PR-level review summary — the overview and any "
+                "finding that has no single line to attach to. Skip it entirely when "
+                "the inline comments already say everything; do not restate them. "
+                "Call it at most once."
             ),
             "parameters": {
                 "type": "object",
@@ -1828,27 +1856,65 @@ REVIEW_TOOLS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
-            "name": "approve",
+            "name": "finish",
             "description": (
-                "Submit an approving review. Only allowed when no unresolved thread "
-                "is left; the call is refused otherwise."
+                "Finish the review and state your verdict. Call this last, after "
+                "every other tool."
             ),
             "parameters": {
                 "type": "object",
-                "properties": {"body": {"type": "string", "description": "Short approval note."}},
-                "required": [],
+                "properties": {
+                    "verdict": {
+                        "type": "string",
+                        "enum": ["approve", "comment", "block"],
+                        "description": (
+                            "approve: nothing to fix, merge as-is. "
+                            "comment: findings worth addressing, but not blocking. "
+                            "block: must not be merged as-is."
+                        ),
+                    }
+                },
+                "required": ["verdict"],
             },
         },
     },
+]
+
+
+# A reply can act too — "close this thread" has to actually close it.
+REPLY_TOOLS: List[Dict[str, Any]] = [
+    tool
+    for tool in REVIEW_TOOLS
+    if tool["function"]["name"]
+    in ("list_open_threads", "resolve_thread", "post_inline_comment")
+]
+
+REPLY_TOOLS.append(
     {
         "type": "function",
         "function": {
             "name": "finish",
-            "description": "Finish the review. Call this last, after every other tool.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "description": (
+                "Finish the reply. Always call it last, whether or not you used "
+                "another tool."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reply": {
+                        "type": "string",
+                        "description": (
+                            "The message to post back to the developer, in the "
+                            "review language. Keep it short. Leave empty when the "
+                            "tool calls already said everything there is to say."
+                        ),
+                    }
+                },
+                "required": [],
+            },
         },
-    },
-]
+    }
+)
 
 
 @dataclass
@@ -1865,6 +1931,10 @@ class ToolContext:
     summary_posted: bool = False
     approved: bool = False
     finish_requested: bool = False
+    finish_nudged: bool = False
+    verdict: str = ""
+    reply_text: str = ""
+    posted_comments: List[str] = field(default_factory=list)
 
 
 def _tool_read_file(args: Dict[str, Any], ctx: ToolContext) -> str:
@@ -1880,13 +1950,34 @@ def _tool_read_file(args: Dict[str, Any], ctx: ToolContext) -> str:
     return content
 
 
+def _same_finding(a: str, b: str) -> bool:
+    """Do two comment bodies describe the same finding?
+
+    The model re-analyses on every step and tends to restate what it already
+    posted. Comparison is character-based (difflib) because the reviews are
+    largely CJK, where whitespace tokenisation says nothing.
+    """
+    if not a or not b:
+        return False
+    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.7
+
+
 def _tool_post_inline_comment(args: Dict[str, Any], ctx: ToolContext) -> str:
+    body = args.get("body") or ""
+    key = " ".join(body.lower().split())
+    for previous in ctx.posted_comments:
+        if _same_finding(key, previous):
+            return (
+                "skipped: you already posted this finding. Do not restate it — "
+                "post only findings you have not raised, or move on."
+            )
+
     raw = {
         "path": args.get("path"),
         "quote": args.get("quote"),
         "start_quote": args.get("start_quote"),
         "side": args.get("side", "RIGHT"),
-        "body": args.get("body"),
+        "body": body,
     }
     normalized = normalize_inline_comments([raw], ctx.files)
     if not normalized:
@@ -1894,6 +1985,7 @@ def _tool_post_inline_comment(args: Dict[str, Any], ctx: ToolContext) -> str:
             "error: could not locate that line in the diff. Copy `quote` verbatim "
             "from the diff, without the +/- marker or line-number prefix."
         )
+    ctx.posted_comments.append(key)
     if ctx.config.dry_run:
         ctx.inline_posted += 1
         return f"dry-run: would post on {normalized[0]['path']}:{normalized[0]['line']}"
@@ -1906,10 +1998,24 @@ def _tool_post_inline_comment(args: Dict[str, Any], ctx: ToolContext) -> str:
     return f"posted on {normalized[0]['path']}:{normalized[0]['line']}"
 
 
+def _tool_get_file_diff(args: Dict[str, Any], ctx: ToolContext) -> str:
+    path = args.get("path")
+    for changed in ctx.files:
+        if changed.get("filename") == path:
+            numbered = annotate_diff(changed.get("patch") or "")
+            return numbered or "(no textual diff for this file)"
+    return f"error: {path} is not part of this pull request"
+
+
 def _tool_post_summary(args: Dict[str, Any], ctx: ToolContext) -> str:
     body = (args.get("body") or "").strip()
     if not body:
         return "error: 'body' is required"
+    if ctx.summary_posted:
+        return (
+            "refused: you already posted a summary. Do not post another one — "
+            "finish instead."
+        )
     if ctx.config.dry_run:
         ctx.summary_posted = True
         print(body)
@@ -1936,12 +2042,9 @@ def _tool_list_open_threads(args: Dict[str, Any], ctx: ToolContext) -> str:
     for thread in threads:
         if thread.get("isResolved"):
             continue
-        nodes = (thread.get("comments") or {}).get("nodes") or []
-        if not any(
-            (((n.get("author") or {}).get("login")) or "").endswith("[bot]")
-            for n in nodes
-        ):
+        if not _thread_is_bot_authored(thread):
             continue
+        nodes = (thread.get("comments") or {}).get("nodes") or []
         first = (nodes[0].get("body") or "").strip().replace("\n", " ")[:200]
         lines.append(f"- id: {thread.get('id')}\n  path: {thread.get('path')}\n  comment: {first}")
     return "\n".join(lines) if lines else "no unresolved threads"
@@ -1958,36 +2061,35 @@ def _tool_resolve_thread(args: Dict[str, Any], ctx: ToolContext) -> str:
     return "resolved"
 
 
-def _tool_approve(args: Dict[str, Any], ctx: ToolContext) -> str:
-    remaining = unresolved_bot_thread_count(ctx.gh, ctx.owner, ctx.repo, ctx.number)
-    if remaining != 0:
-        return f"refused: {remaining} unresolved thread(s) left — resolve them first"
-    if ctx.config.dry_run:
-        ctx.approved = True
-        return "dry-run: would approve"
-    try:
-        ctx.gh.post_review(
-            ctx.owner, ctx.repo, ctx.number,
-            (args.get("body") or "所有遗留问题已解决 ✅"), event="APPROVE",
-        )
-    except Exception as exc:  # noqa: BLE001
-        return f"error: could not approve: {exc}"
-    ctx.approved = True
-    return "approved"
-
-
-def _tool_finish(args: Dict[str, Any], ctx: ToolContext) -> str:
+def _tool_finish_reply(args: Dict[str, Any], ctx: ToolContext) -> str:
+    ctx.reply_text = (args.get("reply") or "").strip()
     ctx.finish_requested = True
     return "done"
 
 
+def _tool_finish(args: Dict[str, Any], ctx: ToolContext) -> str:
+    verdict = (args.get("verdict") or "").lower()
+    if verdict not in ("approve", "comment", "block"):
+        return "error: 'verdict' must be one of approve, comment, block"
+    if not (ctx.inline_posted or ctx.summary_posted) and not ctx.finish_nudged:
+        # One nudge, then honour it — never loop forever on a lazy model.
+        ctx.finish_nudged = True
+        return (
+            "refused: you have posted nothing. Review the diff, post every "
+            "finding you have, then finish."
+        )
+    ctx.verdict = verdict
+    ctx.finish_requested = True
+    return f"done (verdict={verdict})"
+
+
 TOOL_HANDLERS = {
     "read_file": _tool_read_file,
+    "get_file_diff": _tool_get_file_diff,
     "post_inline_comment": _tool_post_inline_comment,
     "post_summary": _tool_post_summary,
     "list_open_threads": _tool_list_open_threads,
     "resolve_thread": _tool_resolve_thread,
-    "approve": _tool_approve,
     "finish": _tool_finish,
 }
 
@@ -2072,9 +2174,154 @@ def run_agent_review(
     log(
         f"Agent done: {ctx.inline_posted} inline comment(s), "
         f"summary={'yes' if ctx.summary_posted else 'no'}, "
+        f"verdict={ctx.verdict or 'none'}, "
         f"approved={'yes' if ctx.approved else 'no'}."
     )
+
+    # The model is not reliably willing to approve on its own, so act on the
+    # verdict it declared at finish: anything still open blocks the approval.
+    if not ctx.approved and ctx.verdict == "approve":
+        act_on_clean_verdict(gh, owner, repo, number, ctx)
+
     return ctx
+
+
+def run_agent_reply(
+    ai: AIClient,
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    pr: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    system_prompt: str,
+    conversation: str,
+    author: str,
+    body: str,
+    thread_context: str,
+    config: "Config",
+) -> Optional[str]:
+    """Answer a comment with tools available.
+
+    Returns the text to post, or ``None`` when the model answered without using
+    any tool — the caller then falls back to a plain text-only reply.
+    """
+    ctx = ToolContext(
+        gh=gh, owner=owner, repo=repo, number=number, pr=pr, files=files,
+        config=config, heads=pr.get("head", {}).get("sha", ""),
+    )
+    parts: List[str] = []
+    if conversation:
+        parts.append("## Previous Conversation\n\n" + conversation)
+    if thread_context:
+        parts.append("## The Comment Being Replied To\n\n" + thread_context)
+    parts.append(
+        f"## New Comment\n\n**{author}** just wrote:\n\n{body}\n\n"
+        "Reply concisely. If they ask you to DO something to this pull request — "
+        "resolve a thread, leave an inline comment — call the matching tool "
+        "instead of telling them to do it themselves."
+    )
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": "\n\n".join(parts)},
+    ]
+
+    for iteration in range(1, MAX_AGENT_ITERATIONS + 1):
+        answer = ai.chat_message(messages, tools=REPLY_TOOLS)
+        calls = answer.get("tool_calls") or []
+        if not calls:
+            if iteration == 1:
+                return None
+            return (answer.get("content") or "").strip()
+
+        log(
+            f"Reply step {iteration}: "
+            + ", ".join(c.get("function", {}).get("name", "?") for c in calls)
+        )
+        messages.append(
+            {
+                "role": "assistant",
+                "content": answer.get("content") or "",
+                "tool_calls": calls,
+            }
+        )
+        for call in calls:
+            fn = call.get("function") or {}
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except ValueError:
+                args = {}
+            if not isinstance(args, dict):
+                args = {}
+            name = fn.get("name", "")
+            result = (
+                _tool_finish_reply(args, ctx)
+                if name == "finish"
+                else execute_tool(name, args, ctx)
+            )
+            messages.append(
+                {"role": "tool", "tool_call_id": call.get("id"), "content": result}
+            )
+        if ctx.finish_requested:
+            break
+
+    return ctx.reply_text
+
+
+def already_approved(
+    gh: GitHubClient, owner: str, repo: str, number: int, head_sha: str
+) -> bool:
+    """Has the bot already approved the current head commit?
+
+    Without this every run posts another approval on the same commit; an
+    approval only means something once per commit anyway, since a new commit
+    dismisses it.
+    """
+    if not head_sha:
+        return False
+    try:
+        reviews = gh.list_reviews(owner, repo, number)
+    except Exception as exc:  # noqa: BLE001 - best-effort
+        log(f"Warning: could not read existing reviews: {exc}")
+        return False
+    return any(
+        (review.get("state") or "").upper() == "APPROVED"
+        and review.get("commit_id") == head_sha
+        and is_bot_author(review.get("user"))
+        for review in reviews
+    )
+
+
+def approve_if_clean(
+    gh: GitHubClient, owner: str, repo: str, number: int, head_sha: str, what: str
+) -> bool:
+    """Submit APPROVE unless unattended by an open thread or an earlier approval."""
+    remaining = unresolved_bot_thread_count(gh, owner, repo, number)
+    if remaining != 0:
+        log(f"{remaining} thread(s) still open; not approving.")
+        return False
+    if already_approved(gh, owner, repo, number, head_sha):
+        log(f"Already approved {head_sha[:8]}; not approving again.")
+        return False
+    try:
+        gh.post_review(owner, repo, number, what, event="APPROVE")
+    except Exception as exc:  # noqa: BLE001
+        log(f"Warning: could not approve: {exc}")
+        return False
+    log("Approved: nothing left open.")
+    return True
+
+
+def act_on_clean_verdict(
+    gh: GitHubClient, owner: str, repo: str, number: int, ctx: ToolContext
+) -> None:
+    """Approve a review that came back clean, once nothing is left open."""
+    if ctx.config.dry_run:
+        log("dry-run: would approve")
+        return
+    head_sha = ctx.pr.get("head", {}).get("sha", "")
+    if approve_if_clean(gh, owner, repo, number, head_sha, "审查通过，无遗留问题 ✅"):
+        ctx.approved = True
 
 
 def main() -> int:
@@ -2212,9 +2459,15 @@ def main() -> int:
             )
 
         try:
-            reply = generate_reply(
-                ai, reply_prompt, conversation, author, body, thread_context
+            reply_files = gh.list_files(owner, repo, number)
+            reply = run_agent_reply(
+                ai, gh, owner, repo, number, pr, reply_files, reply_prompt,
+                conversation, author, body, thread_context, config,
             )
+            if reply is None:
+                reply = generate_reply(
+                    ai, reply_prompt, conversation, author, body, thread_context
+                )
         except Exception as exc:  # noqa: BLE001 - report instead of going silent
             log(f"Error: reply generation failed: {exc}")
             reply = ""
