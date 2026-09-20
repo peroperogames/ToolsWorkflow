@@ -56,6 +56,21 @@ class AIClient:
         Tries the primary model first; if it fails (timeout, 429, 5xx, or any
         other error) and a fallback model is configured, retries with that.
         """
+        return self.chat_message(messages, temperature, max_tokens)["content"]
+
+    def chat_message(
+        self,
+        messages: List[Dict[str, Any]],
+        temperature: float = 0.3,
+        max_tokens: Optional[int] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Send a chat request and return the raw assistant message.
+
+        The message carries ``content`` plus, when the model decides to use
+        them, ``tool_calls`` — arguments arrive as JSON the API has already
+        validated, so nothing has to be parsed out of prose.
+        """
         models = [self.model]
         if self.fallback_model and self.fallback_model != self.model:
             models.append(self.fallback_model)
@@ -63,7 +78,9 @@ class AIClient:
         last_error: Optional[Exception] = None
         for index, model in enumerate(models):
             try:
-                return self._chat_with_model(model, messages, temperature, max_tokens)
+                return self._chat_with_model(
+                    model, messages, temperature, max_tokens, tools
+                )
             except RuntimeError as exc:
                 last_error = exc
                 if index + 1 < len(models):
@@ -80,22 +97,26 @@ class AIClient:
     def _chat_with_model(
         self,
         model: str,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         temperature: float,
         max_tokens: Optional[int],
-    ) -> str:
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         """Run the request/retry loop for a single model."""
         url = self.base_url
         if not url.endswith("/chat/completions"):
             url = f"{url}/chat/completions"
 
-        payload = {
+        payload: Dict[str, Any] = {
             "model": model,
             "messages": messages,
             "temperature": temperature,
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
 
         last_error: Optional[Exception] = None
         for attempt in range(self.max_retries + 1):
@@ -166,7 +187,10 @@ class AIClient:
             if usage:
                 self._log_usage(usage)
 
-            return content.strip()
+            return {
+                "content": content.strip(),
+                "tool_calls": message.get("tool_calls") or [],
+            }
 
         raise RuntimeError(f"Failed to call OpenAI API after retries: {last_error}")
 

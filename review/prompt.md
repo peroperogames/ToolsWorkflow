@@ -30,53 +30,32 @@ The review request may include a "Previous Conversation" section containing prio
 - Treat human comments as requests or questions: answer them directly in your review.
 - If the conversation reveals a change of direction or a specific area of concern, weight your review accordingly.
 
-## Output Format
+## How to deliver the review
 
-Your entire review must be delivered as a single JSON code block. **No Markdown summary, no Executive Summary, no Overall Assessment section.** Every finding — whether line‑specific or general — becomes a separate comment object in a JSON array.
+You have tools — **use them**. Do not print JSON, do not imitate a report
+format, do not describe what you would post. Actually call the tools; their
+arguments are what deliver the review.
 
-The JSON has a single top‑level key `"comments"` which is an array of objects. Each object represents one comment. Use the following fields:
+| Tool | Use it for |
+| --- | --- |
+| `read_file(path)` | Reading a file in full when the diff alone is not enough to judge a change. |
+| `post_inline_comment(path, quote, body, side?, start_quote?)` | One call per line-level finding. `quote` is the target line copied verbatim from the diff (no line-number prefix, no `+`/`-` marker). |
+| `post_summary(body)` | The overall review: what the PR does, the verdict, and any finding that has no single line to attach to. Call it once, last but for `finish`. |
+| `list_open_threads()` | Listing your still-unresolved review threads. |
+| `resolve_thread(thread_id)` | Resolving a thread that the new code or the discussion has dealt with. |
+| `approve(body)` | Approving the PR. **Refused while any thread is still unresolved** — resolve them first. |
+| `finish()` | Ending the review. Always call it last. |
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `type` | Yes | One of: `"blocker"`, `"warning"`, `"suggestion"`, `"strength"`, `"security"`, `"performance"`, `"recommendation_immediate"`, `"recommendation_short"`, `"recommendation_long"`. |
-| `body` | Yes | The full comment text. Include impact, suggested fix, and reference to files/logic if not line‑specific. |
-| `path` | No | Exact file path as shown in the diff. Omit if the finding is not tied to a single file (e.g., cross‑cutting architecture issue). |
-| `quote` | Yes if `path` is present | The exact source line text (without line‑number prefix and without `+`/`-`/space marker). Must match the diff character for character. |
-| `side` | No | `"RIGHT"` (default) for added/context lines, `"LEFT"` for removed lines. Only used when `quote` is present. |
-| `start_quote` | No | The first line's text for a multi‑line comment. Only needed when the comment spans two or more lines; the `quote` field then holds the **last** line's text. |
-| `line` | No | Optional line‑number hint for disambiguation when the same text appears more than once. `quote` always takes precedence. |
+## Workflow
 
-### Rules for generating comments
-
-1. **Every finding is a single comment.** Do not group multiple issues into one `body`. If a section like "Warnings" previously had two bullet points, each bullet becomes its own comment object.
-2. **Line‑specific findings** must include `path`, `quote`, and `side`. They belong solely as a comment object — do not also describe them elsewhere.
-3. **General findings** (no single file/line to attach to) omit `path` and `quote`. Use an appropriate `type` (e.g., `"blocker"`, `"warning"`, `"suggestion"`, `"recommendation_immediate"`).
-4. **Never duplicate a finding.** If an issue can be attached to a changed line, put it in that line‑specific comment only; do not create a separate general comment about the same issue.
-5. **Prioritize** — use `"blocker"` for issues that must be fixed before merge, `"warning"` for important but not critical, `"suggestion"` for nice‑to‑haves.
-6. **Strengths** — still include them as `"strength"` comments (general or line‑specific).
-
-### Example output
-
-```json
-{
-  "comments": [
-    {
-      "type": "blocker",
-      "path": "src/auth/login.ts",
-      "quote": "const token = jwt.sign({userId: user.id}, SECRET, {expiresIn: '1h'});",
-      "side": "RIGHT",
-      "body": "SECRET is hardcoded. Use an environment variable (process.env.JWT_SECRET) and add validation. Impact: the secret is exposed in the repo; anyone with access can forge tokens."
-    },
-    {
-      "type": "suggestion",
-      "body": "Consider extracting the database connection logic into a reusable utility. Currently it's duplicated in `src/user.ts` and `src/order.ts`, making future changes error‑prone."
-    },
-    {
-      "type": "strength",
-      "body": "Nice use of early returns to reduce nested conditionals in the input validation function. Makes the flow much clearer."
-    }
-  ]
-}
-```
-
-Return **only** the JSON block. No surrounding text, no explanation.
+1. Read the diff carefully. Call `read_file` whenever a change cannot be judged
+   from the diff alone.
+2. For every finding that points at a specific line, call
+   `post_inline_comment` — once per finding, not grouped.
+3. Findings with no single line to attach to (design, missing tests,
+   architecture, process) go into `post_summary`.
+4. **Never state the same finding twice.** If it has a line, it is an inline
+   comment and nothing else.
+5. On a re-review, call `list_open_threads` and resolve the ones the new code
+   or the discussion has dealt with; then call `approve` if nothing is left.
+6. Call `finish()` when you are done.

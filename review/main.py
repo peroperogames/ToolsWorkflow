@@ -43,7 +43,7 @@ import history
 DEFAULT_PROMPT_FILE = Path(__file__).resolve().parent / "prompt.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-09-18.6"
+VERSION = "2026-09-20"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -89,18 +89,33 @@ REPLY_SYSTEM_PROMPT = (
     "what you 'previously replied' — if the context is missing, say so plainly."
 )
 
+INLINE_COMMENT_PROMPT = (
+    "The developer asked you to leave an inline (line-level) comment on this pull "
+    "request. Pick ONE changed line and comment on it — a concrete observation "
+    "about that line, or what it does and whether it looks right.\n"
+    'Reply with ONLY a JSON object: {"comments": [{"type": "suggestion", '
+    '"path": "<file>", "quote": "<the exact line text>", "side": "RIGHT", '
+    '"body": "<the comment>"}]}\n'
+    "`quote` is copied verbatim from the diff — no line-number prefix, no "
+    "leading +/-/space marker."
+)
+
 INTENT_CLASSIFIER_PROMPT = (
     "Classify the intent of this GitHub comment directed at you (a code review bot).\n"
-    "Reply with EXACTLY one of these four words, nothing else:\n"
-    "- 'improve_prompt' — the user wants you to change HOW you review: your "
-    "instructions, your prompt, prompt.md, your review style, wording, or format.\n"
+    "Reply with EXACTLY one of these five words, nothing else:\n"
+    "- 'improve_prompt' — the user asks you to CHANGE how you review (your "
+    "prompt, style, wording or format). A bare complaint without an instruction "
+    "to change the prompt is 'reply', not this.\n"
     "- 'review' — the user wants you to review this PR now.\n"
+    "- 'inline_comment' — the user asks you to leave an inline / line-level "
+    "comment on the code, e.g. 'inline comment 一下', '留个行内评论'.\n"
     "- 'code_change' — the user wants the SOURCE CODE of the repo under review "
     "changed (fix a bug, add a feature, refactor).\n"
     "- 'reply' — anything else: questions, acknowledgements, discussion.\n"
     "Rules:\n"
-    "- Feedback about your own reviewing behaviour (too long, use inline "
-    "comments, be stricter, ...) is 'improve_prompt', NOT 'code_change'.\n"
+    "- An instruction to review differently ('be shorter', 'use inline comments', "
+    "'be stricter') is 'improve_prompt'. A complaint with no instruction, or a "
+    "statement of fact ('this isn't an inline comment'), is 'reply'.\n"
     "- Only choose 'code_change' when the repo's actual source code must change.\n"
     "- If a comment contains an acknowledgement or quoted reply and no clear "
     "request, choose 'reply'."
@@ -1184,9 +1199,11 @@ def pick_intent(raw: str) -> str:
     """Map a classifier response to one of the known intents."""
     text = (raw or "").strip().lower()
     # Most specific first — "improve_prompt" must win over a loose "review" match.
-    for intent in ("improve_prompt", "code_change", "review"):
+    for intent in ("improve_prompt", "code_change", "inline_comment", "review"):
         if intent in text:
             return intent
+    if "inline" in text:
+        return "inline_comment"
     if "improve" in text or "prompt" in text:
         return "improve_prompt"
     return "reply"
@@ -1598,6 +1615,48 @@ def handle_code_change(
     return 0
 
 
+def handle_inline_comment(
+    ai: AIClient,
+    gh: GitHubClient,
+    pr: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    author: str,
+    owner: str,
+    repo: str,
+    number: int,
+) -> int:
+    """Leave an inline comment on a changed line when the user asks for one."""
+    if not files:
+        gh.post_comment(owner, repo, number, f"@{author} 这个 PR 没有可评论的变更行。")
+        return 0
+
+    log("Asked for an inline comment — picking a line...")
+    raw = ai.chat(
+        [
+            {"role": "system", "content": INLINE_COMMENT_PROMPT},
+            {"role": "user", "content": build_diff_text(pr, files)},
+        ],
+        temperature=0.3,
+    )
+    _leftover, comments = extract_inline_comments(raw)
+    inline, _general = split_comments(comments)
+    normalized = normalize_inline_comments(inline, files)
+    if not normalized:
+        log("Could not derive a line-anchored comment from the model output.")
+        gh.post_comment(
+            owner, repo, number,
+            f"@{author} 没能挑出一条可定位的代码行，指定文件和行我再补。",
+        )
+        return 0
+
+    posted = post_inline_comments(
+        gh, owner, repo, number, pr.get("head", {}).get("sha", ""), normalized[:1]
+    )
+    if not posted:
+        gh.post_comment(owner, repo, number, f"@{author} 行内评论发送失败，请查看日志。")
+    return 0
+
+
 def handle_review_request(
     ai: AIClient,
     gh: GitHubClient,
@@ -1619,6 +1678,12 @@ def handle_review_request(
         return 0
 
     log(f"Review requested via @-mention ({len(files)} files, ~{len(conversation)} chars context)...")
+    ctx = run_agent_review(
+        ai, gh, owner, repo, number, pr, files, system_prompt, conversation, config
+    )
+    if ctx is not None:
+        return 0
+
     review_text, raw_comments, _general = perform_review(
         ai, system_prompt, pr, files, config.max_tokens_per_chunk, conversation
     )
@@ -1679,6 +1744,337 @@ def determine_event(review_text: str) -> str:
     if approved:
         return "APPROVE"
     return "COMMENT"
+
+
+MAX_AGENT_ITERATIONS = 12
+
+# The model gets tools instead of an output format to imitate: arguments come
+# back validated by the API, so nothing has to be parsed out of prose.
+REVIEW_TOOLS: List[Dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": (
+                "Read the full current content of a file in this pull request's "
+                "branch. Use it when the diff alone is not enough to judge a change."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "File path as shown in the diff."}},
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "post_inline_comment",
+            "description": (
+                "Attach a comment to one changed line. Call it once per finding — "
+                "line-level findings belong here and must not be repeated in the summary."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path as shown in the diff."},
+                    "quote": {"type": "string", "description": "Text of the target line, copied verbatim from the diff (no line-number prefix, no +/- marker)."},
+                    "start_quote": {"type": "string", "description": "First line's text when the comment spans several lines."},
+                    "side": {"type": "string", "enum": ["RIGHT", "LEFT"], "description": "RIGHT (default) for added/context lines, LEFT for removed."},
+                    "body": {"type": "string", "description": "The comment: what is wrong, the impact, and the suggested fix."},
+                },
+                "required": ["path", "quote", "body"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "post_summary",
+            "description": (
+                "Post the overall review: what the PR does, the verdict, and any "
+                "finding that has no single line to attach to. Call it once, at the end."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"body": {"type": "string", "description": "Markdown summary."}},
+                "required": ["body"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_open_threads",
+            "description": "List your still-unresolved review threads on this PR (id, file, first comment).",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "resolve_thread",
+            "description": (
+                "Mark one of your review threads as resolved, once the code or the "
+                "discussion has dealt with it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"thread_id": {"type": "string", "description": "id from list_open_threads."}},
+                "required": ["thread_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "approve",
+            "description": (
+                "Submit an approving review. Only allowed when no unresolved thread "
+                "is left; the call is refused otherwise."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"body": {"type": "string", "description": "Short approval note."}},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "finish",
+            "description": "Finish the review. Call this last, after every other tool.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+]
+
+
+@dataclass
+class ToolContext:
+    gh: GitHubClient
+    owner: str
+    repo: str
+    number: int
+    pr: Dict[str, Any]
+    files: List[Dict[str, Any]]
+    config: "Config"
+    heads: str
+    inline_posted: int = 0
+    summary_posted: bool = False
+    approved: bool = False
+    finish_requested: bool = False
+
+
+def _tool_read_file(args: Dict[str, Any], ctx: ToolContext) -> str:
+    path = args.get("path")
+    if not path:
+        return "error: 'path' is required"
+    try:
+        content = ctx.gh.get_file_content(ctx.owner, ctx.repo, path, ref=ctx.heads)
+    except Exception as exc:  # noqa: BLE001
+        return f"error: could not read {path}: {exc}"
+    if len(content) > 20000:
+        return content[:20000] + "\n... (truncated)"
+    return content
+
+
+def _tool_post_inline_comment(args: Dict[str, Any], ctx: ToolContext) -> str:
+    raw = {
+        "path": args.get("path"),
+        "quote": args.get("quote"),
+        "start_quote": args.get("start_quote"),
+        "side": args.get("side", "RIGHT"),
+        "body": args.get("body"),
+    }
+    normalized = normalize_inline_comments([raw], ctx.files)
+    if not normalized:
+        return (
+            "error: could not locate that line in the diff. Copy `quote` verbatim "
+            "from the diff, without the +/- marker or line-number prefix."
+        )
+    if ctx.config.dry_run:
+        ctx.inline_posted += 1
+        return f"dry-run: would post on {normalized[0]['path']}:{normalized[0]['line']}"
+    posted = post_inline_comments(
+        ctx.gh, ctx.owner, ctx.repo, ctx.number, ctx.heads, normalized
+    )
+    if not posted:
+        return "error: GitHub rejected the comment"
+    ctx.inline_posted += posted
+    return f"posted on {normalized[0]['path']}:{normalized[0]['line']}"
+
+
+def _tool_post_summary(args: Dict[str, Any], ctx: ToolContext) -> str:
+    body = (args.get("body") or "").strip()
+    if not body:
+        return "error: 'body' is required"
+    if ctx.config.dry_run:
+        ctx.summary_posted = True
+        print(body)
+        return "dry-run: summary printed"
+    try:
+        if ctx.config.silent:
+            ctx.gh.post_comment(ctx.owner, ctx.repo, ctx.number, body)
+        else:
+            ctx.gh.post_review(
+                ctx.owner, ctx.repo, ctx.number, body, event=determine_event(body)
+            )
+    except Exception as exc:  # noqa: BLE001
+        return f"error: could not post the summary: {exc}"
+    ctx.summary_posted = True
+    return "summary posted"
+
+
+def _tool_list_open_threads(args: Dict[str, Any], ctx: ToolContext) -> str:
+    try:
+        threads = ctx.gh.list_review_threads(ctx.owner, ctx.repo, ctx.number)
+    except Exception as exc:  # noqa: BLE001
+        return f"error: {exc}"
+    lines = []
+    for thread in threads:
+        if thread.get("isResolved"):
+            continue
+        nodes = (thread.get("comments") or {}).get("nodes") or []
+        if not any(
+            (((n.get("author") or {}).get("login")) or "").endswith("[bot]")
+            for n in nodes
+        ):
+            continue
+        first = (nodes[0].get("body") or "").strip().replace("\n", " ")[:200]
+        lines.append(f"- id: {thread.get('id')}\n  path: {thread.get('path')}\n  comment: {first}")
+    return "\n".join(lines) if lines else "no unresolved threads"
+
+
+def _tool_resolve_thread(args: Dict[str, Any], ctx: ToolContext) -> str:
+    thread_id = args.get("thread_id")
+    if not thread_id:
+        return "error: 'thread_id' is required"
+    try:
+        ctx.gh.resolve_review_thread(thread_id)
+    except Exception as exc:  # noqa: BLE001
+        return f"error: could not resolve: {exc}"
+    return "resolved"
+
+
+def _tool_approve(args: Dict[str, Any], ctx: ToolContext) -> str:
+    remaining = unresolved_bot_thread_count(ctx.gh, ctx.owner, ctx.repo, ctx.number)
+    if remaining != 0:
+        return f"refused: {remaining} unresolved thread(s) left — resolve them first"
+    if ctx.config.dry_run:
+        ctx.approved = True
+        return "dry-run: would approve"
+    try:
+        ctx.gh.post_review(
+            ctx.owner, ctx.repo, ctx.number,
+            (args.get("body") or "所有遗留问题已解决 ✅"), event="APPROVE",
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"error: could not approve: {exc}"
+    ctx.approved = True
+    return "approved"
+
+
+def _tool_finish(args: Dict[str, Any], ctx: ToolContext) -> str:
+    ctx.finish_requested = True
+    return "done"
+
+
+TOOL_HANDLERS = {
+    "read_file": _tool_read_file,
+    "post_inline_comment": _tool_post_inline_comment,
+    "post_summary": _tool_post_summary,
+    "list_open_threads": _tool_list_open_threads,
+    "resolve_thread": _tool_resolve_thread,
+    "approve": _tool_approve,
+    "finish": _tool_finish,
+}
+
+
+def execute_tool(name: str, args: Dict[str, Any], ctx: ToolContext) -> str:
+    """Run one tool call and return the text fed back to the model."""
+    handler = TOOL_HANDLERS.get(name)
+    if handler is None:
+        return f"error: unknown tool '{name}'"
+    try:
+        return handler(args, ctx)
+    except Exception as exc:  # noqa: BLE001 - report the failure, keep the loop alive
+        return f"error: {name} failed: {exc}"
+
+
+def run_agent_review(
+    ai: AIClient,
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    pr: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    system_prompt: str,
+    conversation: str,
+    config: "Config",
+) -> Optional[ToolContext]:
+    """Let the model drive the review through tools.
+
+    Returns the context when the model used tools, or ``None`` when it answered
+    in prose instead — the caller then falls back to parsing that text.
+    """
+    ctx = ToolContext(
+        gh=gh, owner=owner, repo=repo, number=number, pr=pr, files=files,
+        config=config, heads=pr.get("head", {}).get("sha", ""),
+    )
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": build_diff_text(pr, files, conversation=conversation),
+        },
+    ]
+
+    for iteration in range(1, MAX_AGENT_ITERATIONS + 1):
+        reply = ai.chat_message(messages, tools=REVIEW_TOOLS)
+        calls = reply.get("tool_calls") or []
+        if not calls:
+            if iteration == 1:
+                log("Model answered without tools; using the text fallback.")
+                return None
+            log("Model stopped calling tools; ending the review.")
+            break
+
+        log(f"Agent step {iteration}: {', '.join(c.get('function', {}).get('name', '?') for c in calls)}")
+        messages.append(
+            {
+                "role": "assistant",
+                "content": reply.get("content") or "",
+                "tool_calls": calls,
+            }
+        )
+        for call in calls:
+            fn = call.get("function") or {}
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except ValueError:
+                args = {}
+            if not isinstance(args, dict):
+                args = {}
+            result = execute_tool(fn.get("name", ""), args, ctx)
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.get("id"),
+                    "content": result,
+                }
+            )
+        if ctx.finish_requested:
+            break
+
+    log(
+        f"Agent done: {ctx.inline_posted} inline comment(s), "
+        f"summary={'yes' if ctx.summary_posted else 'no'}, "
+        f"approved={'yes' if ctx.approved else 'no'}."
+    )
+    return ctx
 
 
 def main() -> int:
@@ -1809,6 +2205,11 @@ def main() -> int:
             return handle_review_request(
                 ai, gh, pr, body, author, owner, repo, number, config, system_prompt, conversation, bot_login
             )
+        if intent == "inline_comment":
+            files = gh.list_files(owner, repo, number)
+            return handle_inline_comment(
+                ai, gh, pr, files, author, owner, repo, number
+            )
 
         try:
             reply = generate_reply(
@@ -1881,6 +2282,28 @@ def main() -> int:
     conversation = render_conversation(entries)
     if conversation:
         log(f"Using {len(entries)} prior review/comment entry(ies) as context.")
+
+    # Preferred path: the model drives the review with tools. The actions are
+    # already done by the tools, so there is nothing left to post here.
+    ctx = run_agent_review(
+        ai, gh, owner, repo, number, pr, files, review_prompt, conversation, config
+    )
+    if ctx is not None:
+        if incremental:
+            settle_threads_and_approve(
+                ai, gh, owner, repo, number, pr, files, conversation=conversation
+            )
+        if not config.dry_run:
+            entries.append(
+                {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "who": "perotoolsbot[bot]",
+                    "kind": "review",
+                    "body": f"agent review: {ctx.inline_posted} inline comment(s)",
+                }
+            )
+            history.save(owner, repo, number, entries[-MAX_CONVERSATION_ENTRIES:])
+        return 0
 
     review_text, raw_comments, general = perform_review(
         ai, review_prompt, pr, files, config.max_tokens_per_chunk, conversation
