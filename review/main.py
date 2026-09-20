@@ -43,7 +43,7 @@ import history
 DEFAULT_PROMPT_FILE = Path(__file__).resolve().parent / "prompt.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-09-18"
+VERSION = "2026-09-18.3"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -594,9 +594,10 @@ def review_files(
 
 RESOLVE_DECIDER_PROMPT = (
     "Earlier review comments of yours on a pull request are listed below as "
-    "unresolved threads, and new commits have just been pushed.\n"
-    "Decide which of those threads are now ADDRESSED by the current code and "
-    "can be marked resolved.\n"
+    "unresolved threads. The code below is the diff of the LATEST push only — "
+    "that is what changed since your review.\n"
+    "Decide which of those threads are now ADDRESSED by those changes and can be "
+    "marked resolved.\n"
     'Reply with ONLY a JSON object: {"resolved": ["<thread id>", ...]}\n'
     "Rules:\n"
     "- Include a thread only when the current code clearly fixes or removes the "
@@ -1212,6 +1213,63 @@ def thread_has_bot_comment(
     return False
 
 
+def settle_threads_and_approve(
+    ai: AIClient,
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    pr: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    conversation: str = "",
+    push_files: Optional[List[Dict[str, Any]]] = None,
+    allow_approve: bool = True,
+) -> None:
+    """Resolve the threads that are done with, then approve if none are left."""
+    decide_resolved_threads(
+        ai, gh, owner, repo, number, pr, files, "perotoolsbot[bot]",
+        push_files=push_files, conversation=conversation,
+    )
+
+    if not allow_approve:
+        log("New findings were raised; not approving.")
+        return
+
+    remaining = unresolved_bot_thread_count(gh, owner, repo, number)
+    if remaining != 0:
+        log(f"{remaining} thread(s) still open; not approving.")
+        return
+    try:
+        gh.post_review(
+            owner, repo, number, "所有遗留问题已解决 ✅", event="APPROVE"
+        )
+        log("Approved: no unresolved threads remain.")
+    except Exception as exc:  # noqa: BLE001 - approving is best-effort
+        log(f"Warning: could not approve: {exc}")
+
+
+def unresolved_bot_thread_count(
+    gh: GitHubClient, owner: str, repo: str, number: int
+) -> int:
+    """Number of unresolved review threads the bot is part of (-1 if unknown)."""
+    try:
+        threads = gh.list_review_threads(owner, repo, number)
+    except Exception as exc:  # noqa: BLE001 - best-effort
+        log(f"Warning: could not count review threads: {exc}")
+        return -1
+    count = 0
+    for thread in threads:
+        if thread.get("isResolved"):
+            continue
+        nodes = (thread.get("comments") or {}).get("nodes") or []
+        if any(
+            (((n.get("author") or {}).get("login")) or "").endswith("[bot]")
+            for n in nodes
+        ):
+            count += 1
+    return count
+
+
 def _first_json_object(text: str) -> Optional[Dict[str, Any]]:
     """Return the first JSON object embedded in ``text``, if any."""
     decoder = json.JSONDecoder()
@@ -1236,8 +1294,15 @@ def decide_resolved_threads(
     pr: Dict[str, Any],
     files: List[Dict[str, Any]],
     bot_login: str,
+    push_files: Optional[List[Dict[str, Any]]] = None,
+    conversation: str = "",
 ) -> int:
-    """Resolve the review threads that the latest changes have addressed."""
+    """Resolve the review threads that have been settled.
+
+    A thread counts as settled when the latest push fixed it (``push_files``) or
+    when the discussion concluded it (``conversation``) — a concern answered in
+    the thread is resolved even if no code changed.
+    """
     try:
         threads = gh.list_review_threads(owner, repo, number)
     except Exception as exc:  # noqa: BLE001 - best-effort, never block the review
@@ -1274,17 +1339,16 @@ def decide_resolved_threads(
         f"  comment: {c['body']}"
         for c in candidates
     )
+    context = "## Unresolved threads\n\n" + listing
+    if push_files is not None:
+        context += "\n\n## Changes in the latest push\n\n" + build_diff_text(
+            pr, push_files
+        )
+    if conversation:
+        context += "\n\n## Discussion so far\n\n" + conversation
     messages = [
         {"role": "system", "content": RESOLVE_DECIDER_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                "## Unresolved threads\n\n"
-                + listing
-                + "\n\n## Current changes\n\n"
-                + build_diff_text(pr, files)
-            ),
-        },
+        {"role": "user", "content": context},
     ]
     try:
         raw = ai.chat(messages, temperature=0.0)
@@ -1432,7 +1496,7 @@ def handle_review_request(
         return 0
 
     log(f"Review requested via @-mention ({len(files)} files, ~{len(conversation)} chars context)...")
-    review_text, raw_comments = perform_review(
+    review_text, raw_comments, _general = perform_review(
         ai, system_prompt, pr, files, config.max_tokens_per_chunk, conversation
     )
     if not review_text:
@@ -1662,6 +1726,13 @@ def main() -> int:
             }
         )
         history.save(owner, repo, number, entries[-MAX_CONVERSATION_ENTRIES:])
+
+        # A concern answered in the thread is settled even without a code change,
+        # so re-check the open threads and approve once nothing is left.
+        if not config.dry_run:
+            settle_threads_and_approve(
+                ai, gh, owner, repo, number, pr, [], conversation=conversation
+            )
         return 0
 
     # Review mode.
@@ -1688,7 +1759,7 @@ def main() -> int:
     if conversation:
         log(f"Using {len(entries)} prior review/comment entry(ies) as context.")
 
-    review_text, raw_comments = perform_review(
+    review_text, raw_comments, general = perform_review(
         ai, review_prompt, pr, files, config.max_tokens_per_chunk, conversation
     )
     if not review_text:
@@ -1728,10 +1799,22 @@ def main() -> int:
                 gh, owner, repo, number, pr.get("head", {}).get("sha", ""), inline
             )
 
-    # On a later push, let the model retire the threads the new code fixed.
+    # On a later push, retire the threads that push settled, then approve when
+    # the review came back clean and nothing is left open.
     if incremental:
-        decide_resolved_threads(
-            ai, gh, owner, repo, number, pr, files, "perotoolsbot[bot]"
+        push_files: Optional[List[Dict[str, Any]]] = None
+        before, after = payload.get("before"), payload.get("after")
+        if before and after:
+            try:
+                push_files = gh.compare(owner, repo, before, after)
+                log(f"Latest push touched {len(push_files)} file(s).")
+            except Exception as exc:  # noqa: BLE001 - fall back to the discussion
+                log(f"Warning: could not diff the push ({before[:7]}..{after[:7]}): {exc}")
+        settle_threads_and_approve(
+            ai, gh, owner, repo, number, pr, files,
+            conversation=conversation,
+            push_files=push_files,
+            allow_approve=(event == "APPROVE"),
         )
 
     # Persist this run's review so the next run can build on it.

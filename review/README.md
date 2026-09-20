@@ -124,9 +124,15 @@ Replying requires the GitHub App to have **`Issues: Read and write`** permission
 5. Classify the review (`REQUEST_CHANGES` / `COMMENT` / `APPROVE`) from the
    presence of critical/warning keywords.
 6. Post the review (or comment in `SILENT_MODE`). No labels are applied.
-7. On a later push, also ask the model which of its own unresolved review
-   threads the new code has addressed, and resolve those. Thread resolution
-   uses the GraphQL API — the REST API cannot do it.
+7. Resolve and approve are re-checked after **both** a later push and a reply
+   in an open thread:
+   - On a push, the diff of **that push alone** (`before...after` from the
+     event) is what the model judges against.
+   - In a thread, a concern answered by discussion counts as settled even when
+     no code changed.
+   - Once no unresolved thread remains and the latest review was clean, the bot
+     submits an `APPROVE` review. Thread resolution uses the GraphQL API — the
+     REST API cannot do it.
 
 The review can also carry **inline line comments** (single-line and cross-line via `start_line`). The model emits them as a JSON `comments` block, which the script parses and posts alongside the review body; if GitHub rejects the line numbers, it falls back to a body-only review.
 

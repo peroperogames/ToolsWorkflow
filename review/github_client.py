@@ -222,6 +222,25 @@ class GitHubClient:
             "POST", f"/repos/{owner}/{repo}/pulls/{number}/comments", json=payload
         )
 
+    def compare(
+        self, owner: str, repo: str, base: str, head: str
+    ) -> List[Dict[str, Any]]:
+        """List the files changed between two commits (i.e. one push)."""
+        files: List[Dict[str, Any]] = []
+        page = 1
+        while True:
+            data = self._request(
+                "GET",
+                f"/repos/{owner}/{repo}/compare/{base}...{head}",
+                params={"per_page": 100, "page": page},
+            )
+            chunk = (data or {}).get("files") or []
+            files.extend(chunk)
+            if len(chunk) < 100:
+                break
+            page += 1
+        return files
+
     def get_review_comment(
         self, owner: str, repo: str, comment_id: int
     ) -> Dict[str, Any]:
