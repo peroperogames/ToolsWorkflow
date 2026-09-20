@@ -43,7 +43,7 @@ import history
 DEFAULT_PROMPT_FILE = Path(__file__).resolve().parent / "prompt.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-09-18.3"
+VERSION = "2026-09-18.5"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -811,6 +811,38 @@ def _heading_start_above(text: str, index: int) -> int:
     return len("\n".join(lines[:i])) + (1 if i > 0 else 0)
 
 
+def is_comments_object(data: Any) -> bool:
+    """Is this parsed JSON the comments payload we asked for?"""
+    if not isinstance(data, dict):
+        return False
+    entries = data.get("comments")
+    if not isinstance(entries, list):
+        return False
+    if not entries:
+        return set(data) == {"comments"}
+    # Only `body` is mandatory — a finding without a line has no `path`.
+    return all(isinstance(c, dict) and isinstance(c.get("body"), str) for c in entries)
+
+
+def find_json_object(text: str) -> Optional[Tuple[Dict[str, Any], int, int]]:
+    """First JSON object in ``text`` with its ``(obj, start, end)`` offsets.
+
+    The model does not always wrap its JSON in a code fence, so the raw text has
+    to be searched as well.
+    """
+    decoder = json.JSONDecoder(strict=False)
+    for index, char in enumerate(text or ""):
+        if char != "{":
+            continue
+        try:
+            obj, end = decoder.raw_decode(text, index)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            return obj, index, index + end
+    return None
+
+
 def is_comments_payload(body: str) -> bool:
     """Is this fenced block the inline-comments payload we asked for?
 
@@ -861,11 +893,20 @@ def extract_inline_comments(review_text: str) -> Tuple[str, List[Dict[str, Any]]
             comments.extend(c for c in data["comments"] if isinstance(c, dict))
         spans.append((match.start(), match.end()))
 
-    log(
-        f"Inline comments block: found {len(spans)}, parsed {len(comments)} comment(s)."
-        if spans
-        else "Inline comments block: none found in the review body."
-    )
+    if not spans:
+        # No fenced block — the JSON-only prompt often returns the payload bare.
+        found = find_json_object(review_text)
+        if found and is_comments_object(found[0]):
+            comments = [
+                c for c in found[0]["comments"] if isinstance(c, dict)
+            ]
+            spans.append((found[1], found[2]))
+
+    if spans:
+        log(f"Inline comments block: found {len(spans)}, parsed {len(comments)} comment(s).")
+    else:
+        preview = " ".join((review_text or "").split())[:200]
+        log(f"Inline comments block: none found. Output starts with: {preview!r}")
 
     # Remove from the end backwards so earlier offsets stay valid.
     cleaned = review_text
@@ -1257,15 +1298,19 @@ def unresolved_bot_thread_count(
     except Exception as exc:  # noqa: BLE001 - best-effort
         log(f"Warning: could not count review threads: {exc}")
         return -1
+
+    log(f"Review threads seen: {len(threads)}.")
     count = 0
     for thread in threads:
-        if thread.get("isResolved"):
-            continue
         nodes = (thread.get("comments") or {}).get("nodes") or []
-        if any(
-            (((n.get("author") or {}).get("login")) or "").endswith("[bot]")
-            for n in nodes
-        ):
+        authors = ",".join(
+            (((n.get("author") or {}).get("login")) or "?") for n in nodes
+        )
+        resolved = bool(thread.get("isResolved"))
+        log(f"  {thread.get('path')} resolved={resolved} comments=[{authors}]")
+        if resolved:
+            continue
+        if any(a.endswith("[bot]") for a in authors.split(",") if a):
             count += 1
     return count
 
