@@ -22,6 +22,7 @@ jobs:
       openai-model: 'deepseek-v4-flash'
       openai-base-url: 'https://tokenhub.tencentmaas.com/plan/v3'
       review-language: 'cn'
+      project-prompt-path: '.github/ai-review.md'
     secrets:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       APP_ID: ${{ secrets.APP_ID }}
@@ -41,8 +42,7 @@ pip install -r requirements.txt
 
 ## Usage
 
-The tool reads all configuration from environment variables — no command-line
-arguments are required:
+The tool reads all configuration from environment variables — no command-line arguments are required:
 
 ```bash
 python main.py
@@ -59,10 +59,16 @@ python main.py
 | `OPENAI_MAX_RETRIES` | no | Retry count for timeouts/429/5xx errors (default `5`). |
 | `REVIEW_LANGUAGE` | no | Review output language — codes (`en`, `zh`, `cn`, `ja`, `ko`, `es`, `fr`, `de`, `ru`, `pt`) or full names (default `cn`). |
 | `MAX_TOKENS_PER_CHUNK` | no | Max tokens of diff per review call (default `131072`). |
-| `SILENT_MODE` | no | Post a comment instead of a review. Set to `0`/`false` to post a review with `APPROVE`/`REQUEST_CHANGES` (default: on). |
+| `SILENT_MODE` | no | Post a comment instead of a review. Set to `0`/`false` to post a review with `APPROVE`/`REQUEST_CHANGES` (default: on). Only affects the prose-fallback path — the normal tool-driven review posts inline comments regardless. |
 | `DRY_RUN` | no | Print the review without posting. Set to `1`/`true` to enable (default: off). |
 | `REVIEW_STATE_DIR` | no | Directory for local per-PR history files (default `<tmp>/ai-code-review`). |
-| `PROMPT_TARGET` | no | `owner/repo/path` for prompt-improvement PRs (default `peroperogames/ToolsWorkflow/review/prompt.md`). |
+| `PROJECT_PROMPT_PATH` | no | Path, relative to the repository under review, of that repository's own review criteria. Read from the PR head and added to the built-in prompt; empty uses the built-in prompt alone. The action and workflow default this to `.github/ai-review.md`. |
+
+### Project review criteria
+
+A repository can add its own review criteria in a file — `.github/ai-review.md` by default, overridable with `project-prompt-path` / `PROJECT_PROMPT_PATH`. It can be written by hand, or changed by asking the bot to ([`@perotoolsbot prompt: ...`](#special-commands)). It is read **from the pull request's head**, so a repository can iterate on its criteria in the same PR that it reviews, and it is appended to the built-in prompt as a `## Project-Specific Review Criteria` section. It is added to both the review prompt and the reply prompt, so an @-mention answer follows the same conventions a review would.
+
+It supplements the built-in prompt; it never replaces it. The section is scoped so it cannot change the tool contract, the output format, or the decision to approve, and any contradiction with the built-in prompt is reported as a finding rather than obeyed. An empty string turns the feature off. If the file is missing, a directory, too large for the contents API to inline (over 1 MB, which it answers with `encoding: none`) or not UTF-8 text, the run degrades to the built-in prompt and logs why. Anything over 20,000 characters is truncated at a line boundary, and the log line names the blob SHA the text came from so a surprising review can be traced back to the exact revision that produced it.
 
 ### Pull request resolution
 
@@ -83,58 +89,43 @@ python main.py
 
 The bot answers comments in two places, which arrive as two different events:
 
-- **PR conversation** (`issue_comment`) — GitHub exposes no thread relationship
-  there, so the comment must **@-mention the bot**.
-- **Inline review comments** (`pull_request_review_comment`) — replying inside
-  one of the bot's own threads is enough; no @-mention needed. A brand-new
-  inline comment still has to mention it.
+- **PR conversation** (`issue_comment`) — GitHub exposes no thread relationship there, so the comment must **@-mention the bot**.
+- **Inline review comments** (`pull_request_review_comment`) — replying inside one of the bot's own threads is enough; no @-mention needed. A brand-new inline comment still has to mention it.
 
-Comments on non-PR issues, bot comments, and comments that address neither the
-bot nor one of its threads are ignored. When the trigger came from an inline
-thread, the bot replies inside that same thread.
+Comments on non-PR issues, bot comments, and comments that address neither the bot nor one of its threads are ignored. When the trigger came from an inline thread, the bot replies inside that same thread.
 
 #### Special commands
 
-- **Improve the prompt** — e.g. `@perotoolsbot improve review`. The bot
-  classifies the comment intent; if it's a prompt-improvement request it
-  generates an updated `prompt.md` and submits it as a PR to `PROMPT_TARGET`.
+- **Improve the prompt** — `@perotoolsbot prompt: <what to change>` rewrites review criteria and opens a pull request with the result. Nothing lands without a human merging that PR, and the bot's token needs write access to the target repository (it already has it for ToolsWorkflow). The command picks the target, and the colon is optional in either form (`:` and `：` both work):
+  - `@perotoolsbot prompt: ...` and `@perotoolsbot prompt(this): ...` — the reviewed repository's own criteria file (`PROJECT_PROMPT_PATH`, written fresh if it does not exist yet). The PR is opened against that repository, so a project's feedback cannot change how other projects are reviewed.
+  - `@perotoolsbot prompt(base): ...` — the shared prompt in ToolsWorkflow, the single reusable source of the review prompt. The PR is opened against ToolsWorkflow.
+  - Phrased without the command, anything the intent classifier reads as a prompt change behaves like `prompt(this)`.
 
-- **Code changes** — e.g. `@perotoolsbot fix src/foo.py`.
-  The bot reads the current file contents, generates code changes, and
-  submits a PR to the current repository's feature branch.
+- **Code changes** — e.g. `@perotoolsbot fix src/foo.py`. The bot reads the current file contents, generates code changes, and submits a PR to the current repository's feature branch.
 
-- **Review request** — e.g. `@perotoolsbot review this PR for me.`. Runs a full
-  review on demand and posts it.
+- **Review request** — e.g. `@perotoolsbot review this PR for me.`. Runs a full review on demand and posts it.
 
 Replying requires the GitHub App to have **`Issues: Read and write`** permission (issue comments use the Issues API, which is separate from `Pull requests`).
 
 ## Review pipeline
 
-1. Fetch PR metadata; if the PR is closed, delete any local history and stop.
-   Merges from `release/*` back to `master`/`main` are skipped. The PR's **first**
-   pass gets the full structured review; later `synchronize` pushes get a light
-   incremental pass (short plain summary + inline comments) instead.
-2. Load local per-PR history and fetch prior reviews, conversation comments
-   **and inline review comments**, merging them into the conversation context.
-3. Build the diff payload from the per-file patches — every line is prefixed
-   with its absolute line number so the model can quote a line instead of
-   computing line numbers itself.
-4. If the payload still exceeds `MAX_TOKENS_PER_CHUNK`, review it in chunks and
-   then merge the chunk reviews back into a **single** review body.
-5. Classify the review (`REQUEST_CHANGES` / `COMMENT` / `APPROVE`) from the
-   presence of critical/warning keywords.
-6. Post the review (or comment in `SILENT_MODE`). No labels are applied.
-7. Resolve and approve are re-checked after **both** a later push and a reply
-   in an open thread:
-   - On a push, the diff of **that push alone** (`before...after` from the
-     event) is what the model judges against.
-   - In a thread, a concern answered by discussion counts as settled even when
-     no code changed.
-   - Once no unresolved thread remains and the latest review was clean, the bot
-     submits an `APPROVE` review. Thread resolution uses the GraphQL API — the
-     REST API cannot do it.
+1. Fetch PR metadata; if the PR is closed, delete any local history and stop. Merges from `release/*` back to `master`/`main` are skipped. The PR's **first** pass gets the full review; later `synchronize` pushes get a light incremental pass covering only what the new commits introduced. Once a PR is known to need reviewing, the repository's own criteria are fetched from its head and merged into the prompt — see [Project review criteria](#project-review-criteria).
+2. Load local per-PR history and fetch prior reviews, conversation comments **and inline review comments**, merging them into the conversation context.
+3. Build the diff payload from the per-file patches — every line is prefixed with its absolute line number so the model can quote a line instead of computing line numbers itself.
+4. If the payload still exceeds `MAX_TOKENS_PER_CHUNK`, review it in chunks and then merge the chunk reviews back into a **single** review body.
+5. Let the model drive the review through tools (`read_file`, `get_file_diff`, `post_inline_comment`, `list_open_threads`, `resolve_thread`, `finish`).
+6. Resolve and approve are re-checked after **both** a later push and a reply in an open thread:
+   - On a push, the diff of **that push alone** (`before...after` from the event) is what the model judges against.
+   - In a thread, a concern answered by discussion counts as settled even when no code changed.
+   - Once no unresolved thread remains and the latest review was clean, the bot submits an `APPROVE` review. Thread resolution uses the GraphQL API — the REST API cannot do it.
 
-The review can also carry **inline line comments** (single-line and cross-line via `start_line`). The model emits them as a JSON `comments` block, which the script parses and posts alongside the review body; if GitHub rejects the line numbers, it falls back to a body-only review.
+### There is no summary
+
+Every finding is a `post_inline_comment` call. There is deliberately **no overall summary and no review body** — the bot only ever speaks through inline comments and the approval.
+
+A finding that is not about a particular line — missing tests, a missing changelog or documentation entry, a design or process concern, a change that was done well — is anchored to the closest changed line it relates to rather than dropped. A finding that is never attached to a line is a finding that never reaches the pull request.
+
+`finish(verdict)` states `approve`, `comment` or `block`; `approve` is what approves the PR. A clean PR therefore produces no comments at all — the approval is the report. No labels are applied. If the model answers in prose instead of calling the tools, the run falls back to parsing that text into a review body, which is the only path that posts one (and the only path `SILENT_MODE` still affects).
 
 ## Files
 

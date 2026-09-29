@@ -23,6 +23,15 @@ on:
         required: false
         type: string
         default: 'cn'
+      project-prompt-path:
+        description: |
+          Path to this repository's own review criteria, relative to the repo root.
+          Read from the pull request's head and added to the built-in prompt; it can
+          add criteria but cannot change the tool contract or the output format.
+          Pass an empty string to use the built-in prompt alone.
+        required: false
+        type: string
+        default: '.github/ai-review.md'
     secrets:
       OPENAI_API_KEY:
         required: true   # OpenAI API key
@@ -49,5 +58,7 @@ jobs:
           github-token: ${{ steps.generate_token.outputs.token }}
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           openai-model: ${{ inputs.openai-model }}
+          openai-fallback-model: ${{ inputs.openai-fallback-model }}
           openai-base-url: ${{ inputs.openai-base-url }}
           review-language: ${{ inputs.review-language }}
+          project-prompt-path: ${{ inputs.project-prompt-path }}

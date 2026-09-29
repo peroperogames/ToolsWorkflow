@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -300,6 +300,36 @@ class GitHubClient:
             "GET", f"/repos/{owner}/{repo}/contents/{path}", params=params
         )
         return base64.b64decode(data.get("content", "")).decode("utf-8")
+
+    def get_file_content_optional(
+        self, owner: str, repo: str, path: str, ref: Optional[str] = None
+    ) -> Optional[Tuple[str, str]]:
+        """Read a file's content, returning ``(content, blob_sha)`` or ``None``.
+
+        Unlike :meth:`get_file_content` this never raises. Callers use the result
+        to *enrich* a run, so a file that cannot be read has to degrade to their
+        default rather than abort. ``None`` covers every way ``path`` can fail to
+        be readable text: missing (404), a directory (the contents API answers
+        with a JSON array), too large for the API (``encoding`` other than
+        ``base64``, with an empty ``content``) and bytes that are not UTF-8.
+        """
+        params: Dict[str, Any] = {}
+        if ref:
+            params["ref"] = ref
+        try:
+            data = self._request(
+                "GET", f"/repos/{owner}/{repo}/contents/{path}", params=params
+            )
+            if not isinstance(data, dict):
+                return None
+            if data.get("encoding") != "base64":
+                return None
+            # The API wraps base64 in newlines; b64decode only tolerates those
+            # with validation off, so drop them rather than depend on that.
+            raw = "".join((data.get("content") or "").split())
+            return base64.b64decode(raw).decode("utf-8"), data.get("sha", "")
+        except Exception:  # noqa: BLE001 - callers have a default to fall back to
+            return None
 
     def put_file(
         self,

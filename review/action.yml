@@ -39,6 +39,10 @@ inputs:
     description: 'Directory for per-PR session/history files (default: <tmp>/ai-code-review).'
     required: false
     default: ''
+  project-prompt-path:
+    description: 'Path to the reviewed repository''s own review criteria, read from the PR head. Empty to disable.'
+    required: false
+    default: '.github/ai-review.md'
 
 runs:
   using: 'composite'
@@ -59,4 +63,5 @@ runs:
         MAX_TOKENS_PER_CHUNK: ${{ inputs.max-tokens-per-chunk }}
         SILENT_MODE: ${{ inputs.silent-mode }}
         REVIEW_STATE_DIR: ${{ inputs.state-dir }}
+        PROJECT_PROMPT_PATH: ${{ inputs.project-prompt-path }}
       run: python3 "$GITHUB_ACTION_PATH/main.py"
