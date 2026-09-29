@@ -23,6 +23,14 @@ inputs:
     description: 'OpenAI-compatible API base URL.'
     required: false
     default: 'https://tokenhub.tencentmaas.com/plan/v3'
+  openai-timeout:
+    description: 'API request timeout in seconds.'
+    required: false
+    default: '180'
+  openai-max-retries:
+    description: 'Retry count for timeouts/429/5xx errors.'
+    required: false
+    default: '5'
   review-language:
     description: 'Language for the review and replies (en, zh, cn, ja, ko, ...).'
     required: false
@@ -32,9 +40,13 @@ inputs:
     required: false
     default: '131072'
   silent-mode:
-    description: "Set 'true' to post a comment instead of a review."
+    description: "Set 'true' to post a comment instead of a review. Only affects the prose-fallback path."
     required: false
     default: 'true'
+  dry-run:
+    description: "Set 'true' to print the review without posting anything."
+    required: false
+    default: 'false'
   state-dir:
     description: 'Directory for per-PR session/history files (default: <tmp>/ai-code-review).'
     required: false
@@ -59,9 +71,12 @@ runs:
         OPENAI_API_MODEL: ${{ inputs.openai-model }}
         OPENAI_API_MODEL_FALLBACK: ${{ inputs.openai-fallback-model }}
         OPENAI_API_BASE_URL: ${{ inputs.openai-base-url }}
+        OPENAI_TIMEOUT: ${{ inputs.openai-timeout }}
+        OPENAI_MAX_RETRIES: ${{ inputs.openai-max-retries }}
         REVIEW_LANGUAGE: ${{ inputs.review-language }}
         MAX_TOKENS_PER_CHUNK: ${{ inputs.max-tokens-per-chunk }}
         SILENT_MODE: ${{ inputs.silent-mode }}
+        DRY_RUN: ${{ inputs.dry-run }}
         REVIEW_STATE_DIR: ${{ inputs.state-dir }}
         PROJECT_PROMPT_PATH: ${{ inputs.project-prompt-path }}
       run: python3 "$GITHUB_ACTION_PATH/main.py"

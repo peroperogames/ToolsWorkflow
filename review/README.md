@@ -48,21 +48,25 @@ The tool reads all configuration from environment variables — no command-line 
 python main.py
 ```
 
-| Environment variable | Required | Description |
-| --- | --- | --- |
-| `GITHUB_TOKEN` | yes | GitHub token with `pull-requests: write` on the target repo. |
-| `OPENAI_API_KEY` | yes | OpenAI (or compatible) API token. |
-| `OPENAI_API_MODEL` | no | Model to use (default `deepseek-v4-flash`). |
-| `OPENAI_API_MODEL_FALLBACK` | no | Fallback model used if the primary fails or times out (default `glm-5.3-flash`). |
-| `OPENAI_API_BASE_URL` | no | API base URL (default `https://tokenhub.tencentmaas.com/plan/v3`). |
-| `OPENAI_TIMEOUT` | no | API request timeout in seconds (default `180`). |
-| `OPENAI_MAX_RETRIES` | no | Retry count for timeouts/429/5xx errors (default `5`). |
-| `REVIEW_LANGUAGE` | no | Review output language — codes (`en`, `zh`, `cn`, `ja`, `ko`, `es`, `fr`, `de`, `ru`, `pt`) or full names (default `cn`). |
-| `MAX_TOKENS_PER_CHUNK` | no | Max tokens of diff per review call (default `131072`). |
-| `SILENT_MODE` | no | Post a comment instead of a review. Set to `0`/`false` to post a review with `APPROVE`/`REQUEST_CHANGES` (default: on). Only affects the prose-fallback path — the normal tool-driven review posts inline comments regardless. |
-| `DRY_RUN` | no | Print the review without posting. Set to `1`/`true` to enable (default: off). |
-| `REVIEW_STATE_DIR` | no | Directory for local per-PR history files (default `<tmp>/ai-code-review`). |
-| `PROJECT_PROMPT_PATH` | no | Path, relative to the repository under review, of that repository's own review criteria. Read from the PR head and added to the built-in prompt; empty uses the built-in prompt alone. The action and workflow default this to `.github/ai-review.md`. |
+Every setting is reachable three ways: the `with:` input when calling the reusable workflow, the same input when using the composite action directly, and the environment variable when running `main.py` yourself. The table lists all three so they cannot drift apart.
+
+| `with:` input (workflow and action) | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| — (from `secrets`) | `GITHUB_TOKEN` | required | GitHub token with `pull-requests: write` on the target repo. Supplied by `code-review.yml` from the App secrets. |
+| — (from `secrets`) | `OPENAI_API_KEY` | required | OpenAI (or compatible) API token. Supplied by `code-review.yml` from the App secrets. |
+| `openai-model` | `OPENAI_API_MODEL` | `deepseek-v4-flash` | Model to use. |
+| `openai-fallback-model` | `OPENAI_API_MODEL_FALLBACK` | `glm-5.3-flash` | Fallback model used if the primary fails or times out. |
+| `openai-base-url` | `OPENAI_API_BASE_URL` | `https://tokenhub.tencentmaas.com/plan/v3` | API base URL. |
+| `openai-timeout` | `OPENAI_TIMEOUT` | `180` | API request timeout in seconds. |
+| `openai-max-retries` | `OPENAI_MAX_RETRIES` | `5` | Retry count for timeouts/429/5xx errors. |
+| `review-language` | `REVIEW_LANGUAGE` | `cn` | Review output language — codes (`en`, `zh`, `cn`, `ja`, `ko`, `es`, `fr`, `de`, `ru`, `pt`) or full names. |
+| `max-tokens-per-chunk` | `MAX_TOKENS_PER_CHUNK` | `131072` | Max tokens of diff per review call. |
+| `silent-mode` | `SILENT_MODE` | `true` | Post a comment instead of a review. Set to `0`/`false` to post a review with `APPROVE`/`REQUEST_CHANGES`. Only affects the prose-fallback path — the normal tool-driven review posts inline comments regardless. |
+| `dry-run` | `DRY_RUN` | `false` | Print the review without posting anything. Useful for trying the bot out on a pull request. |
+| `state-dir` | `REVIEW_STATE_DIR` | `<tmp>/ai-code-review` | Directory for local per-PR history files. |
+| `project-prompt-path` | `PROJECT_PROMPT_PATH` | `.github/ai-review.md` | Path, relative to the repository under review, of that repository's own review criteria. Read from the PR head and added to the built-in prompt; empty uses the built-in prompt alone. |
+
+`code-review.yml` also needs the `APP_ID`, `APP_PK` and `OPENAI_API_KEY` secrets; `main.py` additionally reads `GITHUB_REPOSITORY`, `GITHUB_EVENT_NAME` and `GITHUB_EVENT_PATH` (set by Actions) or `GITHUB_PR_NUMBER` for a manual run.
 
 ### Project review criteria
 
