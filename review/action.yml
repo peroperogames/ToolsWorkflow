@@ -24,11 +24,11 @@ inputs:
     required: false
     default: 'https://tokenhub.tencentmaas.com/plan/v3'
   openai-timeout:
-    description: 'API request timeout in seconds.'
+    description: 'Seconds to wait for the connection to the API to be established. How long the model takes to answer is not limited.'
     required: false
-    default: '180'
+    default: '15'
   openai-max-retries:
-    description: 'Retry count for timeouts/429/5xx errors.'
+    description: 'Retry count for connection errors and 429/5xx responses.'
     required: false
     default: '5'
   review-language:

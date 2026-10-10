@@ -25,14 +25,17 @@ class AIClient:
         token: str,
         model: str = DEFAULT_MODEL,
         base_url: str = DEFAULT_BASE_URL,
-        timeout: int = 180,
+        connect_timeout: int = 15,
         max_retries: int = 5,
         fallback_model: Optional[str] = None,
     ) -> None:
         self.token = token
         self.model = model
         self.base_url = base_url.rstrip("/")
-        self.timeout = int(os.environ.get("OPENAI_TIMEOUT", timeout))
+        # Only the connection is time-boxed. How long the model takes to answer
+        # is its own business — a slow answer is not a failure, so the read
+        # timeout is left open and no fallback/retry is triggered by it.
+        self.connect_timeout = int(os.environ.get("OPENAI_TIMEOUT", connect_timeout))
         self.max_retries = int(os.environ.get("OPENAI_MAX_RETRIES", max_retries))
         self.fallback_model = (
             fallback_model or os.environ.get("OPENAI_API_MODEL_FALLBACK", "")
@@ -53,8 +56,9 @@ class AIClient:
     ) -> str:
         """Send a chat request and return the assistant's text content.
 
-        Tries the primary model first; if it fails (timeout, 429, 5xx, or any
-        other error) and a fallback model is configured, retries with that.
+        Tries the primary model first; if the request fails (connection error,
+        429, 5xx) and a fallback model is configured, retries with that. A slow
+        model is waited for, not treated as a failure.
         """
         return self.chat_message(messages, temperature, max_tokens)["content"]
 
@@ -121,11 +125,15 @@ class AIClient:
         last_error: Optional[Exception] = None
         for attempt in range(self.max_retries + 1):
             try:
-                resp = self.session.post(url, json=payload, timeout=self.timeout)
-            except (requests.Timeout, requests.ConnectionError) as exc:
+                # (connect, read): read is None — wait for the model indefinitely.
+                resp = self.session.post(
+                    url, json=payload, timeout=(self.connect_timeout, None)
+                )
+            except requests.ConnectionError as exc:
+                # Connection-level failure only: refused, reset, DNS, TLS, or the
+                # connect timeout (ConnectTimeout subclasses ConnectionError). A
+                # ReadTimeout is deliberately not caught — it cannot happen.
                 last_error = exc
-                # With a fallback model configured, fail over quickly instead
-                # of burning many retries on a slow/hanging primary model.
                 limit = 1 if self.fallback_model else self.max_retries
                 if attempt < limit:
                     delay = min(2 * (2 ** attempt), 16)

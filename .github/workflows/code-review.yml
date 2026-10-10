@@ -19,10 +19,10 @@ on:
         type: string
         default: 'https://tokenhub.tencentmaas.com/plan/v3'
       openai-timeout:
-        description: 'API request timeout in seconds'
+        description: 'Seconds to wait for the connection to the API. Model response time is not limited.'
         required: false
         type: string
-        default: '180'
+        default: '15'
       openai-max-retries:
         description: 'Retry count for timeouts/429/5xx errors'
         required: false
