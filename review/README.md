@@ -117,8 +117,10 @@ Replying requires the GitHub App to have **`Issues: Read and write`** permission
 2. Load local per-PR history and fetch prior reviews, conversation comments **and inline review comments**, merging them into the conversation context.
 3. Build the diff payload from the per-file patches — every line is prefixed with its absolute line number so the model can quote a line instead of computing line numbers itself.
 4. If the payload still exceeds `MAX_TOKENS_PER_CHUNK`, review it in chunks and then merge the chunk reviews back into a **single** review body.
-5. Let the model drive the review through tools (`read_file`, `get_file_diff`, `post_inline_comment`, `list_open_threads`, `resolve_thread`, `finish`).
-6. Resolve and approve are re-checked after **both** a later push and a reply in an open thread:
+5. **Build & test in a Unity host project.** UPM packages have no compilable project of their own, so the runner keeps one persistent empty Unity project (`UNITY_HOST_PROJECT`). The package under review is pulled in as a `file:` dependency, Unity regenerates the real sln/csproj in batch mode and compiles, then unit tests run. Compile errors land as inline comments on the changed line (or a status comment otherwise); test failures land in that status comment. A failing build or test **blocks approval**. Per PR the package is cloned on first run and `git`-synced on later pushes; the clone and the host dependency are removed when the PR closes. The whole step self-skips when `UNITY_PATH`/`UNITY_HOST_PROJECT` are unset or the repo is not a UPM package.
+6. Run **ReSharper** (`jb inspectcode`) over the Unity-generated solution (full UnityEngine references, so no resolve-error noise), honouring the repository's own `.editorconfig`, and post each `WARNING`/`ERROR` on a changed line as its own inline comment prefixed `ReSharper:`. Deterministic, project-specific analysis (naming, style, redundancies, correctness) the model is told **not** to duplicate. For repos that ship their own solution (e.g. a `Projects~/*.sln`), that solution is used directly without a Unity build. Self-skips when the runner has no `jb` or no solution is available.
+7. Let the model drive the review through tools (`read_file`, `get_file_diff`, `post_inline_comment`, `list_open_threads`, `resolve_thread`, `finish`); the build/test status is given to it as context.
+8. Resolve and approve are re-checked after **both** a later push and a reply in an open thread:
    - On a push, the diff of **that push alone** (`before...after` from the event) is what the model judges against.
    - In a thread, a concern answered by discussion counts as settled even when no code changed.
    - Once no unresolved thread remains and the latest review was clean, the bot submits an `APPROVE` review. Thread resolution uses the GraphQL API — the REST API cannot do it.
@@ -137,6 +139,8 @@ A finding that is not about a particular line — missing tests, a missing chang
 - `action.yml` — composite action definition.
 - `github_client.py` — GitHub REST API client.
 - `ai_client.py` — OpenAI-compatible chat completions client.
+- `inspect_code.py` — ReSharper static analysis (`.editorconfig`-driven).
+- `unity_runner.py` — Unity host-project build, unit tests and project-file generation.
 - `history.py` — local per-PR history persistence (temp files).
 - `prompt.md` — default review prompt (auto-improveable via natural language).
 - `requirements.txt` — Python dependencies.

@@ -38,6 +38,8 @@ from ai_client import AIClient, DEFAULT_BASE_URL, DEFAULT_MODEL
 from github_client import GitHubClient
 
 import history
+import inspect_code
+import unity_runner
 
 # The prompt file is resolved next to this script so the tool works regardless
 # of the caller's current working directory.
@@ -52,7 +54,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-09-29.1"
+VERSION = "2026-10-10.unity"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -2114,6 +2116,7 @@ class ToolContext:
     finish_nudged: bool = False
     verdict: str = ""
     reply_text: str = ""
+    block_approve: bool = False
     posted_comments: List[str] = field(default_factory=list)
 
 
@@ -2262,6 +2265,173 @@ def execute_tool(name: str, args: Dict[str, Any], ctx: ToolContext) -> str:
         return f"error: {name} failed: {exc}"
 
 
+def changed_lines_by_file(files: List[Dict[str, Any]]) -> Dict[str, set]:
+    """Map each changed file to the set of new-file (RIGHT) line numbers it touched."""
+    result: Dict[str, set] = {}
+    for f in files:
+        patch = f.get("patch")
+        if not patch:
+            continue
+        lines = {
+            e["line"] for e in index_diff_lines(patch) if e["side"] == "RIGHT"
+        }
+        if lines:
+            result[f.get("filename", "")] = lines
+    return result
+
+
+def run_unity_checks(
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    pr: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    config: "Config",
+) -> "unity_runner.UnityResult":
+    """Build and test the package in the Unity host project, then report.
+
+    Compile errors that fall on a changed line post as inline comments; the rest
+    (and all test failures) go into one status comment. Returns the UnityResult
+    so the caller can block approval on failure.
+    """
+    head_sha = pr.get("head", {}).get("sha", "")
+    token = config.github_token
+    result = unity_runner.analyze(owner, repo, number, head_sha, token)
+    if not result.ran:
+        return result
+
+    log(result.summary())
+
+    # Compile errors carry file+line: anchor them to changed lines when possible.
+    patches = {f.get("filename", ""): (f.get("patch") or "") for f in files}
+    raw: List[Dict[str, Any]] = []
+    orphan_errors: List[Dict[str, Any]] = []
+    for err in result.compile_errors:
+        matched = next(
+            (fn for fn in patches if err["file"].endswith(fn) or fn.endswith(err["file"])),
+            None,
+        )
+        quote = _line_text(patches[matched], err["line"]) if matched else ""
+        if matched and quote:
+            raw.append(
+                {
+                    "path": matched,
+                    "quote": quote,
+                    "side": "RIGHT",
+                    "body": f"🔴 **编译错误** {err['code']}: {err['message']}",
+                }
+            )
+        else:
+            orphan_errors.append(err)
+
+    if not config.dry_run:
+        normalized = normalize_inline_comments(raw, files)
+        if normalized:
+            post_inline_comments(
+                gh, owner, repo, number, head_sha, normalized
+            )
+
+    # One status comment summarising anything not pinned to a line.
+    status_lines: List[str] = [result.summary()]
+    if orphan_errors:
+        status_lines.append("\n**编译错误(未能定位到改动行):**")
+        for e in orphan_errors[:20]:
+            status_lines.append(f"- `{e['file']}:{e['line']}` {e['code']}: {e['message']}")
+    if result.test_failures:
+        status_lines.append("\n**单元测试失败:**")
+        for t in result.test_failures[:20]:
+            msg = (t.get("message") or "").splitlines()[0][:200] if t.get("message") else ""
+            status_lines.append(f"- {t['name']}" + (f" — {msg}" if msg else ""))
+
+    if not result.ok:
+        body = "\n".join(status_lines)
+        if config.dry_run:
+            print(body)
+        else:
+            gh.post_comment(owner, repo, number, body)
+    return result
+
+
+def run_static_analysis(
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    pr: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    config: "Config",
+    workdir: Optional[str] = None,
+    sln_path: Optional[str] = None,
+) -> int:
+    """Run ReSharper on the source and post findings inline.
+
+    ``workdir`` holds the source to analyse (the Unity package clone, or the
+    checked-out repo); ``sln_path`` is the Unity-generated solution when
+    available. Deterministic, project-specific checks the model should not guess
+    at. Best-effort: any failure just means no static-analysis comments.
+    """
+    workdir = workdir or os.environ.get("REVIEW_WORKDIR", "").strip()
+    if not workdir or not os.path.isdir(workdir):
+        log("No source directory to analyse; skipping static analysis.")
+        return 0
+
+    changed = changed_lines_by_file(files)
+    if not changed:
+        return 0
+
+    issues = inspect_code.analyze(workdir, changed, sln_path=sln_path)
+    if not issues:
+        return 0
+
+    # Build inline comments anchored by the changed line's text (reliable), the
+    # same way model findings are located.
+    patches = {f.get("filename", ""): (f.get("patch") or "") for f in files}
+    raw: List[Dict[str, Any]] = []
+    seen: set = set()
+    for issue in issues:
+        path = issue["file"]
+        # The report path is absolute/workspace-relative; match it to a PR file.
+        matched = next((fn for fn in patches if path.endswith(fn) or fn.endswith(path)), None)
+        if not matched:
+            continue
+        key = (matched, issue["line"], issue["message"])
+        if key in seen:
+            continue
+        seen.add(key)
+        quote = _line_text(patches[matched], issue["line"])
+        if not quote:
+            continue
+        tag = "🔴" if issue["severity"] == "ERROR" else "⚠️"
+        raw.append(
+            {
+                "path": matched,
+                "quote": quote,
+                "side": "RIGHT",
+                "body": f"{tag} **ReSharper**: {issue['message']}",
+            }
+        )
+
+    normalized = normalize_inline_comments(raw, files)
+    if not normalized:
+        return 0
+    if config.dry_run:
+        for c in normalized:
+            print(f"[static] {c['path']}:{c['line']} {c['body']}")
+        return len(normalized)
+    return post_inline_comments(
+        gh, owner, repo, number, pr.get("head", {}).get("sha", ""), normalized
+    )
+
+
+def _line_text(patch: str, line: int) -> str:
+    """Return the verbatim text of a RIGHT-side line from the patch."""
+    for e in index_diff_lines(patch):
+        if e["side"] == "RIGHT" and e["line"] == line:
+            return e["text"]
+    return ""
+
+
 def run_agent_review(
     ai: AIClient,
     gh: GitHubClient,
@@ -2273,8 +2443,14 @@ def run_agent_review(
     system_prompt: str,
     conversation: str,
     config: "Config",
+    extra_context: str = "",
+    block_approve: bool = False,
 ) -> Optional[ToolContext]:
     """Let the model drive the review through tools.
+
+    ``extra_context`` is appended to the user turn (e.g. the Unity build/test
+    status). ``block_approve`` forbids approval regardless of the model's
+    verdict — used when compilation or tests failed.
 
     Returns the context when the model used tools, or ``None`` when it answered
     in prose instead — the caller then falls back to parsing that text.
@@ -2282,13 +2458,14 @@ def run_agent_review(
     ctx = ToolContext(
         gh=gh, owner=owner, repo=repo, number=number, pr=pr, files=files,
         config=config, heads=pr.get("head", {}).get("sha", ""),
+        block_approve=block_approve,
     )
+    user_content = build_diff_text(pr, files, conversation=conversation)
+    if extra_context:
+        user_content += "\n\n" + extra_context
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
-        {
-            "role": "user",
-            "content": build_diff_text(pr, files, conversation=conversation),
-        },
+        {"role": "user", "content": user_content},
     ]
 
     for iteration in range(1, MAX_AGENT_ITERATIONS + 1):
@@ -2336,8 +2513,10 @@ def run_agent_review(
 
     # The model is not reliably willing to approve on its own, so act on the
     # verdict it declared at finish: anything still open blocks the approval.
-    if not ctx.approved and ctx.verdict == "approve":
+    if not ctx.approved and ctx.verdict == "approve" and not ctx.block_approve:
         act_on_clean_verdict(gh, owner, repo, number, ctx)
+    elif ctx.block_approve and ctx.verdict == "approve":
+        log("Approval blocked: Unity build or tests failed.")
 
     return ctx
 
@@ -2522,10 +2701,14 @@ def main() -> int:
 
     pr = gh.get_pull_request(owner, repo, number)
 
-    # Closed PRs need no review; drop any persisted history for them.
+    # Closed PRs need no review; drop any persisted history for them and free
+    # the Unity host project's reference + package clone.
     if (pr.get("state") or "open") == "closed":
         history.delete(owner, repo, number)
-        log(f"Pull Request #{number} is closed; removed any local review history.")
+        host = unity_runner.host_project()
+        if host:
+            unity_runner.cleanup(host, owner, repo, number)
+        log(f"Pull Request #{number} is closed; cleaned up history and Unity cache.")
         return 0
 
     # Merges from release branches back to master/main don't need review.
@@ -2714,15 +2897,41 @@ def main() -> int:
     if conversation:
         log(f"Using {len(entries)} prior review/comment entry(ies) as context.")
 
+    # Build + test the package in the Unity host project (UPM packages have no
+    # compilable project of their own). Compile errors / test failures post as
+    # comments and block approval; a passing build yields the solution ReSharper
+    # then inspects with full UnityEngine references.
+    unity = run_unity_checks(gh, owner, repo, number, pr, files, config)
+    unity_sln = unity.sln_path if unity.ran and unity.compiled else None
+    unity_workdir = (
+        str(unity_runner.cache_root() / unity_runner._pr_key(owner, repo, number))
+        if unity.ran
+        else None
+    )
+    extra_context = f"## 构建与测试状态\n\n{unity.summary()}" if unity.ran else ""
+
+    # Deterministic static analysis (ReSharper + the repo's .editorconfig) runs
+    # alongside the AI review; its findings post as their own inline comments.
+    static_posted = run_static_analysis(
+        gh, owner, repo, number, pr, files, config,
+        workdir=unity_workdir, sln_path=unity_sln,
+    )
+    if static_posted:
+        log(f"Static analysis posted {static_posted} inline comment(s).")
+
     # Preferred path: the model drives the review with tools. The actions are
     # already done by the tools, so there is nothing left to post here.
     ctx = run_agent_review(
-        ai, gh, owner, repo, number, pr, files, review_prompt, conversation, config
+        ai, gh, owner, repo, number, pr, files, review_prompt, conversation, config,
+        extra_context=extra_context,
+        block_approve=unity.ran and not unity.ok,
     )
     if ctx is not None:
         if incremental:
             settle_threads_and_approve(
-                ai, gh, owner, repo, number, pr, files, conversation=conversation
+                ai, gh, owner, repo, number, pr, files,
+                conversation=conversation,
+                allow_approve=not (unity.ran and not unity.ok),
             )
         if not config.dry_run:
             entries.append(

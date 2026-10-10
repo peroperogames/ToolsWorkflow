@@ -55,6 +55,18 @@ inputs:
     description: 'Path to the reviewed repository''s own review criteria, read from the PR head. Empty to disable.'
     required: false
     default: '.github/ai-review.md'
+  unity-path:
+    description: 'Path to the Unity editor executable. Empty to disable the Unity build/test step.'
+    required: false
+    default: ''
+  unity-host-project:
+    description: 'Path to the persistent empty Unity project used to build/test packages.'
+    required: false
+    default: ''
+  unity-sync-method:
+    description: 'Optional -executeMethod used to regenerate project files (default: UnityEditor.SyncVS.SyncSolution).'
+    required: false
+    default: ''
 
 runs:
   using: 'composite'
@@ -79,4 +91,7 @@ runs:
         DRY_RUN: ${{ inputs.dry-run }}
         REVIEW_STATE_DIR: ${{ inputs.state-dir }}
         PROJECT_PROMPT_PATH: ${{ inputs.project-prompt-path }}
+        UNITY_PATH: ${{ inputs.unity-path }}
+        UNITY_HOST_PROJECT: ${{ inputs.unity-host-project }}
+        UNITY_SYNC_METHOD: ${{ inputs.unity-sync-method }}
       run: python3 "$GITHUB_ACTION_PATH/main.py"
