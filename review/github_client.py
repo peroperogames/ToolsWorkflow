@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -41,8 +42,16 @@ mutation($threadId: ID!) {
 class GitHubClient:
     """Minimal GitHub REST API client for pull request reviews."""
 
-    def __init__(self, token: str, api_url: str = "https://api.github.com") -> None:
+    def __init__(
+        self,
+        token: str,
+        api_url: str = "https://api.github.com",
+        max_retries: int = 4,
+        timeout: int = 60,
+    ) -> None:
         self.api_url = api_url.rstrip("/")
+        self.max_retries = max_retries
+        self.timeout = timeout
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -52,8 +61,33 @@ class GitHubClient:
             }
         )
 
+    def _send(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        """HTTP request with retry on transient network errors and 5xx/429.
+
+        GitHub occasionally drops the connection (``RemoteDisconnected``) or
+        rate-limits; a single blip must not abort the whole review.
+        """
+        kwargs.setdefault("timeout", self.timeout)
+        last_error: Optional[Exception] = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                resp = self.session.request(method, url, **kwargs)
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                last_error = exc
+                if attempt < self.max_retries:
+                    delay = min(2 ** attempt, 10)
+                    time.sleep(delay)
+                    continue
+                raise
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < self.max_retries:
+                time.sleep(min(2 ** attempt, 10))
+                continue
+            return resp
+        # Only reached if the loop exhausted retries on exceptions.
+        raise last_error if last_error else RuntimeError("request failed")
+
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        resp = self.session.request(method, f"{self.api_url}{path}", **kwargs)
+        resp = self._send(method, f"{self.api_url}{path}", **kwargs)
         if resp.status_code >= 400:
             detail = ""
             try:
@@ -69,10 +103,10 @@ class GitHubClient:
         self, query: str, variables: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Run a GraphQL query/mutation (review threads need GraphQL)."""
-        resp = self.session.post(
+        resp = self._send(
+            "POST",
             f"{self.api_url}/graphql",
             json={"query": query, "variables": variables or {}},
-            timeout=60,
         )
         if resp.status_code >= 400:
             raise RuntimeError(
