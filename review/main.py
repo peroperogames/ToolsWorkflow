@@ -54,7 +54,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-10.unity.2"
+VERSION = "2026-10-10.unity.3"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -76,7 +76,14 @@ DEFAULT_MAX_TOKENS_PER_CHUNK = 131072  # DeepSeek V4's max_tokens ceiling
 
 # Conversation transcript limits, to avoid unbounded context growth.
 MAX_CONVERSATION_ENTRIES = 50
-MAX_CONVERSATION_ENTRY_CHARS = 4000
+MAX_CONVERSATION_ENTRY_CHARS = 2000
+# Hard ceiling on the whole rendered transcript. It is re-sent on every agent
+# step, so an unbounded one (a long PR can carry 100+ reviews/comments) makes
+# each request huge and slow. ~20k chars ≈ 5k tokens.
+MAX_CONVERSATION_CHARS = 20000
+
+# Cap on a single read_file result, for the same reason.
+MAX_READ_FILE_CHARS = 8000
 
 
 # Minimal fallback used only when prompt.md is empty.
@@ -537,18 +544,29 @@ def render_conversation(
     entries: List[Dict[str, str]],
     max_entries: int = MAX_CONVERSATION_ENTRIES,
     max_chars: int = MAX_CONVERSATION_ENTRY_CHARS,
+    budget: int = MAX_CONVERSATION_CHARS,
 ) -> str:
-    """Render a conversation transcript for inclusion in the review prompt."""
+    """Render a conversation transcript for inclusion in the review prompt.
+
+    Walks the newest entries backwards until the character budget is spent, so a
+    long-running PR cannot inflate the request. The newest entry is always kept.
+    """
     if not entries:
         return ""
 
-    blocks = []
-    for entry in entries[-max_entries:]:
+    blocks: List[str] = []
+    used = 0
+    for entry in reversed(entries[-max_entries:]):
         body = entry["body"]
         if len(body) > max_chars:
             body = body[:max_chars] + "\n… (truncated)"
         label = "review" if entry["kind"] == "review" else "comment"
-        blocks.append(f"### {entry['who']} ({label})\n\n{body}")
+        block = f"### {entry['who']} ({label})\n\n{body}"
+        if blocks and used + len(block) > budget:
+            break
+        blocks.append(block)
+        used += len(block)
+    blocks.reverse()
     return "\n\n".join(blocks)
 
 
@@ -2128,8 +2146,10 @@ def _tool_read_file(args: Dict[str, Any], ctx: ToolContext) -> str:
         content = ctx.gh.get_file_content(ctx.owner, ctx.repo, path, ref=ctx.heads)
     except Exception as exc:  # noqa: BLE001
         return f"error: could not read {path}: {exc}"
-    if len(content) > 20000:
-        return content[:20000] + "\n... (truncated)"
+    # Bounded: every read is re-sent on each later agent step, so a few whole
+    # files add up fast. 8k chars is plenty to judge the code around a change.
+    if len(content) > MAX_READ_FILE_CHARS:
+        return content[:MAX_READ_FILE_CHARS] + "\n... (truncated)"
     return content
 
 
