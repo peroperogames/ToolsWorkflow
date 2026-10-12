@@ -71,10 +71,8 @@ inputs:
 runs:
   using: 'composite'
   steps:
-    - name: Install dependencies
-      shell: bash
-      run: python3 -m pip install -r "$GITHUB_ACTION_PATH/requirements.txt"
-
+    # No pip install here: the runner is expected to have the dependencies
+    # (see requirements.txt) already available.
     - name: Run AI code review
       shell: bash
       env:
