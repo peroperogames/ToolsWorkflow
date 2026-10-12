@@ -54,7 +54,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-12.unity.6"
+VERSION = "2026-10-12.unity.7"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -67,7 +67,6 @@ REVIEW_SECTIONS = (
     ("recommendation_immediate", "Immediate (before merge)"),
     ("recommendation_short", "Short-term (next sprint)"),
     ("recommendation_long", "Long-term (technical debt)"),
-    ("strength", "✅ Strengths"),
 )
 
 # Rough heuristic: ~4 characters per token, used for chunking large PRs.
@@ -90,8 +89,8 @@ MAX_READ_FILE_CHARS = 8000
 FALLBACK_PROMPT = (
     "You are an expert software engineer performing a thorough code review. "
     "Identify bugs, security issues, performance problems, and maintainability "
-    "concerns. Be specific (file and line), actionable (show fixes), and "
-    "constructive (acknowledge what was done well). Return a structured Markdown review."
+    "concerns. Be specific (file and line), actionable (show fixes) and direct: "
+    "report problems only, never praise the change. Return a structured Markdown review."
 )
 
 # Cap on the project prompt, in the same order as _tool_read_file's own limit.
@@ -147,7 +146,8 @@ REPLY_SYSTEM_PROMPT = (
 INLINE_COMMENT_PROMPT = (
     "The developer asked you to leave an inline (line-level) comment on this pull "
     "request. Pick ONE changed line and comment on it — a concrete observation "
-    "about that line, or what it does and whether it looks right.\n"
+    "about that line, or what it does and whether it looks right. Never post "
+    "praise, compliments or filler.\n"
     'Reply with ONLY a JSON object: {"comments": [{"type": "suggestion", '
     '"path": "<file>", "quote": "<the exact line text>", "side": "RIGHT", '
     '"body": "<the comment>"}]}\n'
@@ -1995,12 +1995,14 @@ REVIEW_TOOLS: List[Dict[str, Any]] = [
         "function": {
             "name": "post_inline_comment",
             "description": (
-                "Attach a comment to one changed line. Call it once per finding. "
+                "Attach a comment about one changed line. Call it once per finding. "
                 "This is the ONLY way you report anything — there is no overall "
                 "summary. A finding that is not about a particular line (missing "
                 "tests, a missing changelog entry, a design or process concern) "
                 "still has to be posted here, anchored to the closest changed line "
-                "it relates to; never drop it and never stay silent about it."
+                "it relates to; never drop it and never stay silent about it. "
+                "Every comment must raise a problem and its fix — never use this "
+                "to praise or compliment a change."
             ),
             "parameters": {
                 "type": "object",
@@ -2280,7 +2282,9 @@ def _tool_finish(args: Dict[str, Any], ctx: ToolContext) -> str:
             f"refused: you called finish with verdict '{verdict}' but posted no "
             "inline comment. Every finding must be a `post_inline_comment` call; "
             "if a finding has no line of its own, anchor it to the closest changed "
-            "line it relates to. Then finish."
+            "line it relates to. Then finish. If you have no finding at all, "
+            "finish with `approve` instead — never invent a comment (least of all "
+            "a praising one) to justify a non-approve verdict."
         )
     ctx.verdict = verdict
     ctx.finish_requested = True
