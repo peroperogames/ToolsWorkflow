@@ -54,7 +54,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-12.unity.7"
+VERSION = "2026-10-12.unity.8"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -2515,7 +2515,21 @@ def run_agent_review(
         {"role": "user", "content": user_content},
     ]
 
+    # Why the loop ended, reported when it ends without a finish.
+    stop_reason = f"the {MAX_AGENT_ITERATIONS}-step budget ran out"
     for iteration in range(1, MAX_AGENT_ITERATIONS + 1):
+        if iteration == MAX_AGENT_ITERATIONS:
+            # Last call: say so. A model that is cut off mid-investigation ends
+            # the review with no verdict and nothing posted.
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Step budget exhausted: this is your last call. Post any "
+                        "findings you have and call finish(verdict) now."
+                    ),
+                }
+            )
         reply = ai.chat_message(messages, tools=REVIEW_TOOLS)
         calls = reply.get("tool_calls") or []
         if not calls:
@@ -2523,6 +2537,7 @@ def run_agent_review(
                 log("Model answered without tools; using the text fallback.")
                 return None
             log("Model stopped calling tools; ending the review.")
+            stop_reason = "the model stopped calling tools"
             break
 
         log(f"Agent step {iteration}: {', '.join(c.get('function', {}).get('name', '?') for c in calls)}")
@@ -2557,6 +2572,13 @@ def run_agent_review(
         f"verdict={ctx.verdict or 'none'}, "
         f"approved={'yes' if ctx.approved else 'no'}."
     )
+    if not ctx.finish_requested:
+        # A review that ends this way posted nothing and approved nothing; the
+        # log has to say why instead of going quiet about it.
+        log(
+            f"Ignored the review: {stop_reason} without a finish "
+            f"({ctx.inline_posted} inline comment(s), no verdict, nothing approved)."
+        )
 
     # The model is not reliably willing to approve on its own, so act on the
     # verdict it declared at finish: anything still open blocks the approval.
