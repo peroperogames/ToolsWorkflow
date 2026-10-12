@@ -71,8 +71,8 @@ inputs:
 runs:
   using: 'composite'
   steps:
-    # No pip install here: the runner is expected to have the dependencies
-    # (see requirements.txt) already available.
+    # No pip install here: the runner is expected to carry Python and the
+    # dependencies already (see the README's Requirements section).
     - name: Run AI code review
       shell: bash
       env:

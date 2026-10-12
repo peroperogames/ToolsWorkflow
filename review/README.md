@@ -34,11 +34,13 @@ The GitHub App token is generated in `code-review.yml` via `actions/create-githu
 ## Requirements
 
 - Python 3.8+
-- [`requests`](https://pypi.org/project/requests/)
+- [`requests`](https://pypi.org/project/requests/) ≥ 2.31 — the only third-party dependency.
 
 ```bash
-pip install -r requirements.txt
+pip install "requests>=2.31.0"
 ```
+
+The runner is expected to carry these already; the action installs nothing.
 
 ## Usage
 
@@ -145,4 +147,3 @@ Praise is not a finding. A comment that only compliments a change — however te
 - `unity_runner.py` — Unity host-project build, unit tests and project-file generation.
 - `history.py` — local per-PR history persistence (temp files).
 - `prompt.md` — default review prompt (auto-improveable via natural language).
-- `requirements.txt` — Python dependencies.
