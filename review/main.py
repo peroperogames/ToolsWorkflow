@@ -54,7 +54,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-10.unity.4"
+VERSION = "2026-10-10.unity.5"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -2129,6 +2129,7 @@ class ToolContext:
     config: "Config"
     heads: str
     inline_posted: int = 0
+    resolved_threads: int = 0
     approved: bool = False
     finish_requested: bool = False
     finish_nudged: bool = False
@@ -2235,6 +2236,7 @@ def _tool_resolve_thread(args: Dict[str, Any], ctx: ToolContext) -> str:
         ctx.gh.resolve_review_thread(thread_id)
     except Exception as exc:  # noqa: BLE001
         return f"error: could not resolve: {exc}"
+    ctx.resolved_threads += 1
     return "resolved"
 
 
@@ -2555,11 +2557,12 @@ def run_agent_reply(
     body: str,
     thread_context: str,
     config: "Config",
-) -> Optional[str]:
+) -> Optional[ToolContext]:
     """Answer a comment with tools available.
 
-    Returns the text to post, or ``None`` when the model answered without using
-    any tool — the caller then falls back to a plain text-only reply.
+    Returns the context (whose ``reply_text`` may legitimately be empty when the
+    tool calls already did the work), or ``None`` when the model answered
+    without using any tool — the caller then falls back to a plain text reply.
     """
     ctx = ToolContext(
         gh=gh, owner=owner, repo=repo, number=number, pr=pr, files=files,
@@ -2620,7 +2623,7 @@ def run_agent_reply(
         if ctx.finish_requested:
             break
 
-    return ctx.reply_text
+    return ctx
 
 
 def already_approved(
@@ -2840,17 +2843,27 @@ def main() -> int:
 
         try:
             reply_files = gh.list_files(owner, repo, number)
-            reply = run_agent_reply(
+            reply_ctx = run_agent_reply(
                 ai, gh, owner, repo, number, pr, reply_files, reply_prompt,
                 conversation, author, body, thread_context, config,
             )
-            if reply is None:
+            if reply_ctx is None:
+                # Model answered without tools — plain text reply.
                 reply = generate_reply(
                     ai, reply_prompt, conversation, author, body, thread_context
                 )
+                acted = False
+            else:
+                reply = reply_ctx.reply_text
+                acted = bool(reply_ctx.resolved_threads or reply_ctx.inline_posted)
         except Exception as exc:  # noqa: BLE001 - report instead of going silent
             log(f"Error: reply generation failed: {exc}")
-            reply = ""
+            reply, acted = "", False
+
+        if not reply and acted:
+            # The tools already did the work (e.g. resolved the thread); an empty
+            # reply is allowed, but say something so the developer knows.
+            reply = "已按你的要求处理。"
         if not reply:
             log("Error: no reply was produced (empty content or a failed call).")
             if not config.dry_run:
