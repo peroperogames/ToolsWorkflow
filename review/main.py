@@ -54,7 +54,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-12.unity.9"
+VERSION = "2026-10-12.unity.10"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -1979,8 +1979,16 @@ MAX_AGENT_ITERATIONS = 64
 # The whole message list is re-sent on every step, so an investigation that
 # reads a dozen files would keep growing until it overflows the model's window
 # or makes each later step cost more than the review itself. Over this budget,
-# the oldest tool results are stubbed out (≈60k tokens).
-MAX_AGENT_CONTEXT_CHARS = 240000
+# the oldest tool results are stubbed out.
+#
+# Sized from observed runs rather than from the 4-chars-per-token guess (which
+# only holds for ASCII): the diff + prompt + conversation start at ~40k tokens,
+# a real run's prompt reached ~105k tokens and the request still succeeded, and
+# completions alone have hit 32k tokens. ~100k tokens of transcript leaves the
+# completion room even on a 160k window, with the initial context leaving ~60k
+# tokens of headroom for tool results — roughly 30 file reads before the first
+# stub, instead of the ~8 the previous 240k budget allowed.
+MAX_AGENT_CONTEXT_CHARS = 400000
 # Tool results this recent are never stubbed — they are what the model is
 # currently working from.
 KEEP_RECENT_TOOL_RESULTS = 6
