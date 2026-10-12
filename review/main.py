@@ -54,7 +54,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-12.unity.10"
+VERSION = "2026-10-12.unity.11"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -1993,6 +1993,12 @@ MAX_AGENT_CONTEXT_CHARS = 400000
 # currently working from.
 KEEP_RECENT_TOOL_RESULTS = 6
 COMPACTED_TOOL_RESULT_PREFIX = "[older "
+# What one tool-call turn contributes to the transcript. The model's narration
+# (or leaked reasoning) is replayed on every later step, and a thinking model
+# can write tens of thousands of characters per step — the measured over 24k
+# tokens of completion re-sent from a single step. The tool calls carry the
+# meaning; only a short prefix of the text is kept.
+MAX_ASSISTANT_ECHO_CHARS = 2000
 
 # The model gets tools instead of an output format to imitate: arguments come
 # back validated by the API, so nothing has to be parsed out of prose.
@@ -2501,6 +2507,13 @@ def _line_text(patch: str, line: int) -> str:
     return ""
 
 
+def _echoed_narration(content: str) -> str:
+    """The slice of a tool-call turn's text that goes back into the transcript."""
+    if len(content) <= MAX_ASSISTANT_ECHO_CHARS:
+        return content
+    return content[:MAX_ASSISTANT_ECHO_CHARS] + " [...]"
+
+
 def _tool_call_labels(messages: List[Dict[str, Any]]) -> Dict[str, str]:
     """Map ``tool_call_id`` → a label like ``read_file src/foo.cs``."""
     labels: Dict[str, str] = {}
@@ -2628,7 +2641,7 @@ def run_agent_review(
         messages.append(
             {
                 "role": "assistant",
-                "content": reply.get("content") or "",
+                "content": _echoed_narration(reply.get("content") or ""),
                 "tool_calls": calls,
             }
         )
@@ -2740,7 +2753,7 @@ def run_agent_reply(
         messages.append(
             {
                 "role": "assistant",
-                "content": answer.get("content") or "",
+                "content": _echoed_narration(answer.get("content") or ""),
                 "tool_calls": calls,
             }
         )

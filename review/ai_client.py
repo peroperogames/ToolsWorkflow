@@ -186,9 +186,13 @@ class AIClient:
 
             message: Dict[str, Any] = choices[0].get("message") or {}
             content: str = message.get("content") or ""
+            calls = message.get("tool_calls") or []
             # DeepSeek / reasoning models may put the actual output in
-            # reasoning_content when content is empty.
-            if not content:
+            # reasoning_content when content is empty — but that is an answer,
+            # not a tool turn. Reasoning leaked into `content` gets replayed on
+            # every later request (the agent loop echoes it back), and a
+            # thinking model can emit tens of thousands of characters per step.
+            if not content and not calls:
                 content = message.get("reasoning_content") or ""
 
             usage = data.get("usage")
