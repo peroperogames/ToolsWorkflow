@@ -54,7 +54,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-12.unity.8"
+VERSION = "2026-10-12.unity.9"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -1970,7 +1970,21 @@ def determine_event(review_text: str) -> str:
     return "COMMENT"
 
 
-MAX_AGENT_ITERATIONS = 12
+# Runaway guard on the agent loops, not a working limit: a review takes as
+# many steps as it needs, and the transcript is compacted to stay affordable
+# (see compact_agent_messages). This only stops a model that would otherwise
+# loop forever, and the last step warns it so it still finishes with a verdict.
+MAX_AGENT_ITERATIONS = 64
+
+# The whole message list is re-sent on every step, so an investigation that
+# reads a dozen files would keep growing until it overflows the model's window
+# or makes each later step cost more than the review itself. Over this budget,
+# the oldest tool results are stubbed out (≈60k tokens).
+MAX_AGENT_CONTEXT_CHARS = 240000
+# Tool results this recent are never stubbed — they are what the model is
+# currently working from.
+KEEP_RECENT_TOOL_RESULTS = 6
+COMPACTED_TOOL_RESULT_PREFIX = "[older "
 
 # The model gets tools instead of an output format to imitate: arguments come
 # back validated by the API, so nothing has to be parsed out of prose.
@@ -2479,6 +2493,62 @@ def _line_text(patch: str, line: int) -> str:
     return ""
 
 
+def _tool_call_labels(messages: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Map ``tool_call_id`` → a label like ``read_file src/foo.cs``."""
+    labels: Dict[str, str] = {}
+    for message in messages:
+        for call in message.get("tool_calls") or []:
+            fn = call.get("function") or {}
+            name = fn.get("name") or "tool"
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except ValueError:
+                args = {}
+            path = args.get("path") if isinstance(args, dict) else None
+            labels[call.get("id")] = f"{name} {path}" if path else name
+    return labels
+
+
+def compact_agent_messages(
+    messages: List[Dict[str, Any]],
+    budget: int = MAX_AGENT_CONTEXT_CHARS,
+    keep_recent: int = KEEP_RECENT_TOOL_RESULTS,
+) -> int:
+    """Stub out old tool results when the transcript outgrows its budget.
+
+    The newest results stay whole — they are what the model is working from —
+    and older ones are replaced by a stub that keeps the ``tool_call_id``
+    pairing intact, so the model simply sees that it read something a while
+    ago and can call the tool again if it still needs it. System prompts, the
+    diff and the conversation are never touched.
+
+    Returns how many results were stubbed.
+    """
+    total = sum(len(m.get("content") or "") for m in messages)
+    if total <= budget:
+        return 0
+    labels = _tool_call_labels(messages)
+    positions = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    candidates = positions[:-keep_recent] if keep_recent else positions
+    dropped = 0
+    for index in candidates:
+        if total <= budget:
+            break
+        message = messages[index]
+        content = message.get("content") or ""
+        if content.startswith(COMPACTED_TOOL_RESULT_PREFIX):
+            continue
+        stub = (
+            f"{COMPACTED_TOOL_RESULT_PREFIX}{labels.get(message.get('tool_call_id'), 'tool')} "
+            "result omitted to keep the context small - call the tool again if "
+            "you still need it]"
+        )
+        total += len(stub) - len(content)
+        message["content"] = stub
+        dropped += 1
+    return dropped
+
+
 def run_agent_review(
     ai: AIClient,
     gh: GitHubClient,
@@ -2518,6 +2588,12 @@ def run_agent_review(
     # Why the loop ended, reported when it ends without a finish.
     stop_reason = f"the {MAX_AGENT_ITERATIONS}-step budget ran out"
     for iteration in range(1, MAX_AGENT_ITERATIONS + 1):
+        dropped = compact_agent_messages(messages)
+        if dropped:
+            log(
+                f"Context compacted: {dropped} old tool result(s) omitted to "
+                "stay within budget."
+            )
         if iteration == MAX_AGENT_ITERATIONS:
             # Last call: say so. A model that is cut off mid-investigation ends
             # the review with no verdict and nothing posted.
@@ -2633,6 +2709,12 @@ def run_agent_reply(
     ]
 
     for iteration in range(1, MAX_AGENT_ITERATIONS + 1):
+        dropped = compact_agent_messages(messages)
+        if dropped:
+            log(
+                f"Context compacted: {dropped} old tool result(s) omitted to "
+                "stay within budget."
+            )
         answer = ai.chat_message(messages, tools=REPLY_TOOLS)
         calls = answer.get("tool_calls") or []
         if not calls:
