@@ -54,7 +54,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-10.unity.5"
+VERSION = "2026-10-12.unity.6"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -2106,10 +2106,18 @@ REPLY_TOOLS.append(
                         "type": "string",
                         "description": (
                             "The message to post back to the developer, in the "
-                            "review language. Keep it short. Leave empty when the "
-                            "tool calls already said everything there is to say."
+                            "review language. Keep it short. Leave empty when "
+                            "this comment deliberately needs no answer, and say "
+                            "why in `reason`."
                         ),
-                    }
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": (
+                            "Why you are not replying. Printed in the workflow "
+                            "log, never posted. Required when `reply` is empty."
+                        ),
+                    },
                 },
                 "required": [],
             },
@@ -2135,6 +2143,7 @@ class ToolContext:
     finish_nudged: bool = False
     verdict: str = ""
     reply_text: str = ""
+    reply_reason: str = ""
     block_approve: bool = False
     posted_comments: List[str] = field(default_factory=list)
 
@@ -2241,7 +2250,19 @@ def _tool_resolve_thread(args: Dict[str, Any], ctx: ToolContext) -> str:
 
 
 def _tool_finish_reply(args: Dict[str, Any], ctx: ToolContext) -> str:
-    ctx.reply_text = (args.get("reply") or "").strip()
+    reply = (args.get("reply") or "").strip()
+    reason = (args.get("reason") or "").strip()
+    if not reply and not reason and not ctx.finish_nudged:
+        # Staying silent is allowed, but the run log has to say why: ask once
+        # for the reason, then honour the silence either way.
+        ctx.finish_nudged = True
+        return (
+            "refused: you are finishing without a reply. Either write a short "
+            "`reply`, or — if this comment deliberately needs no answer — put "
+            "the reason in `reason` (it is logged, never posted). Then finish."
+        )
+    ctx.reply_text = reply
+    ctx.reply_reason = reason
     ctx.finish_requested = True
     return "done"
 
@@ -2560,9 +2581,10 @@ def run_agent_reply(
 ) -> Optional[ToolContext]:
     """Answer a comment with tools available.
 
-    Returns the context (whose ``reply_text`` may legitimately be empty when the
-    tool calls already did the work), or ``None`` when the model answered
-    without using any tool — the caller then falls back to a plain text reply.
+    Returns the context — whose ``reply_text`` may be empty by design, meaning
+    the model chose not to answer, with ``reply_reason`` saying why — or
+    ``None`` when the model answered without using any tool, in which case the
+    caller falls back to a plain text reply.
     """
     ctx = ToolContext(
         gh=gh, owner=owner, repo=repo, number=number, pr=pr, files=files,
@@ -2590,7 +2612,10 @@ def run_agent_reply(
         if not calls:
             if iteration == 1:
                 return None
-            return (answer.get("content") or "").strip()
+            # Tools were used earlier and the model now answered in prose
+            # instead of calling finish — that text is the reply.
+            ctx.reply_text = (answer.get("content") or "").strip()
+            return ctx
 
         log(
             f"Reply step {iteration}: "
@@ -2852,26 +2877,35 @@ def main() -> int:
                 reply = generate_reply(
                     ai, reply_prompt, conversation, author, body, thread_context
                 )
-                acted = False
+                reason = "the model produced no reply text"
             else:
                 reply = reply_ctx.reply_text
-                acted = bool(reply_ctx.resolved_threads or reply_ctx.inline_posted)
+                reason = reply_ctx.reply_reason
         except Exception as exc:  # noqa: BLE001 - report instead of going silent
             log(f"Error: reply generation failed: {exc}")
-            reply, acted = "", False
-
-        if not reply and acted:
-            # The tools already did the work (e.g. resolved the thread); an empty
-            # reply is allowed, but say something so the developer knows.
-            reply = "已按你的要求处理。"
-        if not reply:
-            log("Error: no reply was produced (empty content or a failed call).")
             if not config.dry_run:
                 gh.post_comment(
                     owner, repo, number,
                     f"⚠️ @{author} 生成回复失败（模型返回空内容或调用出错），请查看 workflow 日志。",
                 )
             return 1
+
+        if not reply:
+            # The model decided this comment needs no answer. That is a valid
+            # outcome, not a failure: nothing is posted, but the log has to say
+            # why it was skipped.
+            if not reason:
+                reason = "the model finished without a reply and gave no reason"
+            if reply_ctx is not None:
+                did: List[str] = []
+                if reply_ctx.resolved_threads:
+                    did.append(f"resolved {reply_ctx.resolved_threads} thread(s)")
+                if reply_ctx.inline_posted:
+                    did.append(f"posted {reply_ctx.inline_posted} inline comment(s)")
+                if did:
+                    reason += f" (it {' and '.join(did)} first)"
+            log(f"Ignored the comment: {reason}.")
+            return 0
 
         if config.dry_run:
             print(reply)
