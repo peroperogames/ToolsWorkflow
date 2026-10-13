@@ -55,6 +55,10 @@ inputs:
     description: 'Path to the reviewed repository''s own review criteria, read from the PR head. Empty to disable.'
     required: false
     default: '.github/ai-review.md'
+  review-mode:
+    description: "'auto' reviews the PR's first pass and every later push; 'manual' reviews the first pass automatically and afterwards only when the bot is @-mentioned."
+    required: false
+    default: 'auto'
   unity-path:
     description: 'Path to the Unity editor executable. Empty to disable the Unity build/test step.'
     required: false
@@ -89,6 +93,7 @@ runs:
         DRY_RUN: ${{ inputs.dry-run }}
         REVIEW_STATE_DIR: ${{ inputs.state-dir }}
         PROJECT_PROMPT_PATH: ${{ inputs.project-prompt-path }}
+        REVIEW_MODE: ${{ inputs.review-mode }}
         UNITY_PATH: ${{ inputs.unity-path }}
         UNITY_HOST_PROJECT: ${{ inputs.unity-host-project }}
         UNITY_SYNC_METHOD: ${{ inputs.unity-sync-method }}
