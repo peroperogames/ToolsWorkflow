@@ -54,7 +54,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-13.unity.12"
+VERSION = "2026-10-13.unity.13"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -72,10 +72,6 @@ REVIEW_SECTIONS = (
 # Rough heuristic: ~4 characters per token, used for chunking large PRs.
 CHARS_PER_TOKEN = 4
 DEFAULT_MAX_TOKENS_PER_CHUNK = 131072  # DeepSeek V4's max_tokens ceiling
-
-# 'auto' reviews the PR's first pass and every later push; 'manual' reviews the
-# first pass automatically and afterwards only when the bot is @-mentioned.
-REVIEW_MODES = ("auto", "manual")
 
 # Conversation transcript limits, to avoid unbounded context growth.
 MAX_CONVERSATION_ENTRIES = 50
@@ -272,7 +268,6 @@ class Config:
     max_tokens_per_chunk: int
     silent: bool
     dry_run: bool
-    review_mode: str
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -312,11 +307,6 @@ def load_config() -> Config:
         log("Warning: invalid MAX_TOKENS_PER_CHUNK; using default.")
         max_tokens_per_chunk = DEFAULT_MAX_TOKENS_PER_CHUNK
 
-    review_mode = os.environ.get("REVIEW_MODE", "auto").strip().lower() or "auto"
-    if review_mode not in REVIEW_MODES:
-        log(f"Warning: unknown REVIEW_MODE '{review_mode}'; using 'auto'.")
-        review_mode = "auto"
-
     return Config(
         github_token=github_token,
         openai_token=openai_token,
@@ -331,7 +321,6 @@ def load_config() -> Config:
         max_tokens_per_chunk=max_tokens_per_chunk,
         silent=env_bool("SILENT_MODE", default=True),
         dry_run=env_bool("DRY_RUN"),
-        review_mode=review_mode,
     )
 
 
@@ -3079,7 +3068,7 @@ def main() -> int:
             )
         return 0
 
-    # Review path.
+    # Review mode.
     # The PR's first pass gets the full review. Later pushes only get a light
     # incremental pass: just the issues the new commits introduced, as inline
     # comments.
@@ -3088,16 +3077,6 @@ def main() -> int:
         and payload.get("action") == "synchronize"
         and any((e.get("who") or "").endswith("[bot]") for e in fresh)
     )
-
-    # 'manual' mode: after that first pass the bot reviews only when it is
-    # @-mentioned, so a push on its own must do nothing at all.
-    if incremental and config.review_mode == "manual":
-        log(
-            "Skipping the push review: review-mode is 'manual'; after the "
-            "first review a PR is reviewed only when the bot is @-mentioned."
-        )
-        return 0
-
     review_prompt = system_prompt + INCREMENTAL_DIRECTIVE if incremental else system_prompt
     if incremental:
         log("Later push detected: running an incremental (unstructured) review.")

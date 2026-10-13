@@ -62,14 +62,6 @@ on:
         required: false
         type: string
         default: '.github/ai-review.md'
-      review-mode:
-        description: |
-          'auto' reviews the PR's first pass and every later push.
-          'manual' reviews the first pass automatically; afterwards the bot
-          reviews only when someone @-mentions it.
-        required: false
-        type: string
-        default: 'auto'
     secrets:
       OPENAI_API_KEY:
         required: true   # OpenAI API key
@@ -106,4 +98,3 @@ jobs:
           dry-run: ${{ inputs.dry-run }}
           state-dir: ${{ inputs.state-dir }}
           project-prompt-path: ${{ inputs.project-prompt-path }}
-          review-mode: ${{ inputs.review-mode }}

@@ -67,7 +67,6 @@ Every setting is reachable three ways: the `with:` input when calling the reusab
 | `dry-run` | `DRY_RUN` | `false` | Print the review without posting anything. Useful for trying the bot out on a pull request. |
 | `state-dir` | `REVIEW_STATE_DIR` | `<tmp>/ai-code-review` | Directory for local per-PR history files. |
 | `project-prompt-path` | `PROJECT_PROMPT_PATH` | `.github/ai-review.md` | Path, relative to the repository under review, of that repository's own review criteria. Read from the PR head and added to the built-in prompt; empty uses the built-in prompt alone. |
-| `review-mode` | `REVIEW_MODE` | `auto` | `auto` reviews the PR's first pass and every later push. `manual` reviews the first pass automatically and afterwards only when someone @-mentions the bot — a push on its own does nothing. |
 
 `code-review.yml` also needs the `APP_ID`, `APP_PK` and `OPENAI_API_KEY` secrets; `main.py` additionally reads `GITHUB_REPOSITORY`, `GITHUB_EVENT_NAME` and `GITHUB_EVENT_PATH` (set by Actions) or `GITHUB_PR_NUMBER` for a manual run.
 
@@ -116,7 +115,7 @@ Replying requires the GitHub App to have **`Issues: Read and write`** permission
 
 ## Review pipeline
 
-1. Fetch PR metadata; if the PR is closed, delete any local history and stop. Merges from `release/*` back to `master`/`main` are skipped. The PR's **first** pass gets the full review; later `synchronize` pushes get a light incremental pass covering only what the new commits introduced — with `review-mode: manual` those pushes are skipped entirely and the next review waits for an @-mention. Once a PR is known to need reviewing, the repository's own criteria are fetched from its head and merged into the prompt — see [Project review criteria](#project-review-criteria).
+1. Fetch PR metadata; if the PR is closed, delete any local history and stop. Merges from `release/*` back to `master`/`main` are skipped. The PR's **first** pass gets the full review; later `synchronize` pushes get a light incremental pass covering only what the new commits introduced. Once a PR is known to need reviewing, the repository's own criteria are fetched from its head and merged into the prompt — see [Project review criteria](#project-review-criteria).
 2. Load local per-PR history and fetch prior reviews, conversation comments **and inline review comments**, merging them into the conversation context.
 3. Build the diff payload from the per-file patches — every line is prefixed with its absolute line number so the model can quote a line instead of computing line numbers itself.
 4. If the payload still exceeds `MAX_TOKENS_PER_CHUNK`, review it in chunks and then merge the chunk reviews back into a **single** review body.
