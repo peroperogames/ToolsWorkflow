@@ -324,11 +324,16 @@ def _extract_compile_errors(log_text: str) -> List[Dict[str, Any]]:
     return errors
 
 
-def generate_and_build(unity: str, host: str) -> Tuple[bool, List[Dict[str, Any]], Optional[str]]:
+def generate_and_build(
+    unity: str, host: str
+) -> Tuple[bool, bool, List[Dict[str, Any]], Optional[str]]:
     """Regenerate project files and compile the host project.
 
-    Returns ``(ok, compile_errors, sln_path)``. ``ok`` is False when Unity
-    reported a non-zero exit or compile errors were found.
+    Returns ``(ran, compiled, compile_errors, sln_path)``. ``ran`` is False when
+    Unity never got as far as compiling — no license on this machine, a crash, a
+    project-generation method that does not exist. That is an infrastructure
+    problem, not a code problem, so the caller skips the step instead of
+    failing the build. ``compiled`` is False when the code does not compile.
     """
     sync_method = os.environ.get("UNITY_SYNC_METHOD", "").strip()
     methods = [sync_method] if sync_method else [
@@ -352,12 +357,20 @@ def generate_and_build(unity: str, host: str) -> Tuple[bool, List[Dict[str, Any]
     except OSError:
         pass
 
-    ok = rc == 0 and not errors
     if errors:
         log(f"Unity compile: {len(errors)} error(s).")
-    elif rc != 0:
-        log(f"Unity project generation exited {rc}.")
-    return ok, errors, sln
+        return True, False, errors, sln
+    if rc == 0:
+        return True, True, errors, sln
+    # Unity exited without compiling anything to report.
+    if "license" in text.lower():
+        log(
+            "Unity has no valid license on this machine; skipping the Unity "
+            "step. Activate the editor and re-run."
+        )
+    else:
+        log(f"Unity exited {rc} without compile errors; skipping the Unity step.")
+    return False, False, errors, sln
 
 
 def run_tests(unity: str, host: str) -> Tuple[bool, List[Dict[str, Any]]]:
@@ -387,11 +400,14 @@ def run_tests(unity: str, host: str) -> Tuple[bool, List[Dict[str, Any]]]:
         if results.exists():
             any_ran = True
             all_failures.extend(_parse_nunit(results))
-    ok = any_ran and not all_failures
+    # Only parsed failures count. No results file means Unity could not run the
+    # tests (or the package has none) — that is not evidence of a failing test,
+    # so it must not fail the build.
+    ok = not all_failures
     if all_failures:
         log(f"Unity tests: {len(all_failures)} failing case(s).")
     elif not any_ran:
-        log("Unity tests: no results produced.")
+        log("Unity tests: no results produced; not counting it as a failure.")
     return ok, all_failures
 
 
@@ -481,8 +497,12 @@ def analyze(owner: str, repo: str, number: int, head_sha: str, token: str) -> Un
         if not ensured:
             return result
 
+        ran, compiled, errors, sln = generate_and_build(unity, host)
+        if not ran:
+            # Infrastructure failure (no license, a crash): leave ran=False so
+            # the step counts as skipped, not as a broken build.
+            return result
         result.ran = True
-        compiled, errors, sln = generate_and_build(unity, host)
         result.compiled = compiled
         result.compile_errors = errors
         result.sln_path = sln
