@@ -62,6 +62,21 @@ on:
         required: false
         type: string
         default: '.github/ai-review.md'
+      unity-path:
+        description: 'Path to the Unity editor executable. Pass an empty string to disable the build/test step.'
+        required: false
+        type: string
+        default: '/opt/unity/2022.3.62f3/Editor/Unity'
+      unity-host-project:
+        description: 'Path to the persistent empty Unity project used to build/test packages; created on first use if missing. Empty uses a default beside the package cache.'
+        required: false
+        type: string
+        default: ''
+      unity-sync-method:
+        description: 'Optional -executeMethod used to regenerate project files (default UnityEditor.SyncVS.SyncSolution).'
+        required: false
+        type: string
+        default: ''
     secrets:
       OPENAI_API_KEY:
         required: true   # OpenAI API key
@@ -98,3 +113,6 @@ jobs:
           dry-run: ${{ inputs.dry-run }}
           state-dir: ${{ inputs.state-dir }}
           project-prompt-path: ${{ inputs.project-prompt-path }}
+          unity-path: ${{ inputs.unity-path }}
+          unity-host-project: ${{ inputs.unity-host-project }}
+          unity-sync-method: ${{ inputs.unity-sync-method }}

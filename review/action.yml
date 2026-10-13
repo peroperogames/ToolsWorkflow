@@ -58,9 +58,9 @@ inputs:
   unity-path:
     description: 'Path to the Unity editor executable. Empty to disable the Unity build/test step.'
     required: false
-    default: ''
+    default: '/opt/unity/2022.3.62f3/Editor/Unity'
   unity-host-project:
-    description: 'Path to the persistent empty Unity project used to build/test packages.'
+    description: 'Path to the persistent empty Unity project used to build/test packages; created on first use if missing. Empty uses a default beside the package cache.'
     required: false
     default: ''
   unity-sync-method:

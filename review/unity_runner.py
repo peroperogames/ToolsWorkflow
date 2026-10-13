@@ -50,14 +50,56 @@ def unity_path() -> Optional[str]:
     return None
 
 
-def host_project() -> Optional[str]:
-    """Path to the persistent Unity host project, or None when not configured."""
-    host = os.environ.get("UNITY_HOST_PROJECT", "").strip()
-    if host and os.path.isdir(host):
+def host_project(create_with: Optional[str] = None) -> Optional[str]:
+    """Path to the persistent Unity host project, or None when there is none.
+
+    ``UNITY_HOST_PROJECT`` names it; unset means a default location beside the
+    package cache. A missing project is created with ``-createProject`` when
+    ``create_with`` (the Unity executable) is given, so the runner needs no
+    project prepared by hand. Without it — the PR-close cleanup path — a
+    missing project is simply "not configured" and nothing is created.
+    """
+    configured = os.environ.get("UNITY_HOST_PROJECT", "").strip()
+    host = configured or str(cache_root().parent / "ai-review-unity-host")
+    if os.path.isdir(host):
         return host
-    if host:
-        log(f"UNITY_HOST_PROJECT set but not a directory: {host}")
-    return None
+    if not create_with:
+        if configured:
+            log(f"UNITY_HOST_PROJECT set but not a directory: {host}")
+        return None
+    return host if _create_host_project(create_with, host) else None
+
+
+def _create_host_project(unity: str, host: str) -> bool:
+    """Create an empty Unity project at ``host`` (-createProject, once)."""
+    log(f"Unity host project missing; creating one at {host} ...")
+    try:
+        Path(host).parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log(f"Could not create the host project's parent directory: {exc}")
+        return False
+    cmd = [
+        unity,
+        "-batchmode",
+        "-nographics",
+        "-silent-crashes",
+        "-createProject",
+        host,
+        "-quit",
+        "-logFile",
+        str(_editor_log_path()),
+    ]
+    try:
+        proc = subprocess.run(cmd, timeout=UNITY_TIMEOUT, capture_output=True, text=True)
+        rc = proc.returncode
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        log(f"Could not create the host project: {exc}")
+        return False
+    if rc != 0 or not os.path.isdir(host):
+        log(f"Unity -createProject failed (exit {rc}); see {_editor_log_path()}")
+        return False
+    log(f"Host project created at {host}.")
+    return True
 
 
 def cache_root() -> Path:
@@ -427,7 +469,7 @@ def analyze(owner: str, repo: str, number: int, head_sha: str, token: str) -> Un
     result = UnityResult()
     try:
         unity = unity_path()
-        host = host_project()
+        host = host_project(create_with=unity)
         if not unity or not host:
             log("Unity not configured (UNITY_PATH / UNITY_HOST_PROJECT); skipping.")
             return result
