@@ -105,7 +105,7 @@ Comments on non-PR issues, bot comments, and comments that address neither the b
 - **Improve the prompt** — `@perotoolsbot prompt: <what to change>` rewrites review criteria and opens a pull request with the result. Nothing lands without a human merging that PR, and the bot's token needs write access to the target repository (it already has it for ToolsWorkflow). The command picks the target, and the colon is optional in either form (`:` and `：` both work):
   - `@perotoolsbot prompt: ...` and `@perotoolsbot prompt(this): ...` — the reviewed repository's own criteria file (`PROJECT_PROMPT_PATH`, written fresh if it does not exist yet). The PR is opened against that repository, so a project's feedback cannot change how other projects are reviewed.
   - `@perotoolsbot prompt(base): ...` — the shared prompt in ToolsWorkflow, the single reusable source of the review prompt. The PR is opened against ToolsWorkflow.
-  - Phrased without the command, anything the intent classifier reads as a prompt change behaves like `prompt(this)`.
+  - This command is the **only** way a prompt change happens. A comment that merely asks for a different review style ("be stricter", "别报样式问题") is never guessed into one — the bot replies pointing at the command instead.
 
 - **Code changes** — e.g. `@perotoolsbot fix src/foo.py`. The bot reads the current file contents, generates code changes, and submits a PR to the current repository's feature branch.
 

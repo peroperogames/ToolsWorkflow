@@ -54,7 +54,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-13.unity.14"
+VERSION = "2026-10-13.unity.15"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -140,7 +140,12 @@ REPLY_SYSTEM_PROMPT = (
     "When the developer asks about a comment you left, quote or paraphrase that "
     "specific finding and explain the reasoning behind it. Never claim to have "
     "said something that is not in the conversation above, and never guess at "
-    "what you 'previously replied' — if the context is missing, say so plainly."
+    "what you 'previously replied' — if the context is missing, say so plainly.\n"
+    "If the developer asks you to review differently — stricter, shorter, other "
+    "rules — do not just agree: how you review only changes through an explicit "
+    "command, so point them at `prompt(this): <what to change>` (this "
+    "repository's criteria) or `prompt(base): <what to change>` (the shared "
+    "prompt), either of which opens a pull request for a human to merge."
 )
 
 INLINE_COMMENT_PROMPT = (
@@ -157,20 +162,18 @@ INLINE_COMMENT_PROMPT = (
 
 INTENT_CLASSIFIER_PROMPT = (
     "Classify the intent of this GitHub comment directed at you (a code review bot).\n"
-    "Reply with EXACTLY one of these five words, nothing else:\n"
-    "- 'improve_prompt' — the user asks you to CHANGE how you review (your "
-    "prompt, style, wording or format). A bare complaint without an instruction "
-    "to change the prompt is 'reply', not this.\n"
+    "Reply with EXACTLY one of these four words, nothing else:\n"
     "- 'review' — the user wants you to review this PR now.\n"
     "- 'inline_comment' — the user asks you to leave an inline / line-level "
     "comment on the code, e.g. 'inline comment 一下', '留个行内评论'.\n"
     "- 'code_change' — the user wants the SOURCE CODE of the repo under review "
     "changed (fix a bug, add a feature, refactor).\n"
-    "- 'reply' — anything else: questions, acknowledgements, discussion.\n"
+    "- 'reply' — anything else: questions, acknowledgements, discussion, or a "
+    "request to review differently ('be shorter', 'be stricter'). Changing how "
+    "you review is NOT a classified intent — it only happens through an explicit "
+    "`prompt(this):` / `prompt(base):` command, which never reaches this "
+    "classifier.\n"
     "Rules:\n"
-    "- An instruction to review differently ('be shorter', 'use inline comments', "
-    "'be stricter') is 'improve_prompt'. A complaint with no instruction, or a "
-    "statement of fact ('this isn't an inline comment'), is 'reply'.\n"
     "- Only choose 'code_change' when the repo's actual source code must change.\n"
     "- If a comment contains an acknowledgement or quoted reply and no clear "
     "request, choose 'reply'."
@@ -1346,46 +1349,27 @@ def _strip_mention(body: str, bot_login: str) -> str:
     return body.strip()
 
 
-# Comments containing these target the bot's own review setup rather than the
-# repo's source code, so they are prompt improvements regardless of what the
-# LLM classifier guesses.
-PROMPT_INTENT_HINTS = (
-    "toolsworkflow",
-    "prompt.md",
-    "提示词",
-    "评审规范",
-    "评审标准",
-    "评审规则",
-    "代码规范",
-    "review prompt",
-    "review standard",
-)
-
-
 def pick_intent(raw: str) -> str:
     """Map a classifier response to one of the known intents."""
     text = (raw or "").strip().lower()
-    # Most specific first — "improve_prompt" must win over a loose "review" match.
-    for intent in ("improve_prompt", "code_change", "inline_comment", "review"):
+    # Most specific first — "code_change" must win over a loose "review" match.
+    for intent in ("code_change", "inline_comment", "review"):
         if intent in text:
             return intent
     if "inline" in text:
         return "inline_comment"
-    if "improve" in text or "prompt" in text:
-        return "improve_prompt"
+    # Prompt changes are never a classified intent: they only happen through an
+    # explicit `prompt(this):` / `prompt(base):` command.
     return "reply"
 
 
 def classify_intent(ai: AIClient, body: str) -> str:
-    """Classify whether a comment asks to improve the prompt, or is a normal reply."""
-    # Deterministic guard: anything that clearly targets the bot's own review
-    # setup is prompt improvement, whatever the LLM would have guessed.
-    text = (body or "").lower()
-    for hint in PROMPT_INTENT_HINTS:
-        if hint in text:
-            log(f"Intent: improve_prompt (matched hint '{hint}').")
-            return "improve_prompt"
+    """Classify what a comment is asking the bot to do — review, comment, code, reply.
 
+    Deliberately never yields a prompt change: that intent is reserved for the
+    explicit `prompt(this):` / `prompt(base):` command, which is parsed
+    deterministically before this classifier runs.
+    """
     try:
         result = ai.chat(
             [
@@ -1408,10 +1392,12 @@ def parse_prompt_command(body: str, bot_login: str) -> Optional[Tuple[str, str]]
     ``@bot prompt(this): ...`` and a bare ``@bot prompt: ...`` improve the
     repository being reviewed; ``@bot prompt(base): ...`` improves the shared
     prompt in ToolsWorkflow. The colon is optional in either form because people
-    forget it, and the target defaults to ``this``.
+    forget it, and the target defaults to ``this``. Full-width parentheses and
+    colon are accepted so a Chinese IME cannot silently break the command.
 
-    Returns ``None`` when the comment is not a ``prompt`` command, so the caller
-    can fall through to the intent classifier.
+    This is the only way a prompt change happens — there is no classifier
+    guessing at intent. Returns ``None`` when the comment is not a ``prompt``
+    command, so the caller falls through to the intent classifier.
     """
     if not body or not bot_login:
         return None
@@ -1422,7 +1408,7 @@ def parse_prompt_command(body: str, bot_login: str) -> Optional[Tuple[str, str]]
     for name in sorted((n for n in names if n), key=len, reverse=True):
         pattern = re.compile(
             r"@" + re.escape(name) + r"\s+prompt\s*"
-            r"(?:\(\s*(?P<target>this|base)\s*\))?\s*[:：]?\s*(?P<feedback>.*)",
+            r"(?:[（(]\s*(?P<target>this|base)\s*[)）])?\s*[:：]?\s*(?P<feedback>.*)",
             re.IGNORECASE | re.DOTALL,
         )
         match = pattern.search(body)
@@ -3011,11 +2997,6 @@ def main() -> int:
 
         # Classify intent and route.
         intent = classify_intent(ai, body)
-        if intent == "improve_prompt":
-            return handle_improve_prompt(
-                ai, gh, pr, _strip_mention(body, bot_login), author,
-                owner, repo, number, "this", config,
-            )
         if intent == "code_change":
             return handle_code_change(
                 ai, gh, pr, body, author, owner, repo, number, conversation, bot_login
