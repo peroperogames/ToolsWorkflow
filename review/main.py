@@ -54,7 +54,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-13.unity.13"
+VERSION = "2026-10-13.unity.14"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -513,6 +513,20 @@ def fetch_conversation(
     except Exception as exc:  # noqa: BLE001 - context is best-effort
         log(f"Warning: could not fetch prior comments: {exc}")
 
+    # Which inline threads are settled? The inline-comment endpoint cannot say,
+    # so the state comes from GraphQL and rides along in each body. Without it
+    # the model cannot tell an open finding from one that was already fixed or
+    # deliberately dismissed — and raises it again.
+    thread_state: Dict[Any, str] = {}
+    try:
+        for thread in gh.list_review_threads(owner, repo, number):
+            state = ", thread resolved" if thread.get("isResolved") else ", thread open"
+            for node in (thread.get("comments") or {}).get("nodes") or []:
+                if node.get("databaseId") is not None:
+                    thread_state[node["databaseId"]] = state
+    except Exception as exc:  # noqa: BLE001 - context is best-effort
+        log(f"Warning: could not fetch review threads: {exc}")
+
     # Inline comments live on their own endpoint; without them the bot cannot
     # explain or follow up on the findings it posted on individual lines.
     try:
@@ -523,7 +537,8 @@ def fetch_conversation(
             where = comment.get("path") or ""
             line = comment.get("line") or comment.get("original_line")
             if where and line:
-                body = f"[inline {where}:{line}]\n{body}"
+                state = thread_state.get(comment.get("id"), "")
+                body = f"[inline {where}:{line}{state}]\n{body}"
             entries.append(
                 {
                     "ts": comment.get("created_at") or "",
@@ -2064,8 +2079,13 @@ REVIEW_TOOLS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
-            "name": "list_open_threads",
-            "description": "List your still-unresolved review threads on this PR (id, file, first comment).",
+            "name": "list_threads",
+            "description": (
+                "List your review threads on this PR. Unresolved ones come with "
+                "the id `resolve_thread` needs; resolved ones are listed too — "
+                "they were already dealt with, so never raise those findings "
+                "again."
+            ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -2079,7 +2099,7 @@ REVIEW_TOOLS: List[Dict[str, Any]] = [
             ),
             "parameters": {
                 "type": "object",
-                "properties": {"thread_id": {"type": "string", "description": "id from list_open_threads."}},
+                "properties": {"thread_id": {"type": "string", "description": "id from list_threads."}},
                 "required": ["thread_id"],
             },
         },
@@ -2117,7 +2137,7 @@ REPLY_TOOLS: List[Dict[str, Any]] = [
     tool
     for tool in REVIEW_TOOLS
     if tool["function"]["name"]
-    in ("list_open_threads", "resolve_thread", "post_inline_comment")
+    in ("list_threads", "resolve_thread", "post_inline_comment")
 ]
 
 REPLY_TOOLS.append(
@@ -2250,21 +2270,36 @@ def _tool_get_file_diff(args: Dict[str, Any], ctx: ToolContext) -> str:
     return f"error: {path} is not part of this pull request"
 
 
-def _tool_list_open_threads(args: Dict[str, Any], ctx: ToolContext) -> str:
+def _tool_list_threads(args: Dict[str, Any], ctx: ToolContext) -> str:
     try:
         threads = ctx.gh.list_review_threads(ctx.owner, ctx.repo, ctx.number)
     except Exception as exc:  # noqa: BLE001
         return f"error: {exc}"
-    lines = []
+    open_lines: List[str] = []
+    resolved_lines: List[str] = []
     for thread in threads:
-        if thread.get("isResolved"):
-            continue
         if not _thread_is_bot_authored(thread):
             continue
         nodes = (thread.get("comments") or {}).get("nodes") or []
         first = (nodes[0].get("body") or "").strip().replace("\n", " ")[:200]
-        lines.append(f"- id: {thread.get('id')}\n  path: {thread.get('path')}\n  comment: {first}")
-    return "\n".join(lines) if lines else "no unresolved threads"
+        path = thread.get("path")
+        if thread.get("isResolved"):
+            # Listed so the model can see what is already settled — either
+            # fixed or deliberately dismissed — instead of raising it again.
+            resolved_lines.append(f"- path: {path}\n  comment: {first}")
+        else:
+            open_lines.append(
+                f"- id: {thread.get('id')}\n  path: {path}\n  comment: {first}"
+            )
+    if not open_lines and not resolved_lines:
+        return "no threads"
+    parts = ["## Unresolved threads\n" + ("\n".join(open_lines) or "none")]
+    if resolved_lines:
+        parts.append(
+            "## Resolved threads (already dealt with - do not raise these "
+            "findings again)\n" + "\n".join(resolved_lines)
+        )
+    return "\n\n".join(parts)
 
 
 def _tool_resolve_thread(args: Dict[str, Any], ctx: ToolContext) -> str:
@@ -2323,7 +2358,7 @@ TOOL_HANDLERS = {
     "read_file": _tool_read_file,
     "get_file_diff": _tool_get_file_diff,
     "post_inline_comment": _tool_post_inline_comment,
-    "list_open_threads": _tool_list_open_threads,
+    "list_threads": _tool_list_threads,
     "resolve_thread": _tool_resolve_thread,
     "finish": _tool_finish,
 }
