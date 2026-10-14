@@ -37,8 +37,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from ai_client import AIClient, DEFAULT_BASE_URL, DEFAULT_MODEL
 from github_client import GitHubClient
 
-import history
 import inspect_code
+import session
 import unity_runner
 
 # The prompt file is resolved next to this script so the tool works regardless
@@ -54,7 +54,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-13.unity.17"
+VERSION = "2026-10-14.unity.18"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -1895,16 +1895,36 @@ def handle_review_request(
     system_prompt: str,
     conversation: str,
     bot_login: str,
+    session_records: List[Dict[str, Any]],
+    comment_records: List[Dict[str, Any]],
 ) -> int:
-    """Run a full review when the user explicitly asks for one via @-mention."""
+    """Run a full review when the user explicitly asks for one via @-mention.
+
+    ``session_records`` is the PR's session so far and ``comment_records`` the
+    comments posted since the last run; the request itself becomes a turn, and
+    a session that has never seen the PR is bootstrapped with the full diff.
+    """
     files = gh.list_files(owner, repo, number)
     if not files:
         gh.post_comment(owner, repo, number, f"@{author} 没有找到变更文件，无法评审。")
         return 0
 
+    head_sha = pr.get("head", {}).get("sha", "")
+    turns = list(comment_records)
+    if not session.has_bootstrap(session_records):
+        turns.append(turn_record(build_diff_text(pr, files), "open", head_sha))
+    turns.append(
+        turn_record(
+            f"## Review Request\n\n**{author}** asked for a review:\n\n{body}\n\n"
+            "Review the current state of the pull request with your tools.",
+            "request",
+            head_sha,
+        )
+    )
+
     log(f"Review requested via @-mention ({len(files)} files, ~{len(conversation)} chars context)...")
     ctx = run_agent_review(
-        ai, gh, owner, repo, number, pr, files, system_prompt, conversation, config
+        ai, gh, owner, repo, number, pr, files, system_prompt, session_records, turns, config
     )
     if ctx is not None:
         return 0
@@ -1934,22 +1954,6 @@ def handle_review_request(
         post_inline_comments(
             gh, owner, repo, number, pr.get("head", {}).get("sha", ""), inline
         )
-
-    posted_login = (result.get("user") or {}).get("login", "") or bot_login
-
-    entries = merge_conversation(
-        history.load(owner, repo, number),
-        fetch_conversation(gh, owner, repo, number),
-    )
-    entries.append(
-        {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "who": posted_login,
-            "kind": "review",
-            "body": review_text,
-        }
-    )
-    history.save(owner, repo, number, entries[-MAX_CONVERSATION_ENTRIES:])
 
     gh.post_comment(owner, repo, number, f"@{author} 评审已发布。")
     log(f"Review posted on request ({event}).")
@@ -2535,6 +2539,136 @@ def _echoed_narration(content: str) -> str:
     return content[:MAX_ASSISTANT_ECHO_CHARS] + " [...]"
 
 
+def conversation_records(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Session records for conversation entries the model has not seen yet.
+
+    One record per entry, rendered exactly like the old transcript block so
+    the model reads the same thing it used to find inside the diff payload.
+    """
+    records: List[Dict[str, Any]] = []
+    for entry in entries:
+        body = (entry.get("body") or "").strip()
+        if not body:
+            continue
+        kind = "review" if entry.get("kind") == "review" else "comment"
+        who = entry.get("who") or "unknown"
+        records.append(
+            session.make_record(
+                "user",
+                f"### {who} ({kind})\n\n{body}",
+                meta={"kind": kind, "who": who, "at": entry.get("ts") or ""},
+            )
+        )
+    return records
+
+
+def unseen_entries(
+    entries: List[Dict[str, Any]], stored: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """The merged conversation entries the session has not been shown yet."""
+    seen = {" ".join((e.get("body") or "").split()) for e in stored}
+    return [e for e in entries if " ".join((e.get("body") or "").split()) not in seen]
+
+
+def turn_record(content: str, source: str, sha: str = "") -> Dict[str, Any]:
+    """A user-side turn for the session: what is new since the last run."""
+    return session.make_record("user", content, meta={"source": source, "sha": sha})
+
+
+def last_turn_sha(session_records: List[Dict[str, Any]]) -> str:
+    """The commit the session last saw a turn for ("" when it has none)."""
+    for record in reversed(session_records):
+        sha = (record.get("meta") or {}).get("sha")
+        if sha:
+            return sha
+    return ""
+
+
+def context_suffix(extra_context: str) -> str:
+    return f"\n\n{extra_context}" if extra_context else ""
+
+
+def build_review_turns(
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    pr: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    payload: Dict[str, Any],
+    session_records: List[Dict[str, Any]],
+    entries: List[Dict[str, Any]],
+    stored: List[Dict[str, Any]],
+    incremental: bool,
+    extra_context: str = "",
+) -> List[Dict[str, Any]]:
+    """The new session turns for a review run.
+
+    A session that has never seen the PR is handed the full diff once; after
+    that only what changed — the push's own diff when the event carries one,
+    otherwise a diff against the commit the session last saw.
+    """
+    head_sha = pr.get("head", {}).get("sha", "")
+    turns = conversation_records(unseen_entries(entries, stored))
+    if not session.has_bootstrap(session_records):
+        turns.append(
+            turn_record(
+                build_diff_text(pr, files) + context_suffix(extra_context),
+                "open",
+                head_sha,
+            )
+        )
+        return turns
+
+    diff_text = ""
+    if incremental:
+        before, after = payload.get("before"), payload.get("after")
+        if before and after:
+            try:
+                push_files = gh.compare(owner, repo, before, after)
+                log(f"Latest push touched {len(push_files)} file(s).")
+                diff_text = build_diff_text(pr, push_files)
+            except Exception as exc:  # noqa: BLE001 - fall back below
+                log(f"Warning: could not diff the push ({before[:7]}..{after[:7]}): {exc}")
+    if not diff_text:
+        previous = last_turn_sha(session_records)
+        if previous and previous != head_sha:
+            try:
+                changed = gh.compare(owner, repo, previous, head_sha)
+                log(f"{len(changed)} file(s) changed since the last review.")
+                diff_text = build_diff_text(pr, changed)
+            except Exception as exc:  # noqa: BLE001 - best effort
+                log(f"Warning: could not diff since {previous[:7]}: {exc}")
+    if diff_text:
+        turns.append(
+            turn_record(
+                diff_text + INCREMENTAL_DIRECTIVE + context_suffix(extra_context),
+                "push",
+                head_sha,
+            )
+        )
+    elif incremental:
+        # No diff could be produced for the push; hand over the whole PR rather
+        # than letting the model review a stale picture.
+        turns.append(
+            turn_record(
+                build_diff_text(pr, files) + INCREMENTAL_DIRECTIVE + context_suffix(extra_context),
+                "push",
+                head_sha,
+            )
+        )
+    else:
+        turns.append(
+            turn_record(
+                "## Review Request\n\nThe pull request now points at commit "
+                f"{head_sha[:8]}. Review its current state with your tools."
+                + context_suffix(extra_context),
+                "request",
+                head_sha,
+            )
+        )
+    return turns
+
+
 def _tool_call_labels(messages: List[Dict[str, Any]]) -> Dict[str, str]:
     """Map ``tool_call_id`` → a label like ``read_file src/foo.cs``."""
     labels: Dict[str, str] = {}
@@ -2600,90 +2734,99 @@ def run_agent_review(
     pr: Dict[str, Any],
     files: List[Dict[str, Any]],
     system_prompt: str,
-    conversation: str,
+    session_records: List[Dict[str, Any]],
+    turns: List[Dict[str, Any]],
     config: "Config",
-    extra_context: str = "",
     block_approve: bool = False,
 ) -> Optional[ToolContext]:
     """Let the model drive the review through tools.
 
-    ``extra_context`` is appended to the user turn (e.g. the Unity build/test
-    status). ``block_approve`` forbids approval regardless of the model's
-    verdict — used when compilation or tests failed.
+    The conversation comes from the PR's session: ``session_records`` is what
+    the model has already seen and produced, ``turns`` is what is new this run
+    (the push's diff, a review request, comments posted since the last run).
+    The turns and every loop step are appended to the session as they happen,
+    so a job that dies mid-review keeps the work it already did.
 
-    Returns the context when the model used tools, or ``None`` when it answered
-    in prose instead — the caller then falls back to parsing that text.
+    ``block_approve`` forbids approval regardless of the model's verdict — used
+    when compilation or tests failed. Returns the context when the model used
+    tools, or ``None`` when it answered in prose instead — the caller then
+    falls back to parsing that text.
     """
     ctx = ToolContext(
         gh=gh, owner=owner, repo=repo, number=number, pr=pr, files=files,
         config=config, heads=pr.get("head", {}).get("sha", ""),
         block_approve=block_approve,
     )
-    user_content = build_diff_text(pr, files, conversation=conversation)
-    if extra_context:
-        user_content += "\n\n" + extra_context
-    messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_content},
-    ]
+    messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    messages.extend(session.to_messages(session_records))
+    messages.extend(session.to_messages(turns))
 
-    # Why the loop ended, reported when it ends without a finish.
-    stop_reason = f"the {MAX_AGENT_ITERATIONS}-step budget ran out"
-    for iteration in range(1, MAX_AGENT_ITERATIONS + 1):
-        dropped = compact_agent_messages(messages)
-        if dropped:
-            log(
-                f"Context compacted: {dropped} old tool result(s) omitted to "
-                "stay within budget."
-            )
-        if iteration == MAX_AGENT_ITERATIONS:
-            # Last call: say so. A model that is cut off mid-investigation ends
-            # the review with no verdict and nothing posted.
-            messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        "Step budget exhausted: this is your last call. Post any "
-                        "findings you have and call finish(verdict) now."
-                    ),
-                }
-            )
-        reply = ai.chat_message(messages, tools=REVIEW_TOOLS)
-        calls = reply.get("tool_calls") or []
-        if not calls:
-            if iteration == 1:
-                log("Model answered without tools; using the text fallback.")
-                return None
-            log("Model stopped calling tools; ending the review.")
-            stop_reason = "the model stopped calling tools"
-            break
+    # Exclusive access to the session for the whole run; another job for the
+    # same PR keeps working, just without persistence.
+    with session.hold(owner, repo, number) as store:
+        if store:
+            store.append(turns)
+        # Why the loop ended, reported when it ends without a finish.
+        stop_reason = f"the {MAX_AGENT_ITERATIONS}-step budget ran out"
+        for iteration in range(1, MAX_AGENT_ITERATIONS + 1):
+            dropped = compact_agent_messages(messages)
+            if dropped:
+                log(
+                    f"Context compacted: {dropped} old tool result(s) omitted to "
+                    "stay within budget."
+                )
+            if iteration == MAX_AGENT_ITERATIONS:
+                # Last call: say so. A model that is cut off mid-investigation
+                # ends the review with no verdict and nothing posted. Not
+                # persisted: a nudge is not part of the conversation.
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Step budget exhausted: this is your last call. Post any "
+                            "findings you have and call finish(verdict) now."
+                        ),
+                    }
+                )
+            reply = ai.chat_message(messages, tools=REVIEW_TOOLS)
+            calls = reply.get("tool_calls") or []
+            if not calls:
+                if iteration == 1:
+                    log("Model answered without tools; using the text fallback.")
+                    return None
+                log("Model stopped calling tools; ending the review.")
+                stop_reason = "the model stopped calling tools"
+                break
 
-        log(f"Agent step {iteration}: {', '.join(c.get('function', {}).get('name', '?') for c in calls)}")
-        messages.append(
-            {
-                "role": "assistant",
-                "content": _echoed_narration(reply.get("content") or ""),
-                "tool_calls": calls,
-            }
-        )
-        for call in calls:
-            fn = call.get("function") or {}
-            try:
-                args = json.loads(fn.get("arguments") or "{}")
-            except ValueError:
-                args = {}
-            if not isinstance(args, dict):
-                args = {}
-            result = execute_tool(fn.get("name", ""), args, ctx)
+            log(f"Agent step {iteration}: {', '.join(c.get('function', {}).get('name', '?') for c in calls)}")
+            narration = _echoed_narration(reply.get("content") or "")
             messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call.get("id"),
-                    "content": result,
-                }
+                {"role": "assistant", "content": narration, "tool_calls": calls}
             )
-        if ctx.finish_requested:
-            break
+            step_records = [session.make_record("assistant", narration, tool_calls=calls)]
+            for call in calls:
+                fn = call.get("function") or {}
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except ValueError:
+                    args = {}
+                if not isinstance(args, dict):
+                    args = {}
+                result = execute_tool(fn.get("name", ""), args, ctx)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.get("id"),
+                        "content": result,
+                    }
+                )
+                step_records.append(
+                    session.make_record("tool", result, tool_call_id=call.get("id"))
+                )
+            if store:
+                store.append(step_records)
+            if ctx.finish_requested:
+                break
 
     log(
         f"Agent done: {ctx.inline_posted} inline comment(s), "
@@ -2717,13 +2860,15 @@ def run_agent_reply(
     pr: Dict[str, Any],
     files: List[Dict[str, Any]],
     system_prompt: str,
-    conversation: str,
-    author: str,
-    body: str,
-    thread_context: str,
+    session_records: List[Dict[str, Any]],
+    turns: List[Dict[str, Any]],
     config: "Config",
 ) -> Optional[ToolContext]:
     """Answer a comment with tools available.
+
+    Runs on the same per-PR session as the reviews: ``session_records`` is the
+    conversation so far, ``turns`` is what is new (the comment being answered,
+    plus any comments posted since the last run).
 
     Returns the context — whose ``reply_text`` may be empty by design, meaning
     the model chose not to answer, with ``reply_reason`` saying why — or
@@ -2734,69 +2879,63 @@ def run_agent_reply(
         gh=gh, owner=owner, repo=repo, number=number, pr=pr, files=files,
         config=config, heads=pr.get("head", {}).get("sha", ""),
     )
-    parts: List[str] = []
-    if conversation:
-        parts.append("## Previous Conversation\n\n" + conversation)
-    if thread_context:
-        parts.append("## The Comment Being Replied To\n\n" + thread_context)
-    parts.append(
-        f"## New Comment\n\n**{author}** just wrote:\n\n{body}\n\n"
-        "Reply concisely. If they ask you to DO something to this pull request — "
-        "resolve a thread, leave an inline comment — call the matching tool "
-        "instead of telling them to do it themselves."
-    )
-    messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": "\n\n".join(parts)},
-    ]
+    messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    messages.extend(session.to_messages(session_records))
+    messages.extend(session.to_messages(turns))
 
-    for iteration in range(1, MAX_AGENT_ITERATIONS + 1):
-        dropped = compact_agent_messages(messages)
-        if dropped:
+    with session.hold(owner, repo, number) as store:
+        if store:
+            store.append(turns)
+        for iteration in range(1, MAX_AGENT_ITERATIONS + 1):
+            dropped = compact_agent_messages(messages)
+            if dropped:
+                log(
+                    f"Context compacted: {dropped} old tool result(s) omitted to "
+                    "stay within budget."
+                )
+            answer = ai.chat_message(messages, tools=REPLY_TOOLS)
+            calls = answer.get("tool_calls") or []
+            if not calls:
+                if iteration == 1:
+                    return None
+                # Tools were used earlier and the model now answered in prose
+                # instead of calling finish — that text is the reply.
+                ctx.reply_text = (answer.get("content") or "").strip()
+                return ctx
+
             log(
-                f"Context compacted: {dropped} old tool result(s) omitted to "
-                "stay within budget."
+                f"Reply step {iteration}: "
+                + ", ".join(c.get("function", {}).get("name", "?") for c in calls)
             )
-        answer = ai.chat_message(messages, tools=REPLY_TOOLS)
-        calls = answer.get("tool_calls") or []
-        if not calls:
-            if iteration == 1:
-                return None
-            # Tools were used earlier and the model now answered in prose
-            # instead of calling finish — that text is the reply.
-            ctx.reply_text = (answer.get("content") or "").strip()
-            return ctx
-
-        log(
-            f"Reply step {iteration}: "
-            + ", ".join(c.get("function", {}).get("name", "?") for c in calls)
-        )
-        messages.append(
-            {
-                "role": "assistant",
-                "content": _echoed_narration(answer.get("content") or ""),
-                "tool_calls": calls,
-            }
-        )
-        for call in calls:
-            fn = call.get("function") or {}
-            try:
-                args = json.loads(fn.get("arguments") or "{}")
-            except ValueError:
-                args = {}
-            if not isinstance(args, dict):
-                args = {}
-            name = fn.get("name", "")
-            result = (
-                _tool_finish_reply(args, ctx)
-                if name == "finish"
-                else execute_tool(name, args, ctx)
-            )
+            narration = _echoed_narration(answer.get("content") or "")
             messages.append(
-                {"role": "tool", "tool_call_id": call.get("id"), "content": result}
+                {"role": "assistant", "content": narration, "tool_calls": calls}
             )
-        if ctx.finish_requested:
-            break
+            step_records = [session.make_record("assistant", narration, tool_calls=calls)]
+            for call in calls:
+                fn = call.get("function") or {}
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except ValueError:
+                    args = {}
+                if not isinstance(args, dict):
+                    args = {}
+                name = fn.get("name", "")
+                result = (
+                    _tool_finish_reply(args, ctx)
+                    if name == "finish"
+                    else execute_tool(name, args, ctx)
+                )
+                messages.append(
+                    {"role": "tool", "tool_call_id": call.get("id"), "content": result}
+                )
+                step_records.append(
+                    session.make_record("tool", result, tool_call_id=call.get("id"))
+                )
+            if store:
+                store.append(step_records)
+            if ctx.finish_requested:
+                break
 
     return ctx
 
@@ -2899,14 +3038,14 @@ def main() -> int:
 
     pr = gh.get_pull_request(owner, repo, number)
 
-    # Closed PRs need no review; drop any persisted history for them and free
-    # the Unity host project's reference + package clone.
+    # Closed PRs need no review; drop their session and free the Unity host
+    # project's reference + package clone.
     if (pr.get("state") or "open") == "closed":
-        history.delete(owner, repo, number)
+        session.delete(owner, repo, number)
         host = unity_runner.host_project()
         if host:
             unity_runner.cleanup(host, owner, repo, number)
-        log(f"Pull Request #{number} is closed; cleaned up history and Unity cache.")
+        log(f"Pull Request #{number} is closed; cleaned up its session and Unity cache.")
         return 0
 
     # Merges from release branches back to master/main don't need review.
@@ -2928,14 +3067,18 @@ def main() -> int:
         merge_project_prompt(REPLY_SYSTEM_PROMPT, project_prompt), config.language
     )
 
-    stored = history.load(owner, repo, number)
+    # The PR's session is the model's memory; the entries derived from it are
+    # only used to deduplicate against what GitHub reports, since GitHub stays
+    # the source of truth.
+    records = session.load(owner, repo, number)
+    stored = session.entries(records)
     fresh = fetch_conversation(gh, owner, repo, number)
 
     # Reply mode.
     if is_issue_comment or is_review_comment:
         body = comment.get("body") or ""
         # Determine bot login from the conversation (bot-authored entries),
-        # with an env-var fallback for the first run when no history exists yet.
+        # with an env-var fallback for the first run when no session exists yet.
         bot_login = "perotoolsbot[bot]"
         addressed = comment_mentions_bot(body, bot_login)
         thread_context = ""
@@ -2984,6 +3127,9 @@ def main() -> int:
 
         entries = merge_conversation(stored, fresh)
         conversation = render_conversation(entries)
+        # Comments posted since the last run enter the session as their own
+        # turns, whichever route this run takes.
+        comment_records = conversation_records(unseen_entries(entries, stored))
 
         # An explicit `prompt(this|base)` command is deterministic, so it never
         # goes to the classifier — only the user knows which prompt they mean.
@@ -3003,7 +3149,8 @@ def main() -> int:
             )
         if intent == "review":
             return handle_review_request(
-                ai, gh, pr, body, author, owner, repo, number, config, system_prompt, conversation, bot_login
+                ai, gh, pr, body, author, owner, repo, number, config,
+                system_prompt, conversation, bot_login, records, comment_records,
             )
         if intent == "inline_comment":
             files = gh.list_files(owner, repo, number)
@@ -3011,11 +3158,24 @@ def main() -> int:
                 ai, gh, pr, files, author, owner, repo, number
             )
 
+        reply_parts: List[str] = []
+        if thread_context:
+            reply_parts.append("## The Comment Being Replied To\n\n" + thread_context)
+        reply_parts.append(
+            f"## New Comment\n\n**{author}** just wrote:\n\n{body}\n\n"
+            "Reply concisely. If they ask you to DO something to this pull request — "
+            "resolve a thread, leave an inline comment — call the matching tool "
+            "instead of telling them to do it themselves."
+        )
+        reply_turn = turn_record(
+            "\n\n".join(reply_parts), "comment", pr.get("head", {}).get("sha", "")
+        )
+
         try:
             reply_files = gh.list_files(owner, repo, number)
             reply_ctx = run_agent_reply(
                 ai, gh, owner, repo, number, pr, reply_files, reply_prompt,
-                conversation, author, body, thread_context, config,
+                records, [*comment_records, reply_turn], config,
             )
             if reply_ctx is None:
                 # Model answered without tools — plain text reply.
@@ -3065,16 +3225,6 @@ def main() -> int:
         else:
             result = gh.post_comment(owner, repo, number, reply)
             log("Posted reply comment.")
-
-        entries.append(
-            {
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "who": (result.get("user") or {}).get("login", "") or bot_login,
-                "kind": "comment",
-                "body": reply,
-            }
-        )
-        history.save(owner, repo, number, entries[-MAX_CONVERSATION_ENTRIES:])
 
         # A concern answered in the thread is settled even without a code change,
         # so re-check the open threads and approve once nothing is left.
@@ -3131,11 +3281,15 @@ def main() -> int:
     if static_posted:
         log(f"Static analysis posted {static_posted} inline comment(s).")
 
-    # Preferred path: the model drives the review with tools. The actions are
-    # already done by the tools, so there is nothing left to post here.
+    # Preferred path: the model drives the review with tools. The session
+    # supplies the conversation and receives this run's turns and every loop
+    # step, so the next run continues instead of starting over.
+    turns = build_review_turns(
+        gh, owner, repo, pr, files, payload, records, entries, stored,
+        incremental, extra_context=extra_context,
+    )
     ctx = run_agent_review(
-        ai, gh, owner, repo, number, pr, files, review_prompt, conversation, config,
-        extra_context=extra_context,
+        ai, gh, owner, repo, number, pr, files, system_prompt, records, turns, config,
         block_approve=unity.ran and not unity.ok,
     )
     if ctx is not None:
@@ -3145,16 +3299,6 @@ def main() -> int:
                 conversation=conversation,
                 allow_approve=not (unity.ran and not unity.ok),
             )
-        if not config.dry_run:
-            entries.append(
-                {
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "who": "perotoolsbot[bot]",
-                    "kind": "review",
-                    "body": f"agent review: {ctx.inline_posted} inline comment(s)",
-                }
-            )
-            history.save(owner, repo, number, entries[-MAX_CONVERSATION_ENTRIES:])
         return 0
 
     review_text, raw_comments, general = perform_review(
@@ -3214,17 +3358,6 @@ def main() -> int:
             push_files=push_files,
             allow_approve=(event == "APPROVE"),
         )
-
-    # Persist this run's review so the next run can build on it.
-    entries.append(
-        {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "who": (result.get("user") or {}).get("login", "ai-reviewer"),
-            "kind": "review",
-            "body": review_text,
-        }
-    )
-    history.save(owner, repo, number, entries[-MAX_CONVERSATION_ENTRIES:])
 
     return 0
 

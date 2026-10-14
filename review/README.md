@@ -65,7 +65,7 @@ Every setting is reachable three ways: the `with:` input when calling the reusab
 | `max-tokens-per-chunk` | `MAX_TOKENS_PER_CHUNK` | `131072` | Max tokens of diff per review call. |
 | `silent-mode` | `SILENT_MODE` | `true` | Post a comment instead of a review. Set to `0`/`false` to post a review with `APPROVE`/`REQUEST_CHANGES`. Only affects the prose-fallback path — the normal tool-driven review posts inline comments regardless. |
 | `dry-run` | `DRY_RUN` | `false` | Print the review without posting anything. Useful for trying the bot out on a pull request. |
-| `state-dir` | `REVIEW_STATE_DIR` | `<tmp>/ai-code-review` | Directory for local per-PR history files. |
+| `state-dir` | `REVIEW_STATE_DIR` | `<tmp>/ai-code-review` | Directory for per-PR session files (removed when the PR closes). |
 | `project-prompt-path` | `PROJECT_PROMPT_PATH` | `.github/ai-review.md` | Path, relative to the repository under review, of that repository's own review criteria. Read from the PR head and added to the built-in prompt; empty uses the built-in prompt alone. |
 | `unity-path` | `UNITY_PATH` | `/opt/unity/2022.3.62f3/Editor/Unity` | Unity editor executable for the build/test step; the step self-skips when the file does not exist. Pass an empty string to disable it outright. |
 | `unity-host-project` | `UNITY_HOST_PROJECT` | *(beside the package cache)* | Persistent empty Unity project the package is built and tested in. Created with `-createProject` on first use when missing. |
@@ -119,7 +119,7 @@ Replying requires the GitHub App to have **`Issues: Read and write`** permission
 ## Review pipeline
 
 1. Fetch PR metadata; if the PR is closed, delete any local history and stop. Merges from `release/*` back to `master`/`main` are skipped. The PR's **first** pass gets the full review; later `synchronize` pushes get a light incremental pass covering only what the new commits introduced. Once a PR is known to need reviewing, the repository's own criteria are fetched from its head and merged into the prompt — see [Project review criteria](#project-review-criteria).
-2. Load local per-PR history and fetch prior reviews, conversation comments **and inline review comments**, merging them into the conversation context.
+2. Load the PR's **session** — one append-only message log per pull request, the model's accumulated memory of everything it has seen and produced here: turns, its own replies, tool calls and results. Reviews, conversation comments **and inline review comments** are fetched from GitHub, and whatever was posted since the last run is appended as new turns. A missing or damaged session is rebuilt from GitHub (it is an optimization, not state the bot depends on), and the whole directory is deleted when the PR closes. Later runs therefore continue the conversation instead of re-sending the prompt and the whole diff: a push appends just its own diff, and the model keeps the files it read and the reasoning it did.
 3. Build the diff payload from the per-file patches — every line is prefixed with its absolute line number so the model can quote a line instead of computing line numbers itself.
 4. If the payload still exceeds `MAX_TOKENS_PER_CHUNK`, review it in chunks and then merge the chunk reviews back into a **single** review body.
 5. **Build & test in a Unity host project.** UPM packages have no compilable project of their own, so the runner keeps one persistent empty Unity project (`UNITY_HOST_PROJECT`, created on first use when missing). The package under review is pulled in as a `file:` dependency, Unity regenerates the real sln/csproj in batch mode and compiles, then unit tests run. Compile errors land as inline comments on the changed line (or a status comment otherwise); test failures land in that status comment. A failing build or test **blocks approval**; a failure that is not about the code — no license on the machine, a crashed editor — skips the step instead and says so in the log. Per PR the package is cloned on first run and `git`-synced on later pushes; the clone and the host dependency are removed when the PR closes. The whole step self-skips when the Unity editor is not found (`UNITY_PATH`) or the repo is not a UPM package.
@@ -148,5 +148,5 @@ Praise is not a finding. A comment that only compliments a change — however te
 - `ai_client.py` — OpenAI-compatible chat completions client.
 - `inspect_code.py` — ReSharper static analysis (`.editorconfig`-driven).
 - `unity_runner.py` — Unity host-project build, unit tests and project-file generation.
-- `history.py` — local per-PR history persistence (temp files).
+- `session.py` — per-PR session log (append-only JSONL, temp files).
 - `prompt.md` — default review prompt (auto-improveable via natural language).
