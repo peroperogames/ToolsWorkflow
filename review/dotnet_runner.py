@@ -41,7 +41,12 @@ def log(message: str) -> None:
 
 
 def dotnet_path() -> Optional[str]:
-    """Path to the .NET SDK CLI, or None when it is not installed."""
+    """Path to the .NET SDK CLI, or None when it is not installed.
+
+    Reported once as a fact, like the Unity CLI and ``jb``: which one was used is
+    the first thing worth knowing when a build behaves differently on a runner
+    than it does by hand.
+    """
     configured = os.environ.get("DOTNET_PATH", "").strip()
     if configured:
         found = shutil.which(configured) or (configured if os.path.exists(configured) else None)
@@ -52,6 +57,8 @@ def dotnet_path() -> Optional[str]:
     found = shutil.which("dotnet")
     if not found:
         log("The .NET SDK ('dotnet') is not on PATH; skipping the build/test step.")
+    else:
+        log(f".NET SDK: {found}")
     return found
 
 

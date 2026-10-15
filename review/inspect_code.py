@@ -108,9 +108,10 @@ def _resolve_inspectcode() -> Optional[str]:
 
     log(
         "The ReSharper CLI ('jb') was not found, so there is no static analysis. "
-        "Checked PATH and: " + ", ".join(tried) + ". Install it with "
-        "`dotnet tool install -g JetBrains.ReSharper.GlobalTools`, or set "
-        "INSPECT_JB to its path."
+        "Checked PATH and: " + ", ".join(tried) + ". Install it for the user the "
+        "runner runs as — `dotnet tool install -g "
+        "JetBrains.ReSharper.GlobalTools` — and make sure that user's PATH has "
+        "it."
     )
     return None
 

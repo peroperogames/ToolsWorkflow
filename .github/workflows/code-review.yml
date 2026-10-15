@@ -62,11 +62,6 @@ on:
         required: false
         type: string
         default: '.github/ai-review.md'
-      unity-cli:
-        description: 'Path or name of the Unity CLI. Everything Unity goes through it: it creates each PR''s project, resolves the editor from the project itself, and runs the tests. Empty looks for ''unity'' on PATH and in ~/.local/bin; the Unity step self-skips when it cannot be found.'
-        required: false
-        type: string
-        default: ''
       unity-editor-version:
         description: 'Editor version the per-PR Unity project is created for.'
         required: false
@@ -79,11 +74,6 @@ on:
         default: 'com.unity.template.3d'
       unity-sync-method:
         description: 'Optional -executeMethod used to regenerate project files (default UnityEditor.SyncVS.SyncSolution).'
-        required: false
-        type: string
-        default: ''
-      resharper-cli:
-        description: 'Path or name of the jb executable. Empty looks for ''jb'' on PATH and in ~/.dotnet/tools, ~/.local/bin and /usr/local/bin; static analysis self-skips when it cannot be found.'
         required: false
         type: string
         default: ''
@@ -133,10 +123,8 @@ jobs:
           dry-run: ${{ inputs.dry-run }}
           state-dir: ${{ inputs.state-dir }}
           project-prompt-path: ${{ inputs.project-prompt-path }}
-          unity-cli: ${{ inputs.unity-cli }}
           unity-editor-version: ${{ inputs.unity-editor-version }}
           unity-template: ${{ inputs.unity-template }}
           unity-sync-method: ${{ inputs.unity-sync-method }}
-          resharper-cli: ${{ inputs.resharper-cli }}
           resharper-dotnet-sdk: ${{ inputs.resharper-dotnet-sdk }}
           resharper-build: ${{ inputs.resharper-build }}

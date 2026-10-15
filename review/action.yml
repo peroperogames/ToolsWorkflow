@@ -55,10 +55,6 @@ inputs:
     description: 'Path to the reviewed repository''s own review criteria, read from the PR head. Empty to disable.'
     required: false
     default: '.github/ai-review.md'
-  unity-cli:
-    description: 'Path or name of the Unity CLI. Everything Unity goes through it: it creates each PR''s project, resolves the editor from the project itself, and runs the tests. Empty looks for ''unity'' on PATH and in ~/.local/bin; the Unity step self-skips when it cannot be found.'
-    required: false
-    default: ''
   unity-editor-version:
     description: 'Editor version the per-PR Unity project is created for.'
     required: false
@@ -69,10 +65,6 @@ inputs:
     default: 'com.unity.template.3d'
   unity-sync-method:
     description: 'Optional -executeMethod used to regenerate project files (default: UnityEditor.SyncVS.SyncSolution).'
-    required: false
-    default: ''
-  resharper-cli:
-    description: 'Path or name of the jb executable. Empty looks for ''jb'' on PATH and in ~/.dotnet/tools, ~/.local/bin and /usr/local/bin; static analysis self-skips when it cannot be found.'
     required: false
     default: ''
   resharper-dotnet-sdk:
@@ -108,7 +100,6 @@ runs:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         DRY_RUN: ${{ inputs.dry-run }}
         REVIEW_WORK_DIR: ${{ inputs.state-dir }}
-        UNITY_CLI: ${{ inputs.unity-cli }}
         UNITY_EDITOR_VERSION: ${{ inputs.unity-editor-version }}
         UNITY_TEMPLATE: ${{ inputs.unity-template }}
         UNITY_SYNC_METHOD: ${{ inputs.unity-sync-method }}
@@ -135,7 +126,6 @@ runs:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         DRY_RUN: ${{ inputs.dry-run }}
         REVIEW_WORK_DIR: ${{ inputs.state-dir }}
-        INSPECT_JB: ${{ inputs.resharper-cli }}
         INSPECT_DOTNET_SDK: ${{ inputs.resharper-dotnet-sdk }}
         INSPECT_BUILD: ${{ inputs.resharper-build }}
       run: python3 "$GITHUB_ACTION_PATH/main.py" static

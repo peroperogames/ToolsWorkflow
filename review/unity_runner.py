@@ -139,9 +139,9 @@ def _resolve_unity_cli() -> Optional[str]:
     log(
         "The Unity CLI ('unity') was not found, so there is no Unity step. "
         "Checked PATH and: " + ", ".join(tried) + ". "
-        "Install it for the user the runner runs as, or set UNITY_CLI to its path "
-        "(the runner user must also be able to read and execute the editor the "
-        "CLI resolves)."
+        "Install it for the user the runner runs as, and make sure that user's "
+        "PATH has it (the runner user must also be able to read and execute the "
+        "editor the CLI resolves)."
     )
     return None
 
