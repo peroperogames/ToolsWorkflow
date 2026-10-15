@@ -62,13 +62,8 @@ on:
         required: false
         type: string
         default: '.github/ai-review.md'
-      unity-path:
-        description: 'Path to the Unity editor executable. Pass an empty string to disable the build/test step.'
-        required: false
-        type: string
-        default: '/opt/unity/2022.3.62f3/Editor/Unity'
       unity-cli:
-        description: 'Path or name of the Unity CLI used to create each PR''s Unity project. Empty looks for ''unity'' on PATH; the Unity step self-skips when neither is found.'
+        description: 'Path or name of the Unity CLI. Everything Unity goes through it: it creates each PR''s project, resolves the editor from the project itself, and runs the tests. Empty looks for ''unity'' on PATH and in ~/.local/bin; the Unity step self-skips when it cannot be found.'
         required: false
         type: string
         default: ''
@@ -133,7 +128,6 @@ jobs:
           dry-run: ${{ inputs.dry-run }}
           state-dir: ${{ inputs.state-dir }}
           project-prompt-path: ${{ inputs.project-prompt-path }}
-          unity-path: ${{ inputs.unity-path }}
           unity-cli: ${{ inputs.unity-cli }}
           unity-editor-version: ${{ inputs.unity-editor-version }}
           unity-template: ${{ inputs.unity-template }}

@@ -48,22 +48,22 @@ def log(message: str) -> None:
 # Environment / availability
 # --------------------------------------------------------------------------- #
 
-def unity_path() -> Optional[str]:
-    """Path to the Unity executable, or None when not configured/found."""
-    path = os.environ.get("UNITY_PATH", "").strip()
-    if path and os.path.exists(path):
-        return path
-    if path:
-        log(f"UNITY_PATH set but not found: {path}")
-    return None
+# Where the CLI ends up when it is not on PATH: its own installer uses
+# ~/.local/bin, and a CI service account's PATH frequently does not include it.
+CLI_FALLBACK_DIRS = ("~/.local/bin", "/usr/local/bin", "/opt/unity/bin")
 
 
 def unity_cli() -> Optional[str]:
     """Path to the Unity CLI, or None when it is not installed.
 
-    The CLI is what creates each PR's project (``unity projects create``), so a
-    machine without it simply has no Unity step; the editor binary alone is not
-    enough to lay a project out.
+    Everything Unity happens through the CLI — it lays out the project, resolves
+    the editor from the project's own ``ProjectVersion.txt``, and runs the tests —
+    so this is the one thing that has to be found. The editor binary is never
+    looked for: hardcoding its path is what made a runner whose editor lives
+    somewhere else unable to run anything at all.
+
+    When it cannot be found, every path that was checked is logged. "Not on PATH"
+    is not enough to act on when the binary is installed and merely unreadable.
     """
     configured = os.environ.get("UNITY_CLI", "").strip()
     if configured:
@@ -72,10 +72,29 @@ def unity_cli() -> Optional[str]:
             return found
         log(f"UNITY_CLI set but not found: {configured}")
         return None
+
     found = shutil.which("unity")
-    if not found:
-        log("The Unity CLI ('unity') is not on PATH; skipping the Unity step.")
-    return found
+    if found:
+        return found
+
+    names = ("unity.exe", "unity") if os.name == "nt" else ("unity",)
+    tried: List[str] = []
+    for directory in CLI_FALLBACK_DIRS:
+        for name in names:
+            candidate = Path(os.path.expanduser(directory)) / name
+            tried.append(str(candidate))
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                log(f"The Unity CLI is not on PATH; using {candidate}.")
+                return str(candidate)
+
+    log(
+        "The Unity CLI ('unity') was not found, so there is no Unity step. "
+        "Checked PATH and: " + ", ".join(tried) + ". "
+        "Install it for the user the runner runs as, or set UNITY_CLI to its path "
+        "(the runner user must also be able to read and execute the editor the "
+        "CLI resolves)."
+    )
+    return None
 
 
 def editor_version() -> str:
@@ -170,10 +189,8 @@ def reserve_project(owner: str, repo: str, number: int) -> Optional[str]:
     moved in from staging. Returns the project path, or None when Unity is not
     configured or the project could not be created.
     """
-    unity = unity_path()
     cli = unity_cli()
-    if not unity or not cli:
-        log("Unity not configured (UNITY_PATH / UNITY_CLI); skipping the Unity step.")
+    if not cli:
         return None
     return ensure_project(owner, repo, number, cli)
 
@@ -445,38 +462,81 @@ def ensure_package(project: str, package_name: str, package_root: str) -> bool:
 # --------------------------------------------------------------------------- #
 
 def run_unity(
-    unity: str, project: str, extra_args: List[str], timeout: int, log_file: Path
+    cli: str, project: str, extra_args: List[str], timeout: int, log_file: Path
 ) -> Tuple[int, str]:
-    """Invoke Unity in batch mode; return (returncode, combined log text)."""
-    # Unity does not create the log's directory, and exits 127 without writing
+    """Run the editor in batch mode, through the Unity CLI.
+
+    The CLI resolves the editor from the project's own ``ProjectVersion.txt`` —
+    the version the project was created for — so there is no editor path to
+    configure and none to drift out of step with the project. It also owns
+    ``-batchmode``, ``-nographics``, ``-quit``, ``-projectPath`` and ``-logFile``:
+    forwarding any of them is rejected outright, so only the args meant for the
+    Editor itself are passed after ``--``.
+    """
+    # Unity does not create the log's directory, and exits without writing
     # anything when it is missing — so the caller never has to have made it.
     try:
         log_file.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         log(f"Could not create the log directory {log_file.parent}: {exc}")
+
     cmd = [
-        unity,
-        "-batchmode",
-        "-nographics",
-        "-silent-crashes",
-        "-projectPath",
-        project,
-        "-logFile",
-        str(log_file),
+        cli, "run", project,
+        "--log-file", str(log_file),
+        "--no-tail",
+        "--timeout", str(timeout),
+        "--non-interactive",
+        "--",
         *extra_args,
     ]
+    rc, output = -1, ""
     try:
-        proc = subprocess.run(cmd, timeout=timeout, capture_output=True, text=True)
+        proc = subprocess.run(cmd, timeout=timeout + 120, capture_output=True, text=True)
         rc = proc.returncode
+        output = (proc.stdout or "") + (proc.stderr or "")
     except subprocess.TimeoutExpired:
         log(f"Unity timed out after {timeout}s.")
-        rc = -1
+    except OSError as exc:
+        log(f"Could not run the Unity CLI: {exc}")
+        return -1, ""
+
     text = ""
     try:
         text = log_file.read_text(encoding="utf-8", errors="replace")
     except OSError:
         pass
-    return rc, text
+    # The CLI's own output is all there is when it never reached the editor — a
+    # missing license, an editor that is not installed, a permission problem.
+    return rc, text + (("\n" + output) if output else "")
+
+
+def run_unity_tests(
+    cli: str, project: str, results: Path, mode: str, timeout: int
+) -> Tuple[int, str]:
+    """Run one test platform and leave the NUnit report at ``results``.
+
+    ``unity run -runTests`` cannot be used: the CLI always passes ``-quit``, and
+    the editor quits before the test run writes anything, so the step looks like
+    a pass with no tests. ``unity test`` exists for exactly this and writes the
+    report itself.
+    """
+    if results.exists():
+        results.unlink()
+    cmd = [
+        cli, "test", project,
+        "--mode", mode,
+        "--output", str(results),
+        "--timeout", str(timeout),
+        "--non-interactive",
+    ]
+    try:
+        proc = subprocess.run(cmd, timeout=timeout + 120, capture_output=True, text=True)
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+    except subprocess.TimeoutExpired:
+        log(f"Unity tests timed out after {timeout}s.")
+    except OSError as exc:
+        log(f"Could not run the Unity CLI: {exc}")
+    return -1, ""
 
 
 # `Project("{GUID}") = "Name", "path.csproj", "{GUID}"`. The path is matched
@@ -563,15 +623,16 @@ def dedupe_solution(sln: str) -> int:
 
 
 def generate_and_build(
-    unity: str, project: str, log_file: Path
+    cli: str, project: str, log_file: Path
 ) -> Tuple[bool, bool, List[Dict[str, Any]], Optional[str]]:
     """Regenerate project files and compile the PR's Unity project.
 
     Returns ``(ran, compiled, compile_errors, sln_path)``. ``ran`` is False when
-    Unity never got as far as compiling — no license on this machine, a crash, a
-    project-generation method that does not exist. That is an infrastructure
-    problem, not a code problem, so the caller skips the step instead of
-    failing the build. ``compiled`` is False when the code does not compile.
+    Unity never got as far as compiling — no license on this machine, an editor
+    that is not installed, a crash, a project-generation method that does not
+    exist. That is an infrastructure problem, not a code problem, so the caller
+    skips the step instead of failing the build. ``compiled`` is False when the
+    code does not compile.
     """
     sync_method = os.environ.get("UNITY_SYNC_METHOD", "").strip()
     methods = [sync_method] if sync_method else [
@@ -580,9 +641,7 @@ def generate_and_build(
     rc, text = -1, ""
     for method in methods:
         log(f"Unity: generating project files via {method} ...")
-        rc, text = run_unity(
-            unity, project, ["-executeMethod", method, "-quit"], UNITY_TIMEOUT, log_file
-        )
+        rc, text = run_unity(cli, project, ["-executeMethod", method], UNITY_TIMEOUT, log_file)
         if rc == 0:
             break
 
@@ -604,11 +663,18 @@ def generate_and_build(
         return True, False, errors, sln
     if rc == 0:
         return True, True, errors, sln
-    # Unity exited without compiling anything to report.
-    if "license" in text.lower():
+    # Unity exited without compiling anything to report. Say which of the
+    # infrastructure reasons it was, because they are fixed in different places.
+    lowered = text.lower()
+    if "licens" in lowered:
         log(
-            "Unity has no valid license on this machine; skipping the Unity "
-            "step. Activate the editor and re-run."
+            "Unity has no valid license for the user the runner runs as; skipping "
+            "the Unity step. Activate the editor for that user and re-run."
+        )
+    elif "not installed" in lowered or "no editor" in lowered or "editor not found" in lowered:
+        log(
+            "The editor this project needs is not installed for the user the runner "
+            f"runs as ({editor_version()}); skipping the Unity step."
         )
     else:
         log(f"Unity exited {rc} without compile errors; skipping the Unity step.")
@@ -616,12 +682,13 @@ def generate_and_build(
 
 
 def run_tests(
-    unity: str, project: str, results_dir: Path, log_file: Path
+    cli: str, project: str, results_dir: Path
 ) -> Tuple[bool, List[Dict[str, Any]]]:
-    """Run EditMode tests; return ``(ok, failures)``.
+    """Run the configured test platforms; return ``(ok, failures)``.
 
-    PlayMode is skipped by default (batch-mode PlayMode needs extra setup); set
-    ``UNITY_TEST_PLATFORMS`` to a comma list to override.
+    PlayMode is skipped by default (a PlayMode run needs more of the editor than
+    batch mode gives it); set ``UNITY_TEST_PLATFORMS`` to a comma list to
+    override.
     """
     platforms = [
         p.strip()
@@ -632,19 +699,13 @@ def run_tests(
     any_ran = False
     for platform in platforms:
         results = results_dir / f"tests-{pr_workspace.sanitize(platform)}.xml"
-        if results.exists():
-            results.unlink()
         log(f"Unity: running {platform} tests ...")
-        run_unity(
-            unity,
-            project,
-            ["-runTests", "-testPlatform", platform, "-testResults", str(results)],
-            UNITY_TIMEOUT,
-            log_file,
-        )
+        rc, output = run_unity_tests(cli, project, results, platform, UNITY_TIMEOUT)
         if results.exists():
             any_ran = True
             all_failures.extend(build_log.parse_nunit_failures(results))
+        else:
+            log(f"Unity tests produced no report (exit {rc}): {output.strip()[-400:]}")
     # Only parsed failures count. No results file means Unity could not run the
     # tests (or the package has none) — that is not evidence of a failing test,
     # so it must not fail the build.
@@ -720,10 +781,8 @@ def analyze(
         if not kind.is_package:
             log(f"Not a UPM package ({kind.describe()}); skipping the Unity step.")
             return result
-        unity = unity_path()
         cli = unity_cli()
-        if not unity or not cli:
-            log("Unity not configured (UNITY_PATH / UNITY_CLI); skipping.")
+        if not cli:
             return result
         if not pr_workspace.is_project(owner, repo, number):
             log("No Unity project is reserved for this PR; skipping the Unity step.")
@@ -734,7 +793,7 @@ def analyze(
             return result
 
         log_file = pr_workspace.editor_log_path(owner, repo, number)
-        ran, compiled, errors, sln = generate_and_build(unity, project, log_file)
+        ran, compiled, errors, sln = generate_and_build(cli, project, log_file)
         if not ran:
             # Infrastructure failure (no license, a crash): leave ran=False so
             # the step counts as skipped, not as a broken build.
@@ -746,7 +805,7 @@ def analyze(
 
         if compiled:
             results_dir = pr_workspace.meta_dir(owner, repo, number)
-            tests_ok, failures = run_tests(unity, project, results_dir, log_file)
+            tests_ok, failures = run_tests(cli, project, results_dir)
             result.tests_ok = tests_ok
             result.test_failures = failures
         else:
