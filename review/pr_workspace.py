@@ -179,6 +179,14 @@ def clone_pr_head(
 
     if clone_dir.exists():
         log(f"Syncing the existing clone to {head_sha[:8]} ...")
+        # The clone's own remote URL carries whatever token cloned it, and an App
+        # token expires within the hour — so without this a later run fetches
+        # with a dead credential, fails, and clones the whole repository again.
+        # Reuse only pays off if the remote is re-pointed at the current token.
+        _run_git(
+            ["remote", "set-url", "origin", _authed_url(owner, repo, token)],
+            cwd=str(clone_dir),
+        )
         code, out = _run_git(["fetch", "origin", head_sha], cwd=str(clone_dir))
         if code != 0:
             # The sha may not be fetchable directly; fall back to a full fetch.
