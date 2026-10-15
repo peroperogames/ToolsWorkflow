@@ -1,17 +1,17 @@
-"""Unity host-project build, test and project-file generation.
+"""Per-PR Unity project: creation, package build, unit tests, project files.
 
-UPM packages have no compilable C# project of their own. To analyse, compile and
-test them reliably — with full UnityEngine references — the runner keeps one
-persistent empty Unity project (``UNITY_HOST_PROJECT``, e.g. 2022.3.62f3). The
-package under review is pulled in as a ``file:`` dependency, Unity generates the
-real sln/csproj in batch mode, tests run, and ReSharper then inspects the
-generated solution.
+Only a UPM package needs this. A UPM package has no compilable C# project of its
+own, so each pull request that contains one gets a Unity project of its own —
+named ``<repo>-PR<number>``, created with the Unity CLI and reused by every later
+review of that PR — and the package is pulled into it as a ``file:`` dependency.
+Unity then generates the real sln/csproj in batch mode, compiles, and runs the
+package's tests.
 
-Caching lifecycle (per pull request):
-  * first run (host does not yet reference the package) -> ``git clone`` the PR
-    head into the cache and add the ``file:`` dependency;
-  * later pushes -> ``git fetch`` + ``checkout`` the new head (no re-clone);
-  * PR closed -> remove the dependency and delete the clone.
+Lifecycle (see :mod:`pr_workspace` for the layout):
+  * first run — create the project with ``unity projects create``;
+  * later pushes — keep the project and recompile the synced clone;
+  * PR closed — unregister the project from the Hub and delete the whole
+    directory (project, clone and the agent session with it).
 
 Every entry point is best-effort: any failure logs and degrades to "Unity step
 skipped" rather than breaking the AI review.
@@ -21,15 +21,23 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
-import tempfile
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import build_log
+import pr_workspace
+import repo_kind
+
 UNITY_TIMEOUT = int(os.environ.get("UNITY_TIMEOUT", "1800"))  # 30 min default
+
+# The template a fresh per-PR project is created from, and the editor it is
+# created for. Both are what `unity projects create` takes.
+DEFAULT_EDITOR_VERSION = "2022.3.62f3"
+DEFAULT_TEMPLATE = "com.unity.template.3d"
 
 
 def log(message: str) -> None:
@@ -50,230 +58,409 @@ def unity_path() -> Optional[str]:
     return None
 
 
-def host_project(create_with: Optional[str] = None) -> Optional[str]:
-    """Path to the persistent Unity host project, or None when there is none.
+def unity_cli() -> Optional[str]:
+    """Path to the Unity CLI, or None when it is not installed.
 
-    ``UNITY_HOST_PROJECT`` names it; unset means a default location beside the
-    package cache. A missing project is created with ``-createProject`` when
-    ``create_with`` (the Unity executable) is given, so the runner needs no
-    project prepared by hand. Without it — the PR-close cleanup path — a
-    missing project is simply "not configured" and nothing is created.
+    The CLI is what creates each PR's project (``unity projects create``), so a
+    machine without it simply has no Unity step; the editor binary alone is not
+    enough to lay a project out.
     """
-    configured = os.environ.get("UNITY_HOST_PROJECT", "").strip()
-    host = configured or str(cache_root().parent / "ai-review-unity-host")
-    if os.path.isdir(host):
-        return host
-    if not create_with:
-        if configured:
-            log(f"UNITY_HOST_PROJECT set but not a directory: {host}")
+    configured = os.environ.get("UNITY_CLI", "").strip()
+    if configured:
+        found = shutil.which(configured) or (configured if os.path.exists(configured) else None)
+        if found:
+            return found
+        log(f"UNITY_CLI set but not found: {configured}")
         return None
-    return host if _create_host_project(create_with, host) else None
+    found = shutil.which("unity")
+    if not found:
+        log("The Unity CLI ('unity') is not on PATH; skipping the Unity step.")
+    return found
 
 
-def _create_host_project(unity: str, host: str) -> bool:
-    """Create an empty Unity project at ``host`` (-createProject, once)."""
-    log(f"Unity host project missing; creating one at {host} ...")
+def editor_version() -> str:
+    return os.environ.get("UNITY_EDITOR_VERSION", "").strip() or DEFAULT_EDITOR_VERSION
+
+
+def template_id() -> str:
+    return os.environ.get("UNITY_TEMPLATE", "").strip() or DEFAULT_TEMPLATE
+
+
+def project_subcommand() -> str:
+    """Which CLI subcommand lays out a project.
+
+    ``create`` registers the project in the Hub (and is the default, so it can
+    also be opened by hand); ``new`` is the CI variant that never touches the
+    registry. Either way the folder is ``<parent>/<name>``.
+    """
+    value = os.environ.get("UNITY_PROJECT_CMD", "").strip().lower()
+    return value if value in ("create", "new") else "create"
+
+
+# --------------------------------------------------------------------------- #
+# project creation / reuse
+# --------------------------------------------------------------------------- #
+
+def project_dir(owner: str, repo: str, number: int) -> str:
+    return str(pr_workspace.pr_dir(owner, repo, number))
+
+
+def ensure_project(owner: str, repo: str, number: int, cli: str) -> Optional[str]:
+    """The PR's Unity project, created on first use and reused afterwards.
+
+    Returns the project path, or None when it could not be created.
+    """
+    project = pr_workspace.pr_dir(owner, repo, number)
+    if pr_workspace.is_project(owner, repo, number):
+        log(f"Reusing the Unity project at {project}.")
+        prepare_manifest(str(project))
+        return str(project)
+
+    name = pr_workspace.pr_name(repo, number)
+    parent = pr_workspace.unity_parent_dir(owner)
+    subcommand = project_subcommand()
+    log(
+        f"Creating Unity project {name} ({editor_version()}, {template_id()}) "
+        f"for PR #{number} at {project} ..."
+    )
     try:
-        Path(host).parent.mkdir(parents=True, exist_ok=True)
+        parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        log(f"Could not create the host project's parent directory: {exc}")
-        return False
+        log(f"Could not create {parent}: {exc}")
+        return None
+
+    # `--path` is the PARENT directory: the project lands at <parent>/<name>,
+    # which is the PR's directory.
     cmd = [
-        unity,
-        "-batchmode",
-        "-nographics",
-        "-silent-crashes",
-        "-createProject",
-        host,
-        "-quit",
-        "-logFile",
-        str(_editor_log_path()),
+        cli,
+        "projects",
+        subcommand,
+        name,
+        "--path",
+        str(parent),
+        "--editor-version",
+        editor_version(),
+        "--template",
+        template_id(),
+        "--non-interactive",
     ]
+    if subcommand == "create":
+        # `new` never links Unity Cloud; `create` has to be told not to.
+        cmd.append("--no-cloud")
+
     try:
         proc = subprocess.run(cmd, timeout=UNITY_TIMEOUT, capture_output=True, text=True)
-        rc = proc.returncode
     except (subprocess.TimeoutExpired, OSError) as exc:
-        log(f"Could not create the host project: {exc}")
-        return False
-    if rc != 0 or not os.path.isdir(host):
-        log(f"Unity -createProject failed (exit {rc}); see {_editor_log_path()}")
-        return False
-    log(f"Host project created at {host}.")
-    return True
+        log(f"Could not create the Unity project: {exc}")
+        return None
+    if proc.returncode != 0 or not pr_workspace.is_project(owner, repo, number):
+        tail = (proc.stdout + proc.stderr).strip()[-500:]
+        log(f"unity projects {subcommand} failed (exit {proc.returncode}): {tail}")
+        return None
+    log(f"Unity project created at {project}.")
+    prepare_manifest(str(project))
+    return str(project)
 
 
-def cache_root() -> Path:
-    base = os.environ.get("UNITY_CACHE_DIR", "").strip()
-    if base:
-        return Path(base)
-    return Path(tempfile.gettempdir()) / "ai-review-pkgs"
+def reserve_project(owner: str, repo: str, number: int) -> Optional[str]:
+    """Lay out the PR's Unity project, before anything is put inside it.
+
+    The project directory *is* the PR's directory, and ``unity projects create``
+    refuses a path that already exists — so this has to run before the clone is
+    moved in from staging. Returns the project path, or None when Unity is not
+    configured or the project could not be created.
+    """
+    unity = unity_path()
+    cli = unity_cli()
+    if not unity or not cli:
+        log("Unity not configured (UNITY_PATH / UNITY_CLI); skipping the Unity step.")
+        return None
+    return ensure_project(owner, repo, number, cli)
 
 
-def _pr_key(owner: str, repo: str, number: int) -> str:
-    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in f"{owner}__{repo}")
-    return f"{safe}__{number}"
+def unregister_project(owner: str, repo: str, number: int) -> None:
+    """Remove the PR's project from the Hub registry, if it was registered.
+
+    Best-effort: the registry is keyed by path, so a project created with
+    ``projects create`` leaves a dead entry behind once its directory is gone.
+    Nothing here may stop the cleanup.
+    """
+    if not pr_workspace.is_project(owner, repo, number):
+        return
+    cli = unity_cli()
+    if not cli:
+        return
+    project = project_dir(owner, repo, number)
+    try:
+        proc = subprocess.run(
+            [cli, "projects", "remove", project, "--force", "--non-interactive"],
+            timeout=120,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode == 0:
+            log("Removed the project from the Unity Hub registry.")
+        else:
+            # Usually just "not registered" — `projects create` only writes the
+            # registry entry when the Hub itself lays the project out.
+            log(
+                "The project was not in the Hub registry (nothing to remove); "
+                "its directory still goes away."
+            )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        log(f"Could not remove the project from the Hub registry ({exc}).")
 
 
 # --------------------------------------------------------------------------- #
 # manifest.json
 # --------------------------------------------------------------------------- #
 
-def _manifest_path(host: str) -> Path:
-    return Path(host) / "Packages" / "manifest.json"
+def _manifest_path(project: str) -> Path:
+    return Path(project) / "Packages" / "manifest.json"
 
 
-def _read_manifest(host: str) -> Dict[str, Any]:
-    path = _manifest_path(host)
+def _read_manifest(project: str) -> Dict[str, Any]:
+    path = _manifest_path(project)
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _write_manifest(host: str, data: Dict[str, Any]) -> None:
-    path = _manifest_path(host)
+def _write_manifest(project: str, data: Dict[str, Any]) -> None:
+    path = _manifest_path(project)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def host_has_package(host: str, pkg_name: str) -> bool:
-    """Is ``pkg_name`` already a dependency of the host project?"""
+def project_has_package(project: str, pkg_name: str) -> bool:
+    """Is ``pkg_name`` already a dependency of the project?"""
     try:
-        deps = _read_manifest(host).get("dependencies") or {}
+        deps = _read_manifest(project).get("dependencies") or {}
         return pkg_name in deps
     except (OSError, ValueError) as exc:
-        log(f"Could not read host manifest: {exc}")
+        log(f"Could not read the project manifest: {exc}")
         return False
 
 
-def _manifest_add(host: str, pkg_name: str, clone_pkg_root: str) -> None:
-    data = _read_manifest(host)
+def _manifest_add(project: str, pkg_name: str, package_root: str) -> None:
+    data = _read_manifest(project)
     deps = data.setdefault("dependencies", {})
     # Unity wants forward slashes in a file: URL.
-    deps[pkg_name] = "file:" + clone_pkg_root.replace("\\", "/")
-    _write_manifest(host, data)
+    deps[pkg_name] = "file:" + package_root.replace("\\", "/")
+    _write_manifest(project, data)
 
 
-def _manifest_remove(host: str, pkg_name: str) -> None:
-    try:
-        data = _read_manifest(host)
-        deps = data.get("dependencies") or {}
-        if pkg_name in deps:
-            del deps[pkg_name]
-            _write_manifest(host, data)
-    except (OSError, ValueError) as exc:
-        log(f"Could not edit host manifest during cleanup: {exc}")
+def ensure_testable(project: str, pkg_name: str) -> None:
+    """Register a package so the Test Runner compiles and runs its tests.
 
-
-# --------------------------------------------------------------------------- #
-# package clone / sync
-# --------------------------------------------------------------------------- #
-
-def _run_git(args: List[str], cwd: Optional[str] = None, timeout: int = 300) -> Tuple[int, str]:
-    proc = subprocess.run(
-        ["git", *args], cwd=cwd, timeout=timeout, capture_output=True, text=True
-    )
-    return proc.returncode, (proc.stdout + proc.stderr)
-
-
-def _authed_url(owner: str, repo: str, token: str) -> str:
-    return f"https://x-access-token:{token}@github.com/{owner}/{repo}.git"
-
-
-def _package_name_and_root(clone_dir: Path) -> Tuple[Optional[str], Optional[str]]:
-    """Find the package.json nearest the clone root and read its ``name``.
-
-    Returns ``(package_name, package_root_dir)``. The package root is the folder
-    that holds package.json — the host references that folder via ``file:``.
+    ``testables`` is what tells Unity to include a package's test assemblies; a
+    package that is only a dependency has its tests ignored — not failed — so
+    ``-runTests`` reports nothing and a package with broken tests looks like a
+    pass. Best-effort: a manifest that cannot be edited costs test coverage, not
+    the review.
     """
-    candidates = [clone_dir / "package.json", *sorted(clone_dir.rglob("package.json"))]
-    for pkg_json in candidates:
-        if not pkg_json.is_file():
-            continue
-        try:
-            data = json.loads(pkg_json.read_text(encoding="utf-8"))
-        except (ValueError, OSError):
-            continue
-        name = (data.get("name") or "").strip()
-        if name:
-            return name, str(pkg_json.parent)
-    return None, None
-
-
-def ensure_package(
-    host: str,
-    owner: str,
-    repo: str,
-    number: int,
-    head_sha: str,
-    token: str,
-) -> Optional[Tuple[str, str]]:
-    """Make the host reference the PR's package at ``head_sha``.
-
-    First run clones; later runs fetch+checkout. Returns
-    ``(package_name, package_root)`` or None on failure.
-    """
-    clone_dir = cache_root() / _pr_key(owner, repo, number)
-
-    if clone_dir.exists():
-        log(f"Syncing cached package clone to {head_sha[:8]} ...")
-        code, out = _run_git(["fetch", "origin", head_sha], cwd=str(clone_dir))
-        if code != 0:
-            # The sha may not be fetchable directly; fall back to a full fetch.
-            code, out = _run_git(["fetch", "--all"], cwd=str(clone_dir))
-        if code != 0:
-            log(f"git fetch failed, re-cloning: {out[-300:]}")
-            shutil.rmtree(clone_dir, ignore_errors=True)
-        else:
-            code, out = _run_git(["checkout", "--force", head_sha], cwd=str(clone_dir))
-            if code != 0:
-                log(f"git checkout failed, re-cloning: {out[-300:]}")
-                shutil.rmtree(clone_dir, ignore_errors=True)
-
-    if not clone_dir.exists():
-        log(f"Cloning {owner}/{repo} into the package cache ...")
-        clone_dir.parent.mkdir(parents=True, exist_ok=True)
-        code, out = _run_git(
-            ["clone", "--no-single-branch", _authed_url(owner, repo, token), str(clone_dir)]
-        )
-        if code != 0:
-            log(f"git clone failed: {out[-300:]}")
-            return None
-        code, out = _run_git(["checkout", "--force", head_sha], cwd=str(clone_dir))
-        if code != 0:
-            log(f"git checkout {head_sha[:8]} failed: {out[-300:]}")
-            return None
-
-    pkg_name, pkg_root = _package_name_and_root(clone_dir)
-    if not pkg_name or not pkg_root:
-        log("No package.json with a name found in the clone; not a UPM package.")
-        return None
-
     try:
-        if not host_has_package(host, pkg_name):
-            log(f"Adding {pkg_name} to the host project as a file: dependency.")
-            _manifest_add(host, pkg_name, pkg_root)
+        data = _read_manifest(project)
     except (OSError, ValueError) as exc:
-        log(f"Could not add the package to the host manifest: {exc}")
-        return None
+        log(f"Could not read the project manifest to add testables: {exc}")
+        return
 
-    return pkg_name, pkg_root
+    testables = data.get("testables")
+    if not isinstance(testables, list):
+        testables = []
+    if pkg_name in testables:
+        return
+    testables.append(pkg_name)
+    data["testables"] = testables
+    try:
+        _write_manifest(project, data)
+    except OSError as exc:
+        log(f"Could not write testables into the manifest: {exc}")
+        return
+    log(f"Added {pkg_name} to testables.")
+
+
+# The package feeds every per-PR project is pointed at, so a package under review
+# can resolve its own dependencies (UniTask, Nifty, NuGet-for-Unity, …) instead of
+# failing the build on a package Unity cannot find.
+SCOPED_REGISTRIES: List[Dict[str, Any]] = [
+    {
+        "name": "Peropero",
+        "url": "https://unitypkg.peropero.net",
+        "scopes": ["com.prpr"],
+    },
+    {
+        "name": "OpenUPM",
+        "url": "https://package.openupm.com",
+        "scopes": [
+            "com.niftyhat",
+            "com.cysharp",
+            "org.nuget.castle",
+            "org.nuget.system",
+            "org.nuget.google",
+            "org.nuget.microsoft",
+            "org.nuget.zlinq",
+            "com.neuecc",
+        ],
+    },
+]
+
+
+def ensure_scoped_registries(project: str) -> None:
+    """Point the project's manifest at the organization's package feeds.
+
+    Merged, never overwritten: a registry the template already declares keeps its
+    own scopes, and a registry of the same name keeps every scope it had — the
+    wanted ones are added to it. Idempotent, so the reuse path re-applies it too
+    and a project created before this existed is brought up to date.
+    """
+    try:
+        data = _read_manifest(project)
+    except (OSError, ValueError) as exc:
+        log(f"Could not read the project manifest to add scoped registries: {exc}")
+        return
+
+    registries = data.get("scopedRegistries")
+    if not isinstance(registries, list):
+        registries = []
+    by_name = {
+        entry.get("name"): entry
+        for entry in registries
+        if isinstance(entry, dict) and entry.get("name")
+    }
+
+    changed = False
+    for wanted in SCOPED_REGISTRIES:
+        entry = by_name.get(wanted["name"])
+        if entry is None:
+            registries.append({"name": wanted["name"], "url": wanted["url"],
+                               "scopes": list(wanted["scopes"])})
+            changed = True
+            continue
+        if entry.get("url") != wanted["url"]:
+            entry["url"] = wanted["url"]
+            changed = True
+        scopes = entry.get("scopes")
+        if not isinstance(scopes, list):
+            scopes = []
+        for scope in wanted["scopes"]:
+            if scope not in scopes:
+                scopes.append(scope)
+                changed = True
+        entry["scopes"] = scopes
+
+    if not changed:
+        log("Scoped registries already configured.")
+        return
+
+    data["scopedRegistries"] = registries
+    try:
+        _write_manifest(project, data)
+    except OSError as exc:
+        log(f"Could not write the scoped registries into the manifest: {exc}")
+        return
+    log("Scoped registries configured: " + ", ".join(r["name"] for r in SCOPED_REGISTRIES))
+
+
+# The Test Framework version a package under review expects. The 3D template
+# pulls a much older one in through com.unity.feature.development (1.1.x), and a
+# test assembly written against the newer TestRunner API does not compile — or
+# run — against it. Raised, never lowered: an explicit newer version is left
+# alone, and a project that already has a working one is not touched.
+TEST_FRAMEWORK = "com.unity.test-framework"
+MIN_TEST_FRAMEWORK = "1.3.4"
+
+_VERSION_RE = re.compile(r"^\d+(?:\.\d+)*$")
+
+
+def _version_tuple(value: str) -> Tuple[int, ...]:
+    return tuple(int(part) for part in value.split("."))
+
+
+def ensure_test_framework(project: str) -> None:
+    """Raise the project's Test Framework to the version packages expect.
+
+    Best-effort, like the other manifest edits: a manifest that cannot be read or
+    written costs test coverage, not the review.
+    """
+    try:
+        data = _read_manifest(project)
+    except (OSError, ValueError) as exc:
+        log(f"Could not read the project manifest to check the Test Framework: {exc}")
+        return
+
+    deps = data.get("dependencies")
+    if not isinstance(deps, dict):
+        deps = {}
+        data["dependencies"] = deps
+
+    current = deps.get(TEST_FRAMEWORK)
+    if isinstance(current, str) and _VERSION_RE.match(current.strip()):
+        # A plain version we can compare. Anything else (a file:, git: or registry
+        # reference) is the repository's deliberate choice — leave it alone.
+        if _version_tuple(current.strip()) >= _version_tuple(MIN_TEST_FRAMEWORK):
+            return
+    elif current is not None:
+        log(f"Leaving the project's {TEST_FRAMEWORK} reference alone: {current!r}.")
+        return
+
+    deps[TEST_FRAMEWORK] = MIN_TEST_FRAMEWORK
+    try:
+        _write_manifest(project, data)
+    except OSError as exc:
+        log(f"Could not write the Test Framework version into the manifest: {exc}")
+        return
+    if current:
+        log(f"Raised {TEST_FRAMEWORK} from {current} to {MIN_TEST_FRAMEWORK}.")
+    else:
+        log(f"Pinned {TEST_FRAMEWORK} to {MIN_TEST_FRAMEWORK}.")
+
+
+def prepare_manifest(project: str) -> None:
+    """Everything the project's manifest needs before a package is added to it."""
+    ensure_scoped_registries(project)
+    ensure_test_framework(project)
+
+
+def ensure_package(project: str, package_name: str, package_root: str) -> bool:
+    """Make the project reference and test the package it was created for.
+
+    The clone itself is the caller's business (:func:`pr_workspace.clone_pr_head`);
+    this is only the manifest side of it.
+    """
+    try:
+        if not project_has_package(project, package_name):
+            log(f"Adding {package_name} to the Unity project as a file: dependency.")
+            _manifest_add(project, package_name, package_root)
+    except (OSError, ValueError) as exc:
+        log(f"Could not add the package to the project manifest: {exc}")
+        return False
+
+    # Registered for tests even when the dependency was already there: a project
+    # created before this existed has the package but no `testables` entry, and
+    # without one the package's tests are silently never run.
+    ensure_testable(project, package_name)
+    return True
 
 
 # --------------------------------------------------------------------------- #
 # Unity batch-mode invocations
 # --------------------------------------------------------------------------- #
 
-def _editor_log_path() -> Path:
-    return Path(tempfile.gettempdir()) / "ai-review-unity.log"
-
-
-def run_unity(unity: str, host: str, extra_args: List[str], timeout: int) -> Tuple[int, str]:
+def run_unity(
+    unity: str, project: str, extra_args: List[str], timeout: int, log_file: Path
+) -> Tuple[int, str]:
     """Invoke Unity in batch mode; return (returncode, combined log text)."""
-    log_file = _editor_log_path()
+    # Unity does not create the log's directory, and exits 127 without writing
+    # anything when it is missing — so the caller never has to have made it.
+    try:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log(f"Could not create the log directory {log_file.parent}: {exc}")
     cmd = [
         unity,
         "-batchmode",
         "-nographics",
         "-silent-crashes",
         "-projectPath",
-        host,
+        project,
         "-logFile",
         str(log_file),
         *extra_args,
@@ -292,42 +479,93 @@ def run_unity(unity: str, host: str, extra_args: List[str], timeout: int) -> Tup
     return rc, text
 
 
-def _extract_compile_errors(log_text: str) -> List[Dict[str, Any]]:
-    """Pull ``error CSxxxx`` lines out of a Unity/MSBuild log.
+# `Project("{GUID}") = "Name", "path.csproj", "{GUID}"`. The path is matched
+# positionally — the first quoted string after the name — because a greedy match
+# would run to the *last* quoted string on the line, which is the trailing GUID.
+_SLN_PROJECT = re.compile(
+    r'^Project\("\{[^}]+\}"\)\s*=\s*"(?P<name>[^"]+)"\s*,\s*"(?P<path>[^"]+)"'
+)
 
-    Each: ``{file, line, code, message}`` with file relative where possible.
+
+def dedupe_solution(sln: str) -> int:
+    """Give duplicate solution entries unique names. Returns how many were renamed.
+
+    Unity writes one entry per generated project, and it generates both
+    ``<Name>.csproj`` and ``<Name>.Player.csproj`` for the same assembly while
+    labelling both with the same display name. MSBuild rejects such a solution
+    outright:
+
+        MSB5004: The solution file has two projects named "Unity.Timeline".
+
+    That breaks anything that builds the solution before reading it — ReSharper's
+    ``inspectcode`` does exactly that, and bails out with no report at all. Naming
+    the second entry after its project file costs nothing and makes the generated
+    solution usable.
+
+    Only the name is spliced out and replaced, so the path, the GUIDs, the line
+    endings and the column layout MSBuild expects all survive untouched. The file
+    is read and written without newline translation and with its byte-order mark
+    preserved: a repair that quietly rewrote the whole file's line endings would
+    be a much larger change than the one it is making.
     """
-    import re
+    path = Path(sln)
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        log(f"Could not read {path.name} to de-duplicate its projects: {exc}")
+        return 0
+    had_bom = raw.startswith(b"\xef\xbb\xbf")
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        log(f"Could not decode {path.name}: {exc}")
+        return 0
 
-    errors: List[Dict[str, Any]] = []
-    seen: set = set()
-    # e.g. Assets/Foo.cs(12,5): error CS0103: The name 'x' does not exist
-    pattern = re.compile(
-        r"([^\s(][^(]*?\.cs)\((\d+),\d+\):\s*error\s+(CS\d+):\s*(.+)"
-    )
-    for line in log_text.splitlines():
-        m = pattern.search(line)
-        if not m:
-            continue
-        key = (m.group(1), m.group(2), m.group(4).strip())
-        if key in seen:
-            continue
-        seen.add(key)
-        errors.append(
-            {
-                "file": m.group(1).replace("\\", "/"),
-                "line": int(m.group(2)),
-                "code": m.group(3),
-                "message": m.group(4).strip(),
-            }
+    seen: Dict[str, int] = {}
+    lines: List[str] = []
+    renamed = 0
+    for line in text.splitlines(keepends=True):
+        match = _SLN_PROJECT.match(line)
+        if match:
+            name = match.group("name")
+            seen[name] = seen.get(name, 0) + 1
+            if seen[name] > 1:
+                unique = Path(match.group("path")).stem
+                line = line[: match.start("name")] + unique + line[match.end("name") :]
+                renamed += 1
+        lines.append(line)
+
+    if not renamed:
+        return 0
+
+    # Never hand back something worse than what we started with: if the names
+    # still collide the rewrite is abandoned and the original file stands.
+    names = [m.group("name") for m in (_SLN_PROJECT.match(l) for l in lines) if m]
+    remaining = {n for n in names if names.count(n) > 1}
+    if remaining:
+        log(
+            "Could not de-duplicate "
+            f"{path.name}: names still collide ({', '.join(sorted(remaining))}); "
+            "leaving the solution as Unity wrote it."
         )
-    return errors
+        return 0
+
+    try:
+        with open(
+            path, "w", encoding="utf-8-sig" if had_bom else "utf-8", newline=""
+        ) as handle:
+            handle.write("".join(lines))
+    except OSError as exc:
+        log(f"Could not rewrite {path.name}: {exc}")
+        return 0
+    log(f"Renamed {renamed} duplicate project entr(ies) in {path.name} (MSB5004).")
+    return renamed
 
 
 def generate_and_build(
-    unity: str, host: str
+    unity: str, project: str, log_file: Path
 ) -> Tuple[bool, bool, List[Dict[str, Any]], Optional[str]]:
-    """Regenerate project files and compile the host project.
+    """Regenerate project files and compile the PR's Unity project.
 
     Returns ``(ran, compiled, compile_errors, sln_path)``. ``ran`` is False when
     Unity never got as far as compiling — no license on this machine, a crash, a
@@ -343,19 +581,23 @@ def generate_and_build(
     for method in methods:
         log(f"Unity: generating project files via {method} ...")
         rc, text = run_unity(
-            unity, host, ["-executeMethod", method, "-quit"], UNITY_TIMEOUT
+            unity, project, ["-executeMethod", method, "-quit"], UNITY_TIMEOUT, log_file
         )
         if rc == 0:
             break
 
-    errors = _extract_compile_errors(text)
-    # Locate the generated solution in the host project root.
+    errors = build_log.parse_compile_errors(text)
+    # Locate the generated solution in the project root.
     sln = None
     try:
-        slns = sorted(Path(host).glob("*.sln"))
+        slns = sorted(Path(project).glob("*.sln"))
         sln = str(slns[0]) if slns else None
     except OSError:
         pass
+    if sln:
+        # Unity's solution has to be made acceptable to MSBuild before anything
+        # else (ReSharper) can build it.
+        dedupe_solution(sln)
 
     if errors:
         log(f"Unity compile: {len(errors)} error(s).")
@@ -373,7 +615,9 @@ def generate_and_build(
     return False, False, errors, sln
 
 
-def run_tests(unity: str, host: str) -> Tuple[bool, List[Dict[str, Any]]]:
+def run_tests(
+    unity: str, project: str, results_dir: Path, log_file: Path
+) -> Tuple[bool, List[Dict[str, Any]]]:
     """Run EditMode tests; return ``(ok, failures)``.
 
     PlayMode is skipped by default (batch-mode PlayMode needs extra setup); set
@@ -387,19 +631,20 @@ def run_tests(unity: str, host: str) -> Tuple[bool, List[Dict[str, Any]]]:
     all_failures: List[Dict[str, Any]] = []
     any_ran = False
     for platform in platforms:
-        results = Path(tempfile.gettempdir()) / f"ai-review-tests-{platform}.xml"
+        results = results_dir / f"tests-{pr_workspace.sanitize(platform)}.xml"
         if results.exists():
             results.unlink()
         log(f"Unity: running {platform} tests ...")
-        rc, _text = run_unity(
+        run_unity(
             unity,
-            host,
+            project,
             ["-runTests", "-testPlatform", platform, "-testResults", str(results)],
             UNITY_TIMEOUT,
+            log_file,
         )
         if results.exists():
             any_ran = True
-            all_failures.extend(_parse_nunit(results))
+            all_failures.extend(build_log.parse_nunit_failures(results))
     # Only parsed failures count. No results file means Unity could not run the
     # tests (or the package has none) — that is not evidence of a failing test,
     # so it must not fail the build.
@@ -411,41 +656,20 @@ def run_tests(unity: str, host: str) -> Tuple[bool, List[Dict[str, Any]]]:
     return ok, all_failures
 
 
-def _parse_nunit(path: Path) -> List[Dict[str, Any]]:
-    """Return failing test cases from an NUnit 3 results XML."""
-    out: List[Dict[str, Any]] = []
-    try:
-        tree = ET.parse(path)
-    except (ET.ParseError, OSError) as exc:
-        log(f"Could not parse test results: {exc}")
-        return out
-    for case in tree.getroot().iter("test-case"):
-        if (case.get("result") or "").lower() != "failed":
-            continue
-        name = case.get("fullname") or case.get("name") or "unknown test"
-        message = ""
-        failure = case.find("failure")
-        if failure is not None:
-            msg_el = failure.find("message")
-            if msg_el is not None and msg_el.text:
-                message = msg_el.text.strip()
-        out.append({"name": name, "message": message})
-    return out
-
-
 # --------------------------------------------------------------------------- #
 # cleanup
 # --------------------------------------------------------------------------- #
 
-def cleanup(host: str, owner: str, repo: str, number: int) -> None:
-    """Remove the PR's dependency from the host and delete its clone."""
-    clone_dir = cache_root() / _pr_key(owner, repo, number)
-    pkg_name, _root = _package_name_and_root(clone_dir) if clone_dir.exists() else (None, None)
-    if host and pkg_name:
-        _manifest_remove(host, pkg_name)
-        log(f"Removed {pkg_name} from the host project.")
-    shutil.rmtree(clone_dir, ignore_errors=True)
-    log(f"Deleted package cache for PR #{number}.")
+def cleanup(owner: str, repo: str, number: int) -> None:
+    """Delete everything the PR owns: project, clone and agent session.
+
+    The session lives inside the PR's Unity project directory, so dropping that
+    one directory is what "the PR is closed, forget it" means. Legacy locations
+    from the shared-host layout are swept too.
+    """
+    unregister_project(owner, repo, number)
+    pr_workspace.delete(owner, repo, number)
+    log(f"Deleted the working directory for PR #{number}.")
 
 
 # --------------------------------------------------------------------------- #
@@ -480,24 +704,37 @@ class UnityResult:
         return "🔴 Unity: " + ";".join(parts) + "。"
 
 
-def analyze(owner: str, repo: str, number: int, head_sha: str, token: str) -> UnityResult:
-    """Full Unity step: ensure package -> build -> test. Never raises."""
+def analyze(
+    clone_dir: str, owner: str, repo: str, number: int, kind: "repo_kind.Kind"
+) -> UnityResult:
+    """Compile and test the PR's package in the project reserved for it.
+
+    The project itself is laid out by :func:`reserve_project` before the clone is
+    moved into the PR directory, so this only fills it in. A repository that is
+    not a UPM package has nothing for Unity to compile and is not touched at all.
+
+    Never raises.
+    """
     result = UnityResult()
     try:
+        if not kind.is_package:
+            log(f"Not a UPM package ({kind.describe()}); skipping the Unity step.")
+            return result
         unity = unity_path()
-        host = host_project(create_with=unity)
-        if not unity or not host:
-            log("Unity not configured (UNITY_PATH / UNITY_HOST_PROJECT); skipping.")
+        cli = unity_cli()
+        if not unity or not cli:
+            log("Unity not configured (UNITY_PATH / UNITY_CLI); skipping.")
             return result
-        if not head_sha:
-            log("No head sha; skipping Unity step.")
-            return result
-
-        ensured = ensure_package(host, owner, repo, number, head_sha, token)
-        if not ensured:
+        if not pr_workspace.is_project(owner, repo, number):
+            log("No Unity project is reserved for this PR; skipping the Unity step.")
             return result
 
-        ran, compiled, errors, sln = generate_and_build(unity, host)
+        project = project_dir(owner, repo, number)
+        if not ensure_package(project, kind.package_name, kind.package_root):
+            return result
+
+        log_file = pr_workspace.editor_log_path(owner, repo, number)
+        ran, compiled, errors, sln = generate_and_build(unity, project, log_file)
         if not ran:
             # Infrastructure failure (no license, a crash): leave ran=False so
             # the step counts as skipped, not as a broken build.
@@ -508,12 +745,20 @@ def analyze(owner: str, repo: str, number: int, head_sha: str, token: str) -> Un
         result.sln_path = sln
 
         if compiled:
-            tests_ok, failures = run_tests(unity, host)
+            results_dir = pr_workspace.meta_dir(owner, repo, number)
+            tests_ok, failures = run_tests(unity, project, results_dir, log_file)
             result.tests_ok = tests_ok
             result.test_failures = failures
         else:
             # No point testing code that does not compile.
             log("Skipping tests because compilation failed.")
+
+        if result.sln_path:
+            # Every Editor launch rewrites the generated solution, so the test run
+            # above brings the duplicate project names back. Re-apply the fix as
+            # the last thing before the solution is handed to ReSharper — nothing
+            # after this point starts Unity again.
+            dedupe_solution(result.sln_path)
         return result
     except Exception as exc:  # noqa: BLE001 - never break the review
         log(f"Unity step failed, continuing without it: {exc}")

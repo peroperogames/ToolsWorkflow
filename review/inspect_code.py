@@ -5,8 +5,12 @@ own `.editorconfig` and project settings. This gives deterministic, project-
 specific findings (naming, style, redundancies, correctness inspections) that
 are far more reliable than asking the model to guess a convention.
 
-The flow: run `jb inspectcode` over the solution/project, parse the XML report,
-and keep only issues on lines the pull request actually changed.
+The flow: run `jb inspectcode` over each solution the repository has, parse the
+XML reports, keep only issues on lines the pull request actually changed, and
+merge the solutions back into one list. A repository can legitimately have two —
+a hand-maintained solution that contains a SourceGenerator, say, and the solution
+Unity generates for the package it also ships — and they see different code, so
+both are inspected and their findings de-duplicated.
 """
 
 from __future__ import annotations
@@ -14,10 +18,10 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import tempfile
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 # Severity as reported by ReSharper -> whether we surface it. WARNING and above
 # are worth a comment; SUGGESTION/HINT are too noisy to post on every PR.
@@ -36,45 +40,72 @@ IGNORED_MESSAGE_SUBSTRINGS = (
     "is not supported in this version",
 )
 
+# inspectcode builds the solution before inspecting it, through an MSBuild it
+# picks itself — and it picks the newest .NET SDK it can find. When that newest
+# SDK is a preview or a half-installed one, the build fails before any report is
+# written. Pinning a known-good SDK is the fix, so a failure that looks like this
+# says so instead of leaving a bare exit code.
+SDK_TROUBLE_MARKERS = (
+    "MSB4236",
+    "MSB4276",
+    "NETSDK1045",
+    "could not resolve sdk",
+    "does not support targeting",
+)
+
+
+def _env_bool(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def inspect_args() -> List[str]:
+    """Extra ``jb inspectcode`` arguments taken from the environment.
+
+    By default inspectcode is told **not** to build the solution it inspects.
+    The pipeline has already compiled the code — Unity for a package, the .NET
+    SDK for a C# project — and letting inspectcode build it again is both
+    redundant and demonstrably fragile: Unity's generated projects are written
+    for Unity's own compiler settings, and a generic MSBuild run trips over them
+    (obsolete-API warnings promoted to errors, output paths it cannot open). A
+    failed build means **no report at all**, which is indistinguishable from
+    "no findings". inspectcode still evaluates MSBuild to get the project model
+    and the set of files to inspect; it just does not compile first.
+
+    Set ``INSPECT_BUILD`` to let it build after all — needed only if the
+    solution's real sources are produced by a build (a source generator that
+    emits files nothing else writes), which is why the properties below still
+    turn warnings-as-errors off when they apply.
+
+    ``INSPECT_DOTNET_SDK`` pins the SDK whose MSBuild it uses
+    (``--dotnetcoresdk=10.0.300``) instead of letting the newest installed one
+    win, which fails on a broken preview.
+    """
+    args: List[str] = []
+    sdk = os.environ.get("INSPECT_DOTNET_SDK", "").strip()
+    if sdk:
+        args.append(f"--dotnetcoresdk={sdk}")
+    if not _env_bool("INSPECT_BUILD"):
+        args.append("--no-build")
+    return args + [
+        "--properties:TreatWarningsAsErrors=false",
+        "--properties:MSBuildTreatWarningsAsErrors=false",
+    ]
+
 
 def log(message: str) -> None:
     print(message, file=sys.stderr)
 
 
-def find_target(workdir: str) -> Optional[str]:
-    """Locate a solution/project to inspect inside ``workdir``.
+def run_inspectcode(target: str, workdir: str, report: Path, timeout: int = 1200) -> bool:
+    """Run ``jb inspectcode`` over ``target``, writing ``report``.
 
-    Used as a fallback when no Unity-generated solution is supplied — e.g.
-    ``PeroSDK`` ships a hand-maintained ``Projects~/*.sln`` that needs no Unity
-    build. Prefer that, then any ``.sln``, then any ``.csproj``. Pure UPM
-    packages (only ``.asmdef``) return None here; those go through the Unity
-    host-project build instead (see ``unity_runner``).
+    Returns whether a report was actually produced. The report path is per
+    solution and inside the PR's own directory, so two reviews running at the
+    same time cannot overwrite each other's results.
     """
-    override = os.environ.get("INSPECT_TARGET", "").strip()
-    if override:
-        candidate = Path(workdir) / override
-        return str(candidate) if candidate.exists() else override
+    cmd = ["jb", "inspectcode", target, f"--output={report}", "--format=Xml", *inspect_args()]
 
-    root = Path(workdir)
-    slns = sorted(root.rglob("*.sln"))
-    preferred = [s for s in slns if "Projects~" in str(s)]
-    if preferred:
-        return str(preferred[0])
-    if slns:
-        return str(slns[0])
-    projects = sorted(root.rglob("*.csproj"))
-    if projects:
-        return str(projects[0])
-    return None
-
-
-def run_inspectcode(target: str, workdir: str, timeout: int = 1200) -> Optional[str]:
-    """Run ``jb inspectcode`` and return the XML report path, or None on failure."""
-    report = os.path.join(tempfile.gettempdir(), "resharper-report.xml")
-    # Defaults honour the repo's .editorconfig and let ReSharper build as needed.
-    cmd = ["jb", "inspectcode", target, f"--output={report}", "--format=Xml"]
-
-    log(f"Running ReSharper inspectcode on {target} ...")
+    log(f"Running ReSharper inspectcode on {Path(target).name} ...")
     try:
         proc = subprocess.run(
             cmd,
@@ -85,25 +116,33 @@ def run_inspectcode(target: str, workdir: str, timeout: int = 1200) -> Optional[
         )
     except FileNotFoundError:
         log("ReSharper 'jb' tool not found on PATH; skipping static analysis.")
-        return None
+        return False
     except subprocess.TimeoutExpired:
         log(f"inspectcode timed out after {timeout}s; skipping static analysis.")
-        return None
+        return False
 
+    output = (proc.stdout or "") + (proc.stderr or "")
     if proc.returncode != 0:
-        log(f"inspectcode exited {proc.returncode}: {proc.stderr[-500:]}")
+        log(f"inspectcode exited {proc.returncode}: {output.strip()[-500:]}")
         # A report may still have been written; fall through and try to parse it.
-    if not os.path.exists(report):
-        log("inspectcode produced no report.")
-        return None
-    return report
+    if not report.exists():
+        log(f"inspectcode produced no report for {Path(target).name}.")
+        if any(marker in output.lower() for marker in (m.lower() for m in SDK_TROUBLE_MARKERS)):
+            log(
+                "hint: inspectcode could not resolve a usable .NET SDK for its build. "
+                "Set INSPECT_DOTNET_SDK to an installed version (e.g. 10.0.300) so it "
+                "uses that one instead of auto-detecting."
+            )
+        return False
+    return True
 
 
 def parse_report(report_path: str) -> List[Dict[str, Any]]:
     """Parse a ReSharper XML report into issue dicts.
 
-    Each issue: ``{file, line, severity, message, type}`` with ``file`` relative
-    to the repo root and POSIX separators.
+    Each issue: ``{file, line, severity, message, type}``. ``file`` is exactly
+    what the report says — a path relative to the *solution*, per JetBrains'
+    format — and the caller normalizes it with :func:`relative_to_clone`.
     """
     try:
         tree = ET.parse(report_path)
@@ -145,6 +184,29 @@ def parse_report(report_path: str) -> List[Dict[str, Any]]:
     return issues
 
 
+def relative_to_clone(file_value: str, target: str, workdir: str) -> str:
+    """Turn a report path into one relative to the clone root.
+
+    The report spells paths relative to the solution (JetBrains documents it that
+    way; ``--absolute-paths`` is the opt-in for the other form), while the changed
+    lines arrive as paths relative to the repository. Resolving against the
+    solution's directory and re-relativizing against the clone is what makes the
+    two comparable — without it every finding looks like it belongs to a file the
+    pull request never touched, and all of them are dropped.
+
+    A path that lands outside the clone (Unity's own packages, build output) is
+    returned unchanged: it can never match a pull-request file, which is the
+    right outcome for it.
+    """
+    path = Path(file_value)
+    if not path.is_absolute():
+        path = Path(target).parent / file_value
+    try:
+        return path.resolve().relative_to(Path(workdir).resolve()).as_posix()
+    except (ValueError, OSError):
+        return path.as_posix()
+
+
 def _is_noise(issue: Dict[str, Any]) -> bool:
     """Drop compiler/resolve errors caused by a missing build environment."""
     type_id = issue.get("type") or ""
@@ -172,29 +234,85 @@ def filter_to_changes(
     return out
 
 
+def _dedupe(issues: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """One entry per distinct finding, across every solution inspected.
+
+    Two solutions of the same repository share most of their sources, so the same
+    issue is reported by both; posting it twice would just be noise.
+    """
+    seen: Set[tuple] = set()
+    out: List[Dict[str, Any]] = []
+    for issue in issues:
+        key = (issue["file"], issue["line"], issue["type"], issue["message"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(issue)
+    return out
+
+
+@dataclass
+class Analysis:
+    """Outcome of a ReSharper pass.
+
+    Kept apart from the issue list so a caller can tell "inspected, found
+    nothing" from "never ran" — those look identical in a bare list, and the
+    second one silently cost the pull request its static analysis.
+    """
+
+    issues: List[Dict[str, Any]] = field(default_factory=list)
+    targets: List[str] = field(default_factory=list)
+    reports: int = 0
+    duplicates: int = 0
+
+    @property
+    def ran(self) -> bool:
+        """Did at least one solution actually get inspected?"""
+        return self.reports > 0
+
+
 def analyze(
     workdir: str,
     changed_lines: Dict[str, Set[int]],
-    sln_path: Optional[str] = None,
-) -> List[Dict[str, Any]]:
-    """Run the full ReSharper analysis and return issues on changed lines.
+    targets: Sequence[str],
+    report_dir: Optional[Path] = None,
+) -> Analysis:
+    """Run ReSharper over every target and return the issues on changed lines.
 
-    ``sln_path`` is the Unity-generated solution when available; otherwise a
-    target is discovered inside ``workdir`` (``Projects~`` sln, etc.).
-    Never raises — static analysis is best-effort and must not break the review.
+    ``targets`` are the solutions to inspect — the repository's own and/or the
+    Unity-generated one. An empty list means there is nothing to analyse, which
+    the result distinguishes from an inspection that produced no report.
+    Never raises: static analysis is best-effort and must not break the review.
     """
+    targets = list(targets)
     try:
-        target = sln_path or find_target(workdir)
-        if not target:
-            log("No solution/project to inspect; skipping static analysis.")
-            return []
-        report = run_inspectcode(target, workdir)
-        if not report:
-            return []
-        issues = parse_report(report)
+        if not workdir or not targets:
+            log("No solution to inspect; skipping static analysis.")
+            return Analysis(targets=targets)
+        report_dir = report_dir or Path(workdir)
+
+        collected: List[Dict[str, Any]] = []
+        reports = 0
+        for index, target in enumerate(targets, start=1):
+            report = report_dir / f"resharper-{index}.xml"
+            if report.exists():
+                report.unlink()
+            if not run_inspectcode(target, workdir, report):
+                continue
+            reports += 1
+            issues = parse_report(str(report))
+            for issue in issues:
+                issue["file"] = relative_to_clone(issue["file"], target, workdir)
+            log(f"ReSharper: {Path(target).name}: {len(issues)} issue(s).")
+            collected.extend(issues)
+
+        issues = _dedupe(collected)
+        duplicates = len(collected) - len(issues)
+        if duplicates:
+            log(f"ReSharper: {duplicates} duplicate finding(s) merged.")
         kept = filter_to_changes(issues, changed_lines)
         log(f"ReSharper: {len(issues)} issue(s) total, {len(kept)} on changed lines.")
-        return kept
+        return Analysis(issues=kept, targets=targets, reports=reports, duplicates=duplicates)
     except Exception as exc:  # noqa: BLE001 - never break the review
         log(f"Static analysis failed, continuing without it: {exc}")
-        return []
+        return Analysis(targets=targets)

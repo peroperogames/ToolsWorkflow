@@ -29,7 +29,7 @@ jobs:
       APP_PK: ${{ secrets.APP_PK }}
 ```
 
-The GitHub App token is generated in `code-review.yml` via `actions/create-github-app-token` and passed to the composite action as `github-token`. Per-PR session history is stored on the runner (not inside the action), keyed by PR and removed when the PR closes.
+The GitHub App token is generated in `code-review.yml` via `actions/create-github-app-token` and passed to the composite action as `github-token`. Per-PR state lives in the runner's working directory (not inside the action): each pull request owns one directory named `<repo>-PR<number>` that holds both its session and its Unity project, and the whole directory is removed when the PR closes.
 
 ## Requirements
 
@@ -65,11 +65,18 @@ Every setting is reachable three ways: the `with:` input when calling the reusab
 | `max-tokens-per-chunk` | `MAX_TOKENS_PER_CHUNK` | `131072` | Max tokens of diff per review call. |
 | `silent-mode` | `SILENT_MODE` | `true` | Post a comment instead of a review. Set to `0`/`false` to post a review with `APPROVE`/`REQUEST_CHANGES`. Only affects the prose-fallback path — the normal tool-driven review posts inline comments regardless. |
 | `dry-run` | `DRY_RUN` | `false` | Print the review without posting anything. Useful for trying the bot out on a pull request. |
-| `state-dir` | `REVIEW_STATE_DIR` | `<tmp>/ai-code-review` | Directory for per-PR session files (removed when the PR closes). |
+| `state-dir` | `REVIEW_WORK_DIR` | `<tmp>/ai-code-review` | Root for the per-PR working directories. Each PR owns exactly one, named `<repo>-PR<number>`, holding its agent session and its Unity project. (`REVIEW_STATE_DIR` is still read as the older name for this setting.) |
 | `project-prompt-path` | `PROJECT_PROMPT_PATH` | `.github/ai-review.md` | Path, relative to the repository under review, of that repository's own review criteria. Read from the PR head and added to the built-in prompt; empty uses the built-in prompt alone. |
 | `unity-path` | `UNITY_PATH` | `/opt/unity/2022.3.62f3/Editor/Unity` | Unity editor executable for the build/test step; the step self-skips when the file does not exist. Pass an empty string to disable it outright. |
-| `unity-host-project` | `UNITY_HOST_PROJECT` | *(beside the package cache)* | Persistent empty Unity project the package is built and tested in. Created with `-createProject` on first use when missing. |
+| `unity-cli` | `UNITY_CLI` | *(found on `PATH`)* | The Unity CLI that creates each PR's project (`unity projects create`). Empty looks for `unity` on `PATH`; when neither is available the Unity step self-skips. |
+| `unity-editor-version` | `UNITY_EDITOR_VERSION` | `2022.3.62f3` | Editor version each PR's project is created for. Should match `unity-path`. |
+| `unity-template` | `UNITY_TEMPLATE` | `com.unity.template.3d` | Template package each PR's project is created from. |
 | `unity-sync-method` | `UNITY_SYNC_METHOD` | `UnityEditor.SyncVS.SyncSolution` | `-executeMethod` used in batch mode to regenerate the sln/csproj. |
+| `resharper-dotnet-sdk` | `INSPECT_DOTNET_SDK` | *(auto-detected)* | Pin the .NET SDK whose MSBuild `jb inspectcode` uses (`--dotnetcoresdk`). Empty lets it pick, which means the **newest** installed SDK — and a preview or half-installed one fails the build before any report is written. |
+| `resharper-build` | `INSPECT_BUILD` | `false` | Let `jb inspectcode` build the solution before inspecting it. Off by default: the pipeline already compiled the code, and Unity's generated projects do not build cleanly under a generic MSBuild, which fails the step with no report at all. |
+| — | `DOTNET_PATH` | *(found on `PATH`)* | The .NET SDK CLI used to build (and test) a pure C# repository. Empty looks for `dotnet` on `PATH`; when neither is available the step self-skips. |
+| — | `UNITY_TIMEOUT` / `DOTNET_TIMEOUT` | `1800` | Seconds either build step may take before it is abandoned and reported as skipped. |
+| — | `UNITY_TEST_PLATFORMS` | `EditMode` | Comma list of Unity test platforms to run. |
 
 `code-review.yml` also needs the `APP_ID`, `APP_PK` and `OPENAI_API_KEY` secrets; `main.py` additionally reads `GITHUB_REPOSITORY`, `GITHUB_EVENT_NAME` and `GITHUB_EVENT_PATH` (set by Actions) or `GITHUB_PR_NUMBER` for a manual run.
 
@@ -118,17 +125,92 @@ Replying requires the GitHub App to have **`Issues: Read and write`** permission
 
 ## Review pipeline
 
-1. Fetch PR metadata; if the PR is closed, delete any local history and stop. Merges from `release/*` back to `master`/`main` are skipped. The PR's **first** pass gets the full review; later `synchronize` pushes get a light incremental pass covering only what the new commits introduced. Once a PR is known to need reviewing, the repository's own criteria are fetched from its head and merged into the prompt — see [Project review criteria](#project-review-criteria).
-2. Load the PR's **session** — one append-only message log per pull request, the model's accumulated memory of everything it has seen and produced here: turns, its own replies, tool calls and results. Reviews, conversation comments **and inline review comments** are fetched from GitHub, and whatever was posted since the last run is appended as new turns. A missing or damaged session is rebuilt from GitHub (it is an optimization, not state the bot depends on), and the whole directory is deleted when the PR closes. Later runs therefore continue the conversation instead of re-sending the prompt and the whole diff: a push appends just its own diff, and the model keeps the files it read and the reasoning it did.
+1. Fetch PR metadata; if the PR is closed, delete the PR's whole working directory and stop — see [One directory per pull request](#one-directory-per-pull-request). Merges from `release/*` back to `master`/`main` are skipped. The PR's **first** pass gets the full review; later `synchronize` pushes get a light incremental pass covering only what the new commits introduced. Once a PR is known to need reviewing, the repository's own criteria are fetched from its head and merged into the prompt — see [Project review criteria](#project-review-criteria).
+2. Load the PR's **session** — one append-only message log per pull request, the model's accumulated memory of everything it has seen and produced here: turns, its own replies, tool calls and results. Reviews, conversation comments **and inline review comments** are fetched from GitHub, and whatever was posted since the last run is appended as new turns. A missing or damaged session is rebuilt from GitHub (it is an optimization, not state the bot depends on), and it is deleted with the rest of the PR's directory when the PR closes. Later runs therefore continue the conversation instead of re-sending the prompt and the whole diff: a push appends just its own diff, and the model keeps the files it read and the reasoning it did.
 3. Build the diff payload from the per-file patches — every line is prefixed with its absolute line number so the model can quote a line instead of computing line numbers itself.
 4. If the payload still exceeds `MAX_TOKENS_PER_CHUNK`, review it in chunks and then merge the chunk reviews back into a **single** review body.
-5. **Build & test in a Unity host project.** UPM packages have no compilable project of their own, so the runner keeps one persistent empty Unity project (`UNITY_HOST_PROJECT`, created on first use when missing). The package under review is pulled in as a `file:` dependency, Unity regenerates the real sln/csproj in batch mode and compiles, then unit tests run. Compile errors land as inline comments on the changed line (or a status comment otherwise); test failures land in that status comment. A failing build or test **blocks approval**; a failure that is not about the code — no license on the machine, a crashed editor — skips the step instead and says so in the log. Per PR the package is cloned on first run and `git`-synced on later pushes; the clone and the host dependency are removed when the PR closes. The whole step self-skips when the Unity editor is not found (`UNITY_PATH`) or the repo is not a UPM package.
-6. Run **ReSharper** (`jb inspectcode`) over the Unity-generated solution (full UnityEngine references, so no resolve-error noise), honouring the repository's own `.editorconfig`, and post each `WARNING`/`ERROR` on a changed line as its own inline comment prefixed `ReSharper:`. Deterministic, project-specific analysis (naming, style, redundancies, correctness) the model is told **not** to duplicate. For repos that ship their own solution (e.g. a `Projects~/*.sln`), that solution is used directly without a Unity build. Self-skips when the runner has no `jb` or no solution is available.
-7. Let the model drive the review through tools (`read_file`, `get_file_diff`, `post_inline_comment`, `list_threads`, `resolve_thread`, `finish`); the build/test status is given to it as context. `list_threads` reports resolved threads alongside open ones, and every inline comment in the conversation is marked with its thread state (`thread resolved` / `thread open`), so a finding that is already settled is not raised a second time.
-8. Resolve and approve are re-checked after **both** a later push and a reply in an open thread:
+5. **Clone the pull request's head once, then classify it.** Everything downstream reads the same clone, and the classification decides which of the next two steps has anything to do. Four kinds exist, and they are told apart from the clone's contents alone — no extra API calls, nothing guessed:
+   - **Unity package** (`package.json`) → compiled and tested in a per-PR Unity project; ReSharper runs over Unity's solution.
+   - **Pure C# project** (`sln`/`slnx`/`csproj`) → built and tested with the .NET SDK; ReSharper runs over the repository's own solution.
+   - **Mixed** (a C# project that also contains a UPM package, e.g. one shipping a SourceGenerator) → the package goes through Unity **and** the repository's own solution through the .NET SDK; ReSharper runs over **both** solutions, because the generator lives in the repository's own one and the UnityEngine references only in Unity's.
+   - **Anything else** → neither step runs; the review happens without a build gate.
+6. **Build & test a Unity package in the PR's own project.** UPM packages have no compilable project of their own, so each pull request that contains one gets a Unity project of its own — created with the Unity CLI (`unity projects create`, `UNITY_CLI`) as `<repo>-PR<number>` under the working root (`state-dir`), from `UNITY_TEMPLATE` for `UNITY_EDITOR_VERSION`. The project is pointed at the organization's package feeds (see [Scoped registries](#scoped-registries)), so the package can resolve its own dependencies. It is pulled in as a `file:` dependency and registered in `testables` (see [Running the package's own tests](#running-the-packages-own-tests)) so Unity compiles the package's test assemblies too; Unity regenerates the real sln/csproj in batch mode and compiles, then EditMode tests run. Compile errors land as inline comments on the changed line (or a status comment otherwise); test failures land in that status comment. Later pushes reuse the project and the synced clone; the project is unregistered from the Hub and the whole directory is deleted when the PR closes. Self-skips when the Unity editor (`UNITY_PATH`) or the CLI is not found.
+7. **Build the repository's own solution with the .NET SDK.** This is the Unity step's counterpart for the C# side, and it runs for any repository that ships a solution — a pure C# project, and also the C# project around a UPM package. `dotnet build` always, and `dotnet test` only when that solution actually references a test project. Reports the same way (compile errors inline on the changed line, everything else in a status comment), and **also blocks approval**. Self-skips when `dotnet` is not on `PATH` or the repository has no solution of its own.
+8. **Run ReSharper** (`jb inspectcode`) over every solution that covers the clone, honouring the repository's own `.editorconfig`, and post each `WARNING`/`ERROR` on a changed line as its own inline comment prefixed `ReSharper:`. This is the deterministic, project-specific analysis (naming, style, redundancies, correctness) the model is told **not** to duplicate. Findings from the two solutions are merged and de-duplicated, since they share most of their sources, and a finding already raised is not raised again — see [ReSharper findings are not repeated](#resharper-findings-are-not-repeated). The generated Unity solution is repaired first — see [The generated solution is repaired before use](#the-generated-solution-is-repaired-before-use). Self-skips when the runner has no `jb` or no solution is available.
+9. Let the model drive the review through tools (`read_file`, `get_file_diff`, `post_inline_comment`, `list_threads`, `resolve_thread`, `finish`); the build/test status is given to it as context. `list_threads` reports resolved threads alongside open ones, and every inline comment in the conversation is marked with its thread state (`thread resolved` / `thread open`), so a finding that is already settled is not raised a second time.
+10. Resolve and approve are re-checked after **both** a later push and a reply in an open thread:
    - On a push, the diff of **that push alone** (`before...after` from the event) is what the model judges against.
    - In a thread, a concern answered by discussion counts as settled even when no code changed.
    - Once no unresolved thread remains and the latest review was clean, the bot submits an `APPROVE` review. Thread resolution uses the GraphQL API — the REST API cannot do it.
+
+### One directory per pull request
+
+A pull request owns exactly one directory on the runner, named `<repo>-PR<number>` (e.g. `ToolsWorkflow-PR42`) under `<state-dir>/<owner>/`. Everything a review of it needs lives inside:
+
+```
+<state-dir>/<owner>/ToolsWorkflow-PR42/
+    Assets/ ProjectSettings/ Packages/ …   the Unity project — the folder name is the Unity project name
+    .ai-review/session.jsonl               the agent session log
+    .ai-review/pkg/                        the PR head clone the project references as a file: package
+    .ai-review/editor.log                  Unity's batch-mode log
+    .ai-review/resharper-*.xml             ReSharper's reports, one per solution inspected
+```
+
+The session and the Unity project therefore share one lifecycle: both are created on the PR's first review, both are reused by every later review of that PR (the clone is `git`-synced to the new head, the session is appended to rather than rebuilt), and both are deleted together when the PR closes. The owner is a path component above the per-PR directory rather than part of its name, so the leaf keeps the name the PR is known by while two organizations sharing a repository name still get separate directories.
+
+A repository that is not a UPM package has no Unity project, so its directory holds only `.ai-review/` — same layout, same lifecycle, nothing to unregister.
+
+`.ai-review` is dot-prefixed, so Unity's asset database ignores it: the log, the clone, the session and the reports are never imported as assets and cannot end up in a build.
+
+The clone briefly waits in a sibling staging directory (`.<repo>-PR<number>.staging`) on a PR's first review: the Unity CLI refuses to lay a project into a path that already exists, and the PR directory *is* the project, so the project is created first and the clone is then renamed into place. The rename is within one directory, so it costs nothing, and the staging directory is swept at cleanup if a run dies in between.
+
+Changing the layout means the first run after an upgrade finds no session for an open PR and rebuilds it from GitHub — the session is an optimization, so that costs one fuller review and nothing else. Directories left behind by the older shared-host layout are swept away at the same time.
+
+### Scoped registries
+
+Every per-PR Unity project is pointed at the organization's package feeds, so a package under review can resolve dependencies (UniTask, Nifty, NuGet-for-Unity, …) that are not in the Unity registry — without them the build fails on a package Unity simply cannot find:
+
+| Name | URL | Scopes |
+| --- | --- | --- |
+| `Peropero` | `https://unitypkg.peropero.net` | `com.prpr` |
+| `OpenUPM` | `https://package.openupm.com` | `com.niftyhat`, `com.cysharp`, `org.nuget.castle`, `org.nuget.system`, `org.nuget.google`, `org.nuget.microsoft`, `org.nuget.zlinq`, `com.neuecc` |
+
+The list is `SCOPED_REGISTRIES` in `unity_runner.py`. It is written into the project's `Packages/manifest.json` and **merged, never overwritten**: a registry a previous run or the template already declared keeps its own scopes and URL, and a registry of the same name keeps every scope it had — the wanted ones are added to it. It is re-applied on every run, including the reuse path, so a project created before a registry was added is brought up to date instead of staying stale.
+
+### Running the package's own tests
+
+The package under review is also registered in the project's `testables` (next to its `file:` dependency), which is what makes Unity compile its test assemblies and run them. A package that is only a dependency has its tests **ignored, not failed** — `-runTests` reports nothing at all, so a package with broken tests would look like a clean pass. Like the registries, the entry is written idempotently and re-applied on every run, so a project created before this existed is fixed rather than left silently untested.
+
+The project's `com.unity.test-framework` is raised to 1.3.4 if it is missing or older. The 3D template pulls an older one in through `com.unity.feature.development`, and a test assembly written against the newer TestRunner API does not compile against it. It is raised, never lowered: an explicit newer version, or a `file:`/git reference, is left alone.
+
+One consequence of compiling the tests at all: a package whose tests do not compile gets **no project files generated for it**, so ReSharper cannot inspect that package in that run. The compile errors themselves are still posted on the changed lines, so the pull request is told what is wrong — but the static analysis is blind until they are fixed.
+
+### The generated solution is repaired before use
+
+Unity writes one solution entry per generated project, and it generates both `<Name>.csproj` and `<Name>.Player.csproj` for the same assembly — labelling both with the same display name. MSBuild rejects such a solution outright (`MSB5004: The solution file has two projects named "Unity.Timeline"`), which stops `jb inspectcode` before it produces any report at all, leaving ReSharper silently doing nothing. The duplicate entries are renamed after their project files, which costs nothing and makes the solution usable.
+
+The repair is applied twice on purpose: once right after generation, and again after the test run — **every Editor launch rewrites the solution**, so the test run brings the duplicates back. The second pass is the last thing that happens before the solution is handed to ReSharper, and nothing after it starts Unity again.
+
+### How inspectcode is invoked
+
+Two things used to stop `jb inspectcode` from writing any report at all, and both look exactly like "no findings" from the outside. Neither is visible unless you know to look.
+
+**It is told not to build.** inspectcode builds the solution before inspecting it, and Unity's generated projects are written for Unity's own compiler settings — a generic MSBuild run trips over them (obsolete-API warnings promoted to errors, output paths it cannot open), and a failed build means no report. The pipeline has already compiled the code anyway: Unity for a package, the .NET SDK for a C# project. With `--no-build`, inspectcode still evaluates MSBuild for the project model and the file set; an A/B run over the same solution produced **byte-identical findings** with and without the build, so nothing is lost. Set `resharper-build` / `INSPECT_BUILD` to put the build back if a solution's real sources only appear after one.
+
+**Its MSBuild is pinned.** inspectcode picks the **newest** .NET SDK it can find, so a half-installed preview wins and the build fails (`MSB4236`, `NETSDK1045`). `resharper-dotnet-sdk` / `INSPECT_DOTNET_SDK` passes `--dotnetcoresdk=<version>` instead. The pinned SDK must be able to build what the repository targets — an SDK cannot target a newer framework than it ships, so pinning `10.0.x` against a `net11.0` project just moves the error. The log prints this hint whenever a missing report shows SDK-resolution symptoms.
+
+Warnings-as-errors is switched off in both modes, so that turning the build back on does not immediately reintroduce the first failure.
+
+### ReSharper findings are not repeated
+
+The static-analysis step posts on its own, without going through the model, so it does not inherit the model's three defences against repeating itself (it only sees the latest push's diff, it remembers what it posted, and it reads the thread states). It has its own two:
+
+- **Lines are scoped to the push.** On a later `synchronize`, the lines considered are the ones *that push* touched (`before...after`), not every line in the pull request. A first review still covers the whole diff. The build and test steps keep the full file list on purpose: a broken build is a broken build, whichever push caused it.
+- **A finding already open is not raised again.** Before posting, the PR's inline comments and their thread states are read, and a finding whose identical comment (same path, same text — the bodies are deterministic) is already in an **unresolved** thread is skipped. A finding whose thread was **resolved** and is reported again is posted: that is either a regression or a resolution that was wrong, and both are worth seeing. If the thread states cannot be read, nothing is suppressed — a repeated comment is a smaller failure than a dropped one.
+
+Every finding is anchored by the changed line's text rather than a line number, so it can only land on a line that is actually in the diff. Findings that cannot be anchored are dropped rather than posted somewhere approximate.
+
+If solutions were available but `inspectcode` produced no report for any of them — a broken toolchain, a solution it cannot build — the PR gets **one** note saying the static analysis did not run, rather than silence that looks like a clean pass. It is posted once per PR, not once per push. A repository with no solution at all says nothing: there was nothing to analyse.
 
 ### There is no summary
 
@@ -146,7 +228,11 @@ Praise is not a finding. A comment that only compliments a change — however te
 - `action.yml` — composite action definition.
 - `github_client.py` — GitHub REST API client.
 - `ai_client.py` — OpenAI-compatible chat completions client.
-- `inspect_code.py` — ReSharper static analysis (`.editorconfig`-driven).
-- `unity_runner.py` — Unity host-project build, unit tests and project-file generation.
-- `session.py` — per-PR session log (append-only JSONL, temp files).
+- `repo_kind.py` — what the cloned repository is (UPM package / C# project / mixed / other) and which solutions it ships.
+- `unity_runner.py` — per-PR Unity project creation, build, unit tests and project-file generation.
+- `dotnet_runner.py` — the `.NET` build/test gate for repositories that ship their own solution.
+- `build_log.py` — shared parsing of MSBuild compiler errors, NUnit and TRX test reports.
+- `inspect_code.py` — ReSharper static analysis (`.editorconfig`-driven, multi-solution).
+- `pr_workspace.py` — the one directory per PR: session, Unity project and package clone together, plus the PR head clone.
+- `session.py` — per-PR session log (append-only JSONL, inside the PR's directory).
 - `prompt.md` — default review prompt (auto-improveable via natural language).

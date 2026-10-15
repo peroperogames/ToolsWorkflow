@@ -48,7 +48,7 @@ inputs:
     required: false
     default: 'false'
   state-dir:
-    description: 'Directory for per-PR session/history files (default: <tmp>/ai-code-review).'
+    description: 'Root for the per-PR working directories (default: <tmp>/ai-code-review). Each PR gets one directory holding its agent session and its Unity project; both are deleted when the PR closes.'
     required: false
     default: ''
   project-prompt-path:
@@ -59,12 +59,28 @@ inputs:
     description: 'Path to the Unity editor executable. Empty to disable the Unity build/test step.'
     required: false
     default: '/opt/unity/2022.3.62f3/Editor/Unity'
-  unity-host-project:
-    description: 'Path to the persistent empty Unity project used to build/test packages; created on first use if missing. Empty uses a default beside the package cache.'
+  unity-cli:
+    description: 'Path or name of the Unity CLI used to create each PR''s Unity project. Empty looks for ''unity'' on PATH; the Unity step self-skips when neither is found.'
     required: false
     default: ''
+  unity-editor-version:
+    description: 'Editor version the per-PR Unity project is created for.'
+    required: false
+    default: '2022.3.62f3'
+  unity-template:
+    description: 'Template package the per-PR Unity project is created from.'
+    required: false
+    default: 'com.unity.template.3d'
   unity-sync-method:
     description: 'Optional -executeMethod used to regenerate project files (default: UnityEditor.SyncVS.SyncSolution).'
+    required: false
+    default: ''
+  resharper-dotnet-sdk:
+    description: 'Pin the .NET SDK whose MSBuild jb inspectcode uses (e.g. 10.0.300). Empty auto-detects, which picks the newest installed SDK and fails when that one cannot build the solution.'
+    required: false
+    default: ''
+  resharper-build:
+    description: "Set 'true' to let jb inspectcode build the solution before inspecting it. Off by default: the pipeline already compiled the code, and Unity's generated projects do not build cleanly under a generic MSBuild, which fails the step with no report at all."
     required: false
     default: ''
 
@@ -87,9 +103,13 @@ runs:
         MAX_TOKENS_PER_CHUNK: ${{ inputs.max-tokens-per-chunk }}
         SILENT_MODE: ${{ inputs.silent-mode }}
         DRY_RUN: ${{ inputs.dry-run }}
-        REVIEW_STATE_DIR: ${{ inputs.state-dir }}
+        REVIEW_WORK_DIR: ${{ inputs.state-dir }}
         PROJECT_PROMPT_PATH: ${{ inputs.project-prompt-path }}
         UNITY_PATH: ${{ inputs.unity-path }}
-        UNITY_HOST_PROJECT: ${{ inputs.unity-host-project }}
+        UNITY_CLI: ${{ inputs.unity-cli }}
+        UNITY_EDITOR_VERSION: ${{ inputs.unity-editor-version }}
+        UNITY_TEMPLATE: ${{ inputs.unity-template }}
         UNITY_SYNC_METHOD: ${{ inputs.unity-sync-method }}
+        INSPECT_DOTNET_SDK: ${{ inputs.resharper-dotnet-sdk }}
+        INSPECT_BUILD: ${{ inputs.resharper-build }}
       run: python3 "$GITHUB_ACTION_PATH/main.py"

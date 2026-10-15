@@ -2,57 +2,48 @@
 
 One pull request owns one session — every message the review agent has seen or
 produced (turns, assistant replies, tool calls, tool results), stored as JSONL
-under a directory of its own. Later runs append to it instead of rebuilding the
-whole context from GitHub, so the model keeps the files it read and the
+inside that PR's own directory. Later runs append to it instead of rebuilding
+the whole context from GitHub, so the model keeps the files it read and the
 reasoning it did, and a push sends only its own diff rather than the full one.
+
+The session shares the PR's directory with its Unity project (see
+:mod:`pr_workspace`), so the two are created together, reused together and
+deleted together when the PR closes.
 
 GitHub stays the source of truth: a missing or damaged session is rebuilt from
 it, a session another run currently holds is used without persistence, and the
-whole directory is removed when the PR closes. The log is an optimization, not
-state the bot needs to survive.
+whole PR directory is removed when the PR closes. The log is an optimization,
+not state the bot needs to survive.
 
-The storage directory defaults to ``<tmp>/ai-code-review`` and can be
-overridden with the ``REVIEW_STATE_DIR`` environment variable.
+The root directory defaults to ``<tmp>/ai-code-review`` and can be overridden
+with the ``REVIEW_WORK_DIR`` (or legacy ``REVIEW_STATE_DIR``) environment
+variable; :mod:`pr_workspace` owns that setting.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import shutil
 import sys
-import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
+
+import pr_workspace
 
 
 def log(message: str) -> None:
     print(message, file=sys.stderr)
 
 
-def _resolve_state_dir() -> Path:
-    value = os.environ.get("REVIEW_STATE_DIR", "").strip()
-    if value:
-        return Path(value)
-    return Path(tempfile.gettempdir()) / "ai-code-review"
-
-
-STATE_DIR = _resolve_state_dir()
-
-
-def _sanitize(value: str) -> str:
-    """Make an owner/repo/number safe to use as a path component."""
-    return "".join(c if c.isalnum() or c in "-_." else "_" for c in value)
-
-
 def session_dir(owner: str, repo: str, number: int) -> Path:
-    return STATE_DIR / f"{_sanitize(owner)}__{_sanitize(repo)}__{number}"
+    """The directory holding this PR's session log (inside its Unity project)."""
+    return pr_workspace.meta_dir(owner, repo, number)
 
 
 def session_path(owner: str, repo: str, number: int) -> Path:
-    return session_dir(owner, repo, number) / "session.jsonl"
+    return pr_workspace.session_path(owner, repo, number)
 
 
 # --------------------------------------------------------------------------- #
@@ -177,7 +168,7 @@ def hold(owner: str, repo: str, number: int) -> Iterator[Optional[Session]]:
     handle = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        handle = open(path.parent / ".lock", "w")
+        handle = open(pr_workspace.lock_path(owner, repo, number), "w")
         try:
             import fcntl
 
@@ -226,11 +217,6 @@ def load(owner: str, repo: str, number: int) -> List[Dict[str, Any]]:
     return records
 
 
-def delete(owner: str, repo: str, number: int) -> None:
-    """Remove a PR's session directory (and any legacy history file)."""
-    shutil.rmtree(session_dir(owner, repo, number), ignore_errors=True)
-    legacy = STATE_DIR / f"{_sanitize(owner)}__{_sanitize(repo)}__{number}.json"
-    try:
-        legacy.unlink(missing_ok=True)
-    except OSError:
-        pass
+# Deleting a PR's session is not a separate operation any more: the log lives
+# inside the PR's directory, which `pr_workspace.delete` removes whole (the
+# session, the Unity project and the package clone together).

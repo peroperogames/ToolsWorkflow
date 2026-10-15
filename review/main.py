@@ -38,6 +38,9 @@ from ai_client import AIClient, DEFAULT_BASE_URL, DEFAULT_MODEL
 from github_client import GitHubClient
 
 import inspect_code
+import dotnet_runner
+import pr_workspace
+import repo_kind
 import session
 import unity_runner
 
@@ -54,7 +57,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.18"
+VERSION = "2026-10-14.unity.23"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -2380,29 +2383,22 @@ def changed_lines_by_file(files: List[Dict[str, Any]]) -> Dict[str, set]:
     return result
 
 
-def run_unity_checks(
+def report_build_result(
     gh: GitHubClient,
     owner: str,
     repo: str,
     number: int,
-    pr: Dict[str, Any],
     files: List[Dict[str, Any]],
     config: "Config",
-) -> "unity_runner.UnityResult":
-    """Build and test the package in the Unity host project, then report.
+    head_sha: str,
+    result: Any,
+) -> None:
+    """Post what a build/test step found.
 
     Compile errors that fall on a changed line post as inline comments; the rest
-    (and all test failures) go into one status comment. Returns the UnityResult
-    so the caller can block approval on failure.
+    (and all test failures) go into one status comment. Shared by the Unity step
+    and the .NET one, which report the same way.
     """
-    head_sha = pr.get("head", {}).get("sha", "")
-    token = config.github_token
-    result = unity_runner.analyze(owner, repo, number, head_sha, token)
-    if not result.ran:
-        return result
-
-    log(result.summary())
-
     # Compile errors carry file+line: anchor them to changed lines when possible.
     patches = {f.get("filename", ""): (f.get("patch") or "") for f in files}
     raw: List[Dict[str, Any]] = []
@@ -2428,16 +2424,15 @@ def run_unity_checks(
     if not config.dry_run:
         normalized = normalize_inline_comments(raw, files)
         if normalized:
-            post_inline_comments(
-                gh, owner, repo, number, head_sha, normalized
-            )
+            post_inline_comments(gh, owner, repo, number, head_sha, normalized)
 
     # One status comment summarising anything not pinned to a line.
     status_lines: List[str] = [result.summary()]
     if orphan_errors:
         status_lines.append("\n**编译错误(未能定位到改动行):**")
         for e in orphan_errors[:20]:
-            status_lines.append(f"- `{e['file']}:{e['line']}` {e['code']}: {e['message']}")
+            where = f"`{e['file']}:{e['line']}` " if e.get("file") else ""
+            status_lines.append(f"- {where}{e['code']}: {e['message']}")
     if result.test_failures:
         status_lines.append("\n**单元测试失败:**")
         for t in result.test_failures[:20]:
@@ -2450,7 +2445,147 @@ def run_unity_checks(
             print(body)
         else:
             gh.post_comment(owner, repo, number, body)
+
+
+def run_unity_checks(
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    pr: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    config: "Config",
+    clone_dir: Optional[str],
+    kind: "repo_kind.Kind",
+) -> "unity_runner.UnityResult":
+    """Build and test the package in the PR's own Unity project, then report.
+
+    A repository that is not a UPM package is not touched at all, so nothing is
+    created and nothing is posted for it. Returns the UnityResult so the caller
+    can block approval on failure.
+    """
+    if not clone_dir:
+        return unity_runner.UnityResult()
+    result = unity_runner.analyze(clone_dir, owner, repo, number, kind)
+    if not result.ran:
+        return result
+
+    log(result.summary())
+    report_build_result(
+        gh, owner, repo, number, files, config,
+        pr.get("head", {}).get("sha", ""), result,
+    )
     return result
+
+
+def run_dotnet_checks(
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    pr: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    config: "Config",
+    clone_dir: Optional[str],
+    kind: "repo_kind.Kind",
+) -> "dotnet_runner.DotnetResult":
+    """Build (and, when it has tests, test) a repository's own solution.
+
+    This is the .NET counterpart of the Unity step, and it applies to any
+    repository that ships a solution of its own — a pure C# project, and also a
+    C# project that additionally contains a UPM package, where the Unity step
+    covers the package and this covers the solution around it. A repository
+    whose only C# artifact is the package has nothing for it to do.
+    """
+    if not clone_dir or not kind.has_solution:
+        return dotnet_runner.DotnetResult()
+
+    result = dotnet_runner.analyze(
+        clone_dir, kind.solution, pr_workspace.meta_dir(owner, repo, number)
+    )
+    if not result.ran:
+        return result
+
+    log(result.summary())
+    report_build_result(
+        gh, owner, repo, number, files, config,
+        pr.get("head", {}).get("sha", ""), result,
+    )
+    return result
+
+
+# Marks every comment the static-analysis step posts, so they can be told apart
+# from the model's findings — both for the "already raised" check and when the
+# prompt tells the model not to repeat them.
+RESHARPER_MARKER = "**ReSharper**:"
+
+
+def _normalized(text: str) -> str:
+    """Comment bodies compared the way GitHub stores them."""
+    return " ".join((text or "").split())
+
+
+def bot_comment_exists(
+    gh: GitHubClient, owner: str, repo: str, number: int, body: str
+) -> bool:
+    """Has the bot already posted this exact comment on the PR?
+
+    For notes that describe a standing condition rather than a change: a runner
+    whose ReSharper cannot run would otherwise announce it on every push.
+    """
+    key = _normalized(body)
+    try:
+        for comment in gh.list_comments(owner, repo, number):
+            if not is_bot_author(comment.get("user")):
+                continue
+            if _normalized(comment.get("body") or "") == key:
+                return True
+    except Exception as exc:  # noqa: BLE001 - best-effort
+        log(f"Warning: could not read existing comments: {exc}")
+    return False
+
+
+def existing_resharper_findings(
+    gh: GitHubClient, owner: str, repo: str, number: int
+) -> set:
+    """``(path, body)`` of every ReSharper finding still open on the PR.
+
+    The static-analysis step posts one deterministic comment per finding, so an
+    identical body on the same path is the same finding raised before — and
+    re-raising it on every push is exactly the repetition the rest of the
+    pipeline works to avoid. The model has three defences against this (it only
+    sees the latest push's diff, it remembers what it posted, and it can read
+    the thread states); this is the static step's single one.
+
+    Only *unresolved* threads count. A finding whose thread was marked resolved
+    and is reported again is either a regression or a wrong resolution, and both
+    are worth saying out loud.
+    """
+    resolved: Dict[Any, bool] = {}
+    try:
+        for thread in gh.list_review_threads(owner, repo, number):
+            for node in (thread.get("comments") or {}).get("nodes") or []:
+                if node.get("databaseId") is not None:
+                    resolved[node["databaseId"]] = bool(thread.get("isResolved"))
+    except Exception as exc:  # noqa: BLE001 - best-effort
+        # Without the thread states we cannot tell an open finding from a settled
+        # one, so nothing is treated as already raised: a repeated comment is a
+        # smaller failure than a dropped one.
+        log(f"Warning: could not read review threads ({exc}); ReSharper findings will not be de-duplicated.")
+        return set()
+
+    seen: set = set()
+    try:
+        for comment in gh.list_review_comments(owner, repo, number):
+            body = _normalized(comment.get("body") or "")
+            if RESHARPER_MARKER not in body or not is_bot_author(comment.get("user")):
+                continue
+            if resolved.get(comment.get("id"), False):
+                continue
+            seen.add((comment.get("path") or "", body))
+    except Exception as exc:  # noqa: BLE001 - best-effort
+        log(f"Warning: could not read existing inline comments: {exc}")
+    return seen
 
 
 def run_static_analysis(
@@ -2461,38 +2596,80 @@ def run_static_analysis(
     pr: Dict[str, Any],
     files: List[Dict[str, Any]],
     config: "Config",
-    workdir: Optional[str] = None,
-    sln_path: Optional[str] = None,
+    clone_dir: Optional[str] = None,
+    kind: Optional["repo_kind.Kind"] = None,
+    unity: Optional["unity_runner.UnityResult"] = None,
 ) -> int:
     """Run ReSharper on the source and post findings inline.
 
-    ``workdir`` holds the source to analyse (the Unity package clone, or the
-    checked-out repo); ``sln_path`` is the Unity-generated solution when
-    available. Deterministic, project-specific checks the model should not guess
-    at. Best-effort: any failure just means no static-analysis comments.
+    ``clone_dir`` holds the checked-out pull request, and every solution that
+    covers it is inspected: the repository's own one and the Unity-generated one.
+    A repository can have both — a C# project that also ships a UPM package, with
+    the SourceGenerator living in the hand-maintained solution and the package's
+    UnityEngine references only in Unity's — and each sees code the other does
+    not, so both run and their findings are merged.
+
+    Deterministic, project-specific checks the model should not guess at.
+    Best-effort: any failure just means no static-analysis comments.
     """
-    workdir = workdir or os.environ.get("REVIEW_WORKDIR", "").strip()
+    workdir = clone_dir or os.environ.get("REVIEW_WORKDIR", "").strip()
     if not workdir or not os.path.isdir(workdir):
         log("No source directory to analyse; skipping static analysis.")
+        return 0
+
+    targets: List[str] = []
+    if kind is not None and kind.has_solution:
+        targets.append(kind.solution)
+    if unity is not None and unity.sln_path:
+        targets.append(unity.sln_path)
+    if not targets:
+        log("No solution for this repository; skipping static analysis.")
         return 0
 
     changed = changed_lines_by_file(files)
     if not changed:
         return 0
 
-    issues = inspect_code.analyze(workdir, changed, sln_path=sln_path)
+    analysis = inspect_code.analyze(
+        workdir, changed, targets,
+        report_dir=pr_workspace.meta_dir(owner, repo, number),
+    )
+
+    if analysis.targets and not analysis.ran:
+        # Solutions were there to inspect and none produced a report. Saying
+        # nothing would make the step look like a clean pass, which is the
+        # failure mode this whole reporting path exists to avoid. Once per PR,
+        # not once per push.
+        note = (
+            "⚠️ ReSharper 静态分析未能产出报告（`inspectcode` 未成功运行），"
+            "本次未做静态分析，详见 workflow 日志。"
+        )
+        log("ReSharper produced no report for any target; noting it on the PR.")
+        if config.dry_run:
+            print(note)
+        elif not bot_comment_exists(gh, owner, repo, number, note):
+            gh.post_comment(owner, repo, number, note)
+        return 0
+
+    issues = analysis.issues
     if not issues:
         return 0
 
+    # A finding still open from an earlier push is not raised again.
+    already = existing_resharper_findings(gh, owner, repo, number)
+
     # Build inline comments anchored by the changed line's text (reliable), the
-    # same way model findings are located.
+    # same way model findings are located. `issue["file"]` is already relative to
+    # the repository, since inspect_code resolved it against the clone.
     patches = {f.get("filename", ""): (f.get("patch") or "") for f in files}
     raw: List[Dict[str, Any]] = []
     seen: set = set()
+    repeated = 0
     for issue in issues:
         path = issue["file"]
-        # The report path is absolute/workspace-relative; match it to a PR file.
-        matched = next((fn for fn in patches if path.endswith(fn) or fn.endswith(path)), None)
+        matched = path if path in patches else next(
+            (fn for fn in patches if path.endswith(fn) or fn.endswith(path)), None
+        )
         if not matched:
             continue
         key = (matched, issue["line"], issue["message"])
@@ -2503,14 +2680,20 @@ def run_static_analysis(
         if not quote:
             continue
         tag = "🔴" if issue["severity"] == "ERROR" else "⚠️"
+        body = f"{tag} {RESHARPER_MARKER} {issue['message']}"
+        if (matched, _normalized(body)) in already:
+            repeated += 1
+            continue
         raw.append(
             {
                 "path": matched,
                 "quote": quote,
                 "side": "RIGHT",
-                "body": f"{tag} **ReSharper**: {issue['message']}",
+                "body": body,
             }
         )
+    if repeated:
+        log(f"ReSharper: {repeated} finding(s) skipped — already raised in an open thread.")
 
     normalized = normalize_inline_comments(raw, files)
     if not normalized:
@@ -3038,14 +3221,15 @@ def main() -> int:
 
     pr = gh.get_pull_request(owner, repo, number)
 
-    # Closed PRs need no review; drop their session and free the Unity host
-    # project's reference + package clone.
+    # Closed PRs need no review, and nothing about them should outlive them: the
+    # PR's one directory holds its agent session, its Unity project and the
+    # package clone, and all three go together.
     if (pr.get("state") or "open") == "closed":
-        session.delete(owner, repo, number)
-        host = unity_runner.host_project()
-        if host:
-            unity_runner.cleanup(host, owner, repo, number)
-        log(f"Pull Request #{number} is closed; cleaned up its session and Unity cache.")
+        unity_runner.cleanup(owner, repo, number)
+        log(
+            f"Pull Request #{number} is closed; deleted its session, Unity "
+            "project and package clone."
+        )
         return 0
 
     # Merges from release branches back to master/main don't need review.
@@ -3259,24 +3443,55 @@ def main() -> int:
     if conversation:
         log(f"Using {len(entries)} prior review/comment entry(ies) as context.")
 
-    # Build + test the package in the Unity host project (UPM packages have no
-    # compilable project of their own). Compile errors / test failures post as
-    # comments and block approval; a passing build yields the solution ReSharper
-    # then inspects with full UnityEngine references.
-    unity = run_unity_checks(gh, owner, repo, number, pr, files, config)
-    unity_sln = unity.sln_path if unity.ran and unity.compiled else None
-    unity_workdir = (
-        str(unity_runner.cache_root() / unity_runner._pr_key(owner, repo, number))
-        if unity.ran
-        else None
+    # The pull request's head is cloned once, whatever the repository turns out
+    # to be: the Unity step, the .NET gate and the static analysis all read it
+    # from the same place, and nothing has to be guessed about the repository
+    # before it is on disk. Classifying the clone is what decides which of those
+    # steps has anything to do.
+    staging = pr_workspace.clone_pr_head(
+        owner, repo, number, pr.get("head", {}).get("sha", ""), config.github_token
     )
-    extra_context = f"## 构建与测试状态\n\n{unity.summary()}" if unity.ran else ""
+    kind = repo_kind.detect(staging) if staging else repo_kind.Kind(repo_kind.KIND_OTHER)
+    log(f"Repository kind: {kind.describe()}.")
+
+    # The Unity project directory is the PR's directory, and the CLI will not lay
+    # one out where a path already exists — so for a package the project is
+    # reserved first and only then is the clone renamed into it.
+    if kind.is_package:
+        unity_runner.reserve_project(owner, repo, number)
+    clone_dir = pr_workspace.place_clone(owner, repo, number)
+
+    # A UPM package is built and tested in this PR's own Unity project; a pure C#
+    # repository is built (and tested, when it has tests) with the .NET SDK.
+    # Compile errors / test failures post as comments and block approval.
+    unity = run_unity_checks(gh, owner, repo, number, pr, files, config, clone_dir, kind)
+    dotnet = run_dotnet_checks(gh, owner, repo, number, pr, files, config, clone_dir, kind)
+    build_blocked = (unity.ran and not unity.ok) or (dotnet.ran and not dotnet.ok)
+    extra_context = ""
+    status = "\n".join(s for s in (unity.summary(), dotnet.summary()) if s)
+    if status:
+        extra_context = f"## 构建与测试状态\n\n{status}"
+
+    # On a later push, the diff of that push alone is what the review judges —
+    # and what the static analysis reports on, so a finding raised two pushes ago
+    # is not raised again just because its line is still in the pull request.
+    push_files: Optional[List[Dict[str, Any]]] = None
+    if incremental:
+        before, after = payload.get("before"), payload.get("after")
+        if before and after:
+            try:
+                push_files = gh.compare(owner, repo, before, after)
+                log(f"Latest push touched {len(push_files)} file(s).")
+            except Exception as exc:  # noqa: BLE001 - fall back to the whole PR
+                log(f"Warning: could not diff the push ({before[:7]}..{after[:7]}): {exc}")
 
     # Deterministic static analysis (ReSharper + the repo's .editorconfig) runs
-    # alongside the AI review; its findings post as their own inline comments.
+    # alongside the AI review, over every solution that covers the clone; its
+    # findings post as their own inline comments.
     static_posted = run_static_analysis(
-        gh, owner, repo, number, pr, files, config,
-        workdir=unity_workdir, sln_path=unity_sln,
+        gh, owner, repo, number, pr,
+        push_files if push_files else files, config,
+        clone_dir=clone_dir, kind=kind, unity=unity,
     )
     if static_posted:
         log(f"Static analysis posted {static_posted} inline comment(s).")
@@ -3290,14 +3505,14 @@ def main() -> int:
     )
     ctx = run_agent_review(
         ai, gh, owner, repo, number, pr, files, system_prompt, records, turns, config,
-        block_approve=unity.ran and not unity.ok,
+        block_approve=build_blocked,
     )
     if ctx is not None:
         if incremental:
             settle_threads_and_approve(
                 ai, gh, owner, repo, number, pr, files,
                 conversation=conversation,
-                allow_approve=not (unity.ran and not unity.ok),
+                allow_approve=not build_blocked,
             )
         return 0
 
@@ -3344,19 +3559,11 @@ def main() -> int:
     # On a later push, retire the threads that push settled, then approve when
     # the review came back clean and nothing is left open.
     if incremental:
-        push_files: Optional[List[Dict[str, Any]]] = None
-        before, after = payload.get("before"), payload.get("after")
-        if before and after:
-            try:
-                push_files = gh.compare(owner, repo, before, after)
-                log(f"Latest push touched {len(push_files)} file(s).")
-            except Exception as exc:  # noqa: BLE001 - fall back to the discussion
-                log(f"Warning: could not diff the push ({before[:7]}..{after[:7]}): {exc}")
         settle_threads_and_approve(
             ai, gh, owner, repo, number, pr, files,
             conversation=conversation,
             push_files=push_files,
-            allow_approve=(event == "APPROVE"),
+            allow_approve=(event == "APPROVE") and not build_blocked,
         )
 
     return 0
