@@ -327,6 +327,16 @@ A UPM package is inspected through **its own generated projects**. Unity writes 
 
 Those projects are also what makes a run survive a missing solution. `jb inspectcode` takes a csproj where a solution is missing or unusable, which is exactly the case that used to end as "no solution for this repository" and no static analysis at all. The solution is kept as the fallback, for anything the package's own projects do not cover.
 
+Three lines in the log say what was covered, and they only mean something together:
+
+```
+Package assemblies: Demo, Tests
+Generated projects for the package: Demo.csproj, Tests.csproj
+Other generated projects, not the package's: Assembly-CSharp.csproj
+```
+
+The first is what the package's asmdefs say it is, the second what Unity generated for it, and the third what else exists — because an assembly in the first line with no counterpart in the second is a package that is only *partly* inspected, and a partial inspection reports no findings, exactly like a clean one. Unity names a generated project after its asmdef, so the comparison is a name match and a platform-limited or constraint-gated asmdef may legitimately have no project of its own.
+
 For a repository that ships its own solution, that solution stays a target as well — see [Review pipeline](#review-pipeline).
 
 ### ReSharper findings are not repeated

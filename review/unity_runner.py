@@ -690,6 +690,43 @@ def find_solution(project: str) -> Optional[str]:
 _CS_COMPILE = re.compile(r'<Compile\s+Include="([^"]+)"', re.IGNORECASE)
 
 
+def generated_projects(project: str) -> List[Path]:
+    """Every csproj Unity generated into the project root, or an empty list.
+
+    Only the root: that is where project generation writes them, and a nested one
+    would belong to something else.
+    """
+    try:
+        return sorted(Path(project).glob("*.csproj"))
+    except OSError as exc:
+        log(f"Could not look for generated projects in {project}: {exc}")
+        return []
+
+
+def package_assemblies(package_root: str) -> List[str]:
+    """The assembly names the package declares, from its asmdef files.
+
+    Logged next to the projects that were generated for them, because the two
+    lists only mean something together: Unity names a generated project after its
+    asmdef, so an assembly in one list with no counterpart in the other is how a
+    package that is only *partly* inspected looks from the outside.
+    """
+    if not package_root:
+        return []
+    names: List[str] = []
+    try:
+        for asmdef in sorted(Path(package_root).rglob("*.asmdef")):
+            try:
+                name = (json.loads(asmdef.read_text(encoding="utf-8")).get("name") or "").strip()
+            except (OSError, ValueError):
+                continue
+            if name:
+                names.append(name)
+    except OSError as exc:
+        log(f"Could not look for asmdef files under {package_root}: {exc}")
+    return sorted(names)
+
+
 def package_projects(project: str, package_root: str) -> List[str]:
     """The generated C# projects that compile the package under review.
 
@@ -704,16 +741,14 @@ def package_projects(project: str, package_root: str) -> List[str]:
     """
     if not package_root:
         return []
-    root = Path(project)
     try:
         wanted = Path(package_root).resolve()
-        candidates = sorted(root.glob("*.csproj"))
     except OSError as exc:
-        log(f"Could not look for generated projects in {project}: {exc}")
+        log(f"Could not resolve the package root {package_root}: {exc}")
         return []
 
     found: List[str] = []
-    for csproj in candidates:
+    for csproj in generated_projects(project):
         try:
             text = csproj.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -958,11 +993,28 @@ def analyze(
         result.compile_errors = errors
         result.sln_path = sln
         result.package_projects = package_projects(project, kind.package_root)
+        # Three facts, side by side on purpose. What the package says it is, what
+        # Unity generated for it, and what else was generated — because a package
+        # assembly that is missing from the middle line is a package that is only
+        # partly inspected, and the static analysis looks exactly the same either
+        # way.
+        assemblies = package_assemblies(kind.package_root)
+        if assemblies:
+            log("Package assemblies: " + ", ".join(assemblies))
         if result.package_projects:
             log(
                 "Generated projects for the package: "
                 + ", ".join(Path(p).name for p in result.package_projects)
             )
+        else:
+            log("No generated project compiles the package's own files.")
+        others = [
+            p.name
+            for p in generated_projects(project)
+            if str(p) not in result.package_projects
+        ]
+        if others:
+            log("Other generated projects, not the package's: " + ", ".join(others))
 
         if compiled:
             results_dir = pr_workspace.meta_dir(owner, repo, number)
