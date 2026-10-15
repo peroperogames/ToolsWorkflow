@@ -32,7 +32,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ai_client import AIClient, DEFAULT_BASE_URL, DEFAULT_MODEL
 from github_client import GitHubClient
@@ -57,7 +57,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.25"
+VERSION = "2026-10-14.unity.26"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -259,6 +259,22 @@ LANGUAGE_ALIASES = {
 def log(message: str) -> None:
     """Print a progress message to stderr (stdout is reserved for the review)."""
     print(message, file=sys.stderr)
+
+
+def force_utf8_output() -> None:
+    """Make printing survive a stdout that is not UTF-8.
+
+    The tool prints Chinese and emoji — including a review body in dry-run — and
+    a runner whose locale is C or POSIX would raise UnicodeEncodeError partway
+    through a review, losing the run. Replacing unencodable characters keeps the
+    log readable and the review alive; it costs nothing when the encoding is
+    already UTF-8, which it normally is.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
 
 
 @dataclass
@@ -1390,36 +1406,177 @@ def classify_intent(ai: AIClient, body: str) -> str:
         return "reply"
 
 
-def parse_prompt_command(body: str, bot_login: str) -> Optional[Tuple[str, str]]:
-    """Parse an explicit ``prompt`` command into ``(target, feedback)``.
+@dataclass(frozen=True)
+class Command:
+    """A command a comment carried, already parsed."""
 
-    ``@bot prompt(this): ...`` and a bare ``@bot prompt: ...`` improve the
-    repository being reviewed; ``@bot prompt(base): ...`` improves the shared
-    prompt in ToolsWorkflow. The colon is optional in either form because people
-    forget it, and the target defaults to ``this``. Full-width parentheses and
-    colon are accepted so a Chinese IME cannot silently break the command.
+    name: str
+    argument: str = ""
+    target: str = ""
+    body: str = ""
 
-    This is the only way a prompt change happens — there is no classifier
-    guessing at intent. Returns ``None`` when the comment is not a ``prompt``
-    command, so the caller falls through to the intent classifier.
+
+@dataclass(frozen=True)
+class CommandSpec:
+    """One command the bot answers to, and what the rest of the comment means."""
+
+    name: str
+    argument: str  # what the text after the command is called in logs
+    summary: str
+    handler: Callable[["CommandContext", Command], int]
+
+
+@dataclass
+class CommandContext:
+    """Everything a command handler may need, gathered once by the caller."""
+
+    ai: AIClient
+    gh: GitHubClient
+    pr: Dict[str, Any]
+    author: str
+    owner: str
+    repo: str
+    number: int
+    config: "Config"
+    system_prompt: str
+    conversation: str
+    bot_login: str
+    records: List[Dict[str, Any]]
+    comment_records: List[Dict[str, Any]]
+
+
+def command_pattern(bot_login: str) -> "re.Pattern[str]":
+    """The shape every command shares.
+
+    An @-mention, then one of the command words, then an optional
+    ``(target)`` — ``prompt(this)`` / ``prompt(base)`` — then an optional colon
+    and the rest of the comment. Parentheses and colon may be full-width, so a
+    Chinese IME cannot silently break a command, and the word must stand alone:
+    "reviews are noisy" is not a command.
     """
-    if not body or not bot_login:
-        return None
     names = {bot_login}
     if bot_login.endswith("[bot]"):
         names.add(bot_login[: -len("[bot]")])
     # Longest name first so `perotoolsbot[bot]` is preferred over `perotoolsbot`.
-    for name in sorted((n for n in names if n), key=len, reverse=True):
-        pattern = re.compile(
-            r"@" + re.escape(name) + r"\s+prompt\s*"
-            r"(?:[（(]\s*(?P<target>this|base)\s*[)）])?\s*[:：]?\s*(?P<feedback>.*)",
-            re.IGNORECASE | re.DOTALL,
+    alternation = "|".join(
+        re.escape(spec.name)
+        for spec in sorted(COMMANDS, key=lambda s: len(s.name), reverse=True)
+    )
+    name_alternation = "|".join(
+        re.escape(n) for n in sorted((n for n in names if n), key=len, reverse=True)
+    )
+    return re.compile(
+        r"@(?:" + name_alternation + r")\s+"
+        r"(?P<command>" + alternation + r")\b\s*"
+        r"(?:[（(]\s*(?P<target>[a-z]+)\s*[)）])?\s*[:：]?\s*(?P<argument>.*)",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+
+def parse_command(body: str, bot_login: str) -> Optional[Command]:
+    """The command this comment carries, or ``None`` if it carries none.
+
+    A command is matched on the word right after the mention, so only one can
+    ever match and the registry's order is just the order they are documented
+    in. A match is final: the comment never reaches the intent classifier, which
+    is the whole point of having a command. Anything without one still does, so
+    free-form requests keep working exactly as before.
+    """
+    if not body or not bot_login:
+        return None
+    match = command_pattern(bot_login).search(body)
+    if not match:
+        return None
+    return Command(
+        name=match.group("command").lower(),
+        argument=(match.group("argument") or "").strip(),
+        target=(match.group("target") or "").lower(),
+        body=body,
+    )
+
+
+def handle_prompt_command(ctx: CommandContext, command: Command) -> int:
+    """``@bot prompt(this|base): <feedback>`` — rewrite criteria, open a PR.
+
+    This is the only way a prompt change happens: nothing guesses at it, because
+    only the person writing the comment knows which prompt they mean.
+    """
+    target = command.target if command.target in ("this", "base") else "this"
+    log(f"Prompt command (target={target}).")
+    return handle_improve_prompt(
+        ctx.ai, ctx.gh, ctx.pr, command.argument, ctx.author,
+        ctx.owner, ctx.repo, ctx.number, target, ctx.config,
+    )
+
+
+def handle_review_command(ctx: CommandContext, command: Command) -> int:
+    """``@bot review [note]`` — review now, without the intent classifier.
+
+    A repository that only reviews on demand cannot afford the classifier
+    reading its request to review as something else.
+    """
+    log("Review command: starting a review without the classifier.")
+    return handle_review_request(
+        ctx.ai, ctx.gh, ctx.pr, command.body, ctx.author, ctx.owner, ctx.repo,
+        ctx.number, ctx.config, ctx.system_prompt, ctx.conversation,
+        ctx.bot_login, ctx.records, ctx.comment_records,
+    )
+
+
+def handle_rebuild_command(ctx: CommandContext, command: Command) -> int:
+    """``@bot rebuild [note]`` — re-run the build, test and static steps only.
+
+    The cheap question — "does it compile now?" — without paying for a review,
+    and with no way to approve: only a review's verdict can do that. The steps
+    are the same ones a review runs, so nothing is checked here that would not
+    have been checked there.
+    """
+    files = ctx.gh.list_files(ctx.owner, ctx.repo, ctx.number)
+    if not files:
+        ctx.gh.post_comment(
+            ctx.owner, ctx.repo, ctx.number, f"@{ctx.author} 没有找到变更文件，无法构建。"
         )
-        match = pattern.search(body)
-        if match:
-            target = (match.group("target") or "this").lower()
-            return target, (match.group("feedback") or "").strip()
-    return None
+        return 0
+
+    log("Rebuild command: running the build, test and static-analysis steps.")
+    checks = run_review_checks(
+        ctx.gh, ctx.owner, ctx.repo, ctx.number, ctx.pr, files, ctx.config
+    )
+
+    kind = checks.kind.describe() if checks.kind else "unknown"
+    lines = ["🔧 **重新构建与测试**（只跑门禁，未做评审）", f"仓库类型：{kind}", ""]
+    summaries = [s for s in (checks.unity.summary(), checks.dotnet.summary()) if s]
+    if summaries:
+        lines.extend(summaries)
+    else:
+        lines.append("没有构建/测试步骤运行——该仓库没有，或工具链不可用，详见日志。")
+    if checks.static_posted:
+        lines.append(f"ReSharper：新提出 {checks.static_posted} 条行内意见。")
+    body = "\n".join(lines)
+
+    if ctx.config.dry_run:
+        print(body)
+        return 0
+    ctx.gh.post_comment(ctx.owner, ctx.repo, ctx.number, body)
+    return 0
+
+
+# Every command the bot answers to. A command never reaches the intent
+# classifier — that is what makes it deterministic — and everything without one
+# still does.
+COMMANDS: Tuple[CommandSpec, ...] = (
+    CommandSpec(
+        "prompt", "feedback", "rewrite the review criteria and open a PR",
+        handle_prompt_command,
+    ),
+    CommandSpec("review", "note", "review the pull request now", handle_review_command),
+    CommandSpec(
+        "rebuild", "note", "re-run the build/test/static steps only",
+        handle_rebuild_command,
+    ),
+)
+COMMAND_BY_NAME = {spec.name: spec for spec in COMMANDS}
+
 
 
 def handle_improve_prompt(
@@ -1531,34 +1688,6 @@ def handle_improve_prompt(
         )
 
     return 0
-
-
-def parse_review_command(body: str, bot_login: str) -> Optional[str]:
-    """Parse an explicit ``review`` command into its note ("" when there is none).
-
-    ``@bot review`` and ``@bot review: <what to focus on>`` start a review
-    without consulting the intent classifier. That matters for a repository that
-    only reviews on demand: there, a misread @-mention is not a slightly wrong
-    answer, it is a review that never happened. The classifier still handles
-    every other way of asking.
-
-    Returns ``None`` when the comment is not a review command. ``review`` must be
-    a word of its own, so "reviews are noisy" is not a command.
-    """
-    if not body or not bot_login:
-        return None
-    names = {bot_login}
-    if bot_login.endswith("[bot]"):
-        names.add(bot_login[: -len("[bot]")])
-    for name in sorted((n for n in names if n), key=len, reverse=True):
-        pattern = re.compile(
-            r"@" + re.escape(name) + r"\s+review\b\s*[:：]?\s*(?P<note>.*)",
-            re.IGNORECASE | re.DOTALL,
-        )
-        match = pattern.search(body)
-        if match:
-            return (match.group("note") or "").strip()
-    return None
 
 
 def _parse_json_response(text: str) -> Dict[str, Any]:
@@ -2261,13 +2390,14 @@ class ReviewChecks:
     """What the repository-backed steps produced for one review.
 
     Shared by both ways a review starts — an event, or someone asking for one —
-    so that neither can quietly do less than the other.
+    so that neither can quietly do less than the other. The two results are never
+    absent, only "did not run": that keeps every consumer from having to ask.
     """
 
     clone_dir: Optional[str] = None
     kind: Optional["repo_kind.Kind"] = None
-    unity: Optional["unity_runner.UnityResult"] = None
-    dotnet: Optional["dotnet_runner.DotnetResult"] = None
+    unity: "unity_runner.UnityResult" = field(default_factory=unity_runner.UnityResult)
+    dotnet: "dotnet_runner.DotnetResult" = field(default_factory=dotnet_runner.DotnetResult)
     blocked: bool = False
     extra_context: str = ""
     static_posted: int = 0
@@ -3352,6 +3482,7 @@ def act_on_clean_verdict(
 
 
 def main() -> int:
+    force_utf8_output()
     config = load_config()
 
     event_name, payload = load_event()
@@ -3487,25 +3618,27 @@ def main() -> int:
         # turns, whichever route this run takes.
         comment_records = conversation_records(unseen_entries(entries, stored))
 
-        # An explicit `prompt(this|base)` command is deterministic, so it never
-        # goes to the classifier — only the user knows which prompt they mean.
-        command = parse_prompt_command(body, bot_login)
+        # A command is deterministic: it never goes to the classifier, because
+        # the person who wrote it knows what they meant. Everything else does.
+        command = parse_command(body, bot_login)
         if command:
-            target, feedback = command
-            log(f"Prompt command (target={target}).")
-            return handle_improve_prompt(
-                ai, gh, pr, feedback, author, owner, repo, number, target, config
-            )
+            spec = COMMAND_BY_NAME.get(command.name)
+            if spec:
+                log(
+                    f"Command: {command.name}"
+                    + (f" ({spec.argument}={command.argument!r})" if command.argument else "")
+                )
+                return spec.handler(
+                    CommandContext(
+                        ai=ai, gh=gh, pr=pr, author=author, owner=owner, repo=repo,
+                        number=number, config=config, system_prompt=system_prompt,
+                        conversation=conversation, bot_login=bot_login,
+                        records=records, comment_records=comment_records,
+                    ),
+                    command,
+                )
 
-        # `review` is deterministic too, and for the same reason: a repository
-        # that only reviews on demand cannot afford the classifier reading a
-        # request to review as something else.
-        note = parse_review_command(body, bot_login)
-        if note is not None:
-            log("Review command: starting a review without the classifier.")
-            intent = "review"
-        else:
-            intent = classify_intent(ai, body)
+        intent = classify_intent(ai, body)
         if intent == "code_change":
             return handle_code_change(
                 ai, gh, pr, body, author, owner, repo, number, conversation, bot_login

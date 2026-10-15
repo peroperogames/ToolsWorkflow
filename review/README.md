@@ -112,6 +112,16 @@ Comments on non-PR issues, bot comments, and comments that address neither the b
 
 #### Special commands
 
+Some things a comment can ask for are too consequential to guess at, so they are **commands**: `@perotoolsbot` followed by one of the words below, matched on the word right after the mention so "reviews are noisy" is not a command. A command never reaches the intent classifier — that is what makes it deterministic. Everything else (questions, discussion, a request phrased some other way) still does, exactly as before.
+
+| Command | What it does |
+| --- | --- |
+| `prompt(this):` / `prompt(base):` | Rewrite review criteria and open a PR with the result. |
+| `review` | Review the pull request now. |
+| `rebuild` | Re-run the build, test and static-analysis steps only — no review, no approval. |
+
+The words live in one registry (`COMMANDS` in `main.py`): each entry names the command, what the text after it means, and its handler, and the parsing, the logging and the precedence all come from there rather than from a separate parser and branch per command.
+
 - **Improve the prompt** — `@perotoolsbot prompt: <what to change>` rewrites review criteria and opens a pull request with the result. Nothing lands without a human merging that PR, and the bot's token needs write access to the target repository (it already has it for ToolsWorkflow). The command picks the target, and the colon is optional in either form (`:` and `：` both work):
   - `@perotoolsbot prompt: ...` and `@perotoolsbot prompt(this): ...` — the reviewed repository's own criteria file (`PROJECT_PROMPT_PATH`, written fresh if it does not exist yet). The PR is opened against that repository, so a project's feedback cannot change how other projects are reviewed.
   - `@perotoolsbot prompt(base): ...` — the shared prompt in ToolsWorkflow, the single reusable source of the review prompt. The PR is opened against ToolsWorkflow.
@@ -122,6 +132,8 @@ Comments on non-PR issues, bot comments, and comments that address neither the b
 - **Review request** — `@perotoolsbot review` starts a review without consulting the intent classifier, so a repository that only ever reviews on demand cannot have its request read as something else. The word must be `review` right after the mention, and whatever follows becomes a note: `@perotoolsbot review this PR for me.` and `@perotoolsbot review: 关注并发` are both the command. Any other way of asking (`@perotoolsbot 帮忙看下`) still goes through the classifier.
 
   A review started this way runs **exactly what an automatic one runs** — the clone, the Unity/.NET build and test gates, and ReSharper — before the model sees anything, so a broken build cannot be approved just because nobody pushed. The one difference is scope: it covers the whole pull request, not the latest push.
+
+- **Rebuild** — `@perotoolsbot rebuild` runs the same gates and nothing else: clone, classify, Unity/.NET build and test, ReSharper. It answers "does it compile now?" without paying for a review, and it cannot approve — only a review's verdict does that. Compile errors still land as inline comments, and one comment reports what ran.
 
 Replying requires the GitHub App to have **`Issues: Read and write`** permission (issue comments use the Issues API, which is separate from `Pull requests`).
 
