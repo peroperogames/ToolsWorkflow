@@ -221,6 +221,8 @@ Two things that do not work, and why:
 
 When the CLI cannot be found the log names every path that was checked, rather than only saying it was not on `PATH` — a binary that is installed and merely unreadable by the runner's user looks identical otherwise. The CLI must be executable by the user the runner runs as, and so must the editor that the CLI resolves (a Hub under `/root` is not visible to a runner running as anyone else).
 
+The action also normalises `XDG_RUNTIME_DIR` before running: a CI service account has no login session, so it is either unset or inherited from whoever started the runner — another user's directory — and the CLI's auth broker needs one it can create a socket in. Getting that wrong surfaces much later as a licence failure, so it is fixed here rather than left to each runner's configuration.
+
 ### Scoped registries
 
 Every per-PR Unity project is pointed at the organization's package feeds, so a package under review can resolve dependencies (UniTask, Nifty, NuGet-for-Unity, …) that are not in the Unity registry — without them the build fails on a package Unity simply cannot find:

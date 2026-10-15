@@ -107,4 +107,16 @@ runs:
         UNITY_SYNC_METHOD: ${{ inputs.unity-sync-method }}
         INSPECT_DOTNET_SDK: ${{ inputs.resharper-dotnet-sdk }}
         INSPECT_BUILD: ${{ inputs.resharper-build }}
-      run: python3 "$GITHUB_ACTION_PATH/main.py"
+      run: |
+        # A CI service account has no login session, so XDG_RUNTIME_DIR is either
+        # unset or — worse — inherited from whoever started the runner, which is
+        # another user's directory. The Unity CLI's auth broker needs one it can
+        # create a socket in and refuses to serve otherwise, which shows up much
+        # later as a licence failure. Point it at this user's own directory, or
+        # drop it rather than hand over someone else's.
+        if [ -d "/run/user/$(id -u)" ]; then
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+        else
+          unset XDG_RUNTIME_DIR
+        fi
+        python3 "$GITHUB_ACTION_PATH/main.py"
