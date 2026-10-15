@@ -16,6 +16,7 @@ both are inspected and their findings de-duplicated.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -56,6 +57,62 @@ SDK_TROUBLE_MARKERS = (
 
 def _env_bool(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# Where `jb` ends up when it is not on PATH: it is a .NET global tool, so its own
+# installer puts it in ~/.dotnet/tools. Same story as the Unity CLI — a login
+# shell has that on its PATH and a runner's service process usually does not, so
+# the tool is installed, working from a terminal, and invisible to a job.
+JB_FALLBACK_DIRS = ("~/.dotnet/tools", "~/.local/bin", "/usr/local/bin")
+
+_JB: Optional[str] = None
+_JB_RESOLVED = False
+
+
+def inspectcode_binary() -> Optional[str]:
+    """The ``jb`` executable, or None when it is not installed.
+
+    Resolved once per run and reported once, as a fact rather than a warning.
+    """
+    global _JB, _JB_RESOLVED
+    if not _JB_RESOLVED:
+        _JB = _resolve_inspectcode()
+        _JB_RESOLVED = True
+    return _JB
+
+
+def _resolve_inspectcode() -> Optional[str]:
+    configured = os.environ.get("INSPECT_JB", "").strip()
+    if configured:
+        found = shutil.which(configured) or (configured if os.path.exists(configured) else None)
+        if found:
+            log(f"ReSharper CLI: {found}")
+            return found
+        log(f"INSPECT_JB set but not found: {configured}")
+        return None
+
+    found = shutil.which("jb")
+    if found:
+        log(f"ReSharper CLI: {found}")
+        return found
+
+    names = ("jb.exe", "jb") if os.name == "nt" else ("jb",)
+    tried: List[str] = []
+    for directory in JB_FALLBACK_DIRS:
+        for name in names:
+            candidate = Path(os.path.expanduser(directory)) / name
+            tried.append(str(candidate))
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                log(f"ReSharper CLI: {candidate} (in {directory}; not on PATH here)")
+                return str(candidate)
+
+    log(
+        "The ReSharper CLI ('jb') was not found, so there is no static analysis. "
+        "Checked PATH and: " + ", ".join(tried) + ". Install it with "
+        "`dotnet tool install -g JetBrains.ReSharper.GlobalTools`, or set "
+        "INSPECT_JB to its path."
+    )
+    return None
 
 
 def inspect_args() -> List[str]:
@@ -103,7 +160,10 @@ def run_inspectcode(target: str, workdir: str, report: Path, timeout: int = 1200
     solution and inside the PR's own directory, so two reviews running at the
     same time cannot overwrite each other's results.
     """
-    cmd = ["jb", "inspectcode", target, f"--output={report}", "--format=Xml", *inspect_args()]
+    binary = inspectcode_binary()
+    if not binary:
+        return False
+    cmd = [binary, "inspectcode", target, f"--output={report}", "--format=Xml", *inspect_args()]
 
     log(f"Running ReSharper inspectcode on {Path(target).name} ...")
     try:
@@ -115,7 +175,7 @@ def run_inspectcode(target: str, workdir: str, report: Path, timeout: int = 1200
             text=True,
         )
     except FileNotFoundError:
-        log("ReSharper 'jb' tool not found on PATH; skipping static analysis.")
+        log(f"ReSharper CLI at {binary} could not be executed; skipping static analysis.")
         return False
     except subprocess.TimeoutExpired:
         log(f"inspectcode timed out after {timeout}s; skipping static analysis.")

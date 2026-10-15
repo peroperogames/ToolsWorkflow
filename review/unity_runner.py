@@ -758,6 +758,30 @@ def package_projects(project: str, package_root: str) -> List[str]:
     return found
 
 
+def clear_generated_projects(project: str) -> int:
+    """Remove the project files Unity generated on an earlier run.
+
+    They are regenerated below, and their absence is what makes "did this method
+    write anything?" a real question: a solution left over from a previous run
+    satisfies the check even when the method that was supposed to regenerate it
+    did nothing at all, and the analysis then runs against a stale model — one
+    that does not know about files this pull request added.
+    """
+    removed = 0
+    try:
+        stale = [*Path(project).glob("*.sln"), *Path(project).glob("*.csproj")]
+    except OSError as exc:
+        log(f"Could not look for generated project files in {project}: {exc}")
+        return 0
+    for path in stale:
+        try:
+            path.unlink()
+            removed += 1
+        except OSError as exc:
+            log(f"Could not remove the stale {path.name}: {exc}")
+    return removed
+
+
 def generate_and_build(
     cli: str, project: str, log_file: Path
 ) -> Tuple[bool, bool, List[Dict[str, Any]], Optional[str]]:
@@ -772,6 +796,9 @@ def generate_and_build(
     """
     sync_method = os.environ.get("UNITY_SYNC_METHOD", "").strip()
     methods = [sync_method] if sync_method else list(DEFAULT_SYNC_METHODS)
+    removed = clear_generated_projects(project)
+    if removed:
+        log(f"Cleared {removed} project file(s) from the previous run before regenerating.")
     rc, text = -1, ""
     sln = None
     for index, method in enumerate(methods, start=1):

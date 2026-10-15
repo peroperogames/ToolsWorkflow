@@ -71,6 +71,10 @@ inputs:
     description: 'Optional -executeMethod used to regenerate project files (default: UnityEditor.SyncVS.SyncSolution).'
     required: false
     default: ''
+  resharper-cli:
+    description: 'Path or name of the jb executable. Empty looks for ''jb'' on PATH and in ~/.dotnet/tools, ~/.local/bin and /usr/local/bin; static analysis self-skips when it cannot be found.'
+    required: false
+    default: ''
   resharper-dotnet-sdk:
     description: 'Pin the .NET SDK whose MSBuild jb inspectcode uses (e.g. 10.0.300). Empty auto-detects, which picks the newest installed SDK and fails when that one cannot build the solution.'
     required: false
@@ -105,6 +109,7 @@ runs:
         UNITY_EDITOR_VERSION: ${{ inputs.unity-editor-version }}
         UNITY_TEMPLATE: ${{ inputs.unity-template }}
         UNITY_SYNC_METHOD: ${{ inputs.unity-sync-method }}
+        INSPECT_JB: ${{ inputs.resharper-cli }}
         INSPECT_DOTNET_SDK: ${{ inputs.resharper-dotnet-sdk }}
         INSPECT_BUILD: ${{ inputs.resharper-build }}
       run: |

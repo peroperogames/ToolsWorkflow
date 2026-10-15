@@ -82,6 +82,11 @@ on:
         required: false
         type: string
         default: ''
+      resharper-cli:
+        description: 'Path or name of the jb executable. Empty looks for ''jb'' on PATH and in ~/.dotnet/tools, ~/.local/bin and /usr/local/bin; static analysis self-skips when it cannot be found.'
+        required: false
+        type: string
+        default: ''
       resharper-dotnet-sdk:
         description: 'Pin the .NET SDK whose MSBuild jb inspectcode uses (e.g. 10.0.300). Empty auto-detects, which picks the newest installed SDK and fails when that one cannot build the solution.'
         required: false
@@ -132,5 +137,6 @@ jobs:
           unity-editor-version: ${{ inputs.unity-editor-version }}
           unity-template: ${{ inputs.unity-template }}
           unity-sync-method: ${{ inputs.unity-sync-method }}
+          resharper-cli: ${{ inputs.resharper-cli }}
           resharper-dotnet-sdk: ${{ inputs.resharper-dotnet-sdk }}
           resharper-build: ${{ inputs.resharper-build }}
