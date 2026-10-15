@@ -135,6 +135,15 @@ def log(message: str) -> None:
     print(message, file=sys.stderr)
 
 
+def _sample(paths: Sequence[str], limit: int = 6) -> str:
+    """A few names and a count, so a long list stays one readable line."""
+    names = [Path(p).name or "?" for p in paths]
+    if not names:
+        return "(none)"
+    shown = ", ".join(names[:limit])
+    return shown if len(names) <= limit else f"{shown} (+{len(names) - limit} more)"
+
+
 def run_inspectcode(target: str, workdir: str, report: Path, timeout: int = 1200) -> bool:
     """Run ``jb inspectcode`` over ``target``, writing ``report``.
 
@@ -347,6 +356,19 @@ def analyze(
             log(f"ReSharper: {duplicates} duplicate finding(s) merged.")
         kept = filter_to_changes(issues, changed_lines)
         log(f"ReSharper: {len(issues)} issue(s) total, {len(kept)} on changed lines.")
+        if issues and not kept:
+            # Nothing landed on a changed line. Usually that is ordinary — the
+            # pull request touched a file the findings are not in — and it is
+            # also what a path mismatch looks like, where the report's paths
+            # never line up with the diff's and no finding can ever be posted.
+            # The two are indistinguishable from the count alone, so say where
+            # each side actually was.
+            log(
+                "ReSharper: findings are in "
+                + _sample(sorted({str(i.get("file") or "?") for i in issues}))
+                + "; changed lines are in "
+                + _sample(sorted(changed_lines))
+            )
         return Analysis(issues=kept, targets=targets, reports=reports, duplicates=duplicates)
     except Exception as exc:  # noqa: BLE001 - never break the review
         log(f"Static analysis failed, continuing without it: {exc}")
