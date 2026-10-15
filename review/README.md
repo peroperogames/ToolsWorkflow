@@ -119,9 +119,33 @@ Comments on non-PR issues, bot comments, and comments that address neither the b
 
 - **Code changes** — e.g. `@perotoolsbot fix src/foo.py`. The bot reads the current file contents, generates code changes, and submits a PR to the current repository's feature branch.
 
-- **Review request** — e.g. `@perotoolsbot review this PR for me.`. Runs a full review on demand and posts it.
+- **Review request** — `@perotoolsbot review` starts a review without consulting the intent classifier, so a repository that only ever reviews on demand cannot have its request read as something else. The word must be `review` right after the mention, and whatever follows becomes a note: `@perotoolsbot review this PR for me.` and `@perotoolsbot review: 关注并发` are both the command. Any other way of asking (`@perotoolsbot 帮忙看下`) still goes through the classifier.
+
+  A review started this way runs **exactly what an automatic one runs** — the clone, the Unity/.NET build and test gates, and ReSharper — before the model sees anything, so a broken build cannot be approved just because nobody pushed. The one difference is scope: it covers the whole pull request, not the latest push.
 
 Replying requires the GitHub App to have **`Issues: Read and write`** permission (issue comments use the Issues API, which is separate from `Pull requests`).
+
+### Reviewing only on demand
+
+A repository can skip `pull_request` entirely and review only when asked. Wire the caller to `issue_comment` and nothing else:
+
+```yaml
+on:
+  issue_comment:
+    types: [created]
+```
+
+Every review behaviour is then unchanged — the on-demand path shares the same session, the same gates and the same approval rules — except that nothing happens until someone writes `@perotoolsbot review`.
+
+**Do also subscribe to `pull_request: [closed]`.** Closing is what deletes a PR's directory (its session, its Unity project and the clone), and nothing else can trigger that cleanup — a repository that never hears about the close accumulates one directory per pull request on the runner forever:
+
+```yaml
+on:
+  pull_request:
+    types: [closed]
+  issue_comment:
+    types: [created]
+```
 
 ## Review pipeline
 

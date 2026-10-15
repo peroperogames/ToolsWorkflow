@@ -57,7 +57,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.23"
+VERSION = "2026-10-14.unity.24"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -1532,6 +1532,34 @@ def handle_improve_prompt(
     return 0
 
 
+def parse_review_command(body: str, bot_login: str) -> Optional[str]:
+    """Parse an explicit ``review`` command into its note ("" when there is none).
+
+    ``@bot review`` and ``@bot review: <what to focus on>`` start a review
+    without consulting the intent classifier. That matters for a repository that
+    only reviews on demand: there, a misread @-mention is not a slightly wrong
+    answer, it is a review that never happened. The classifier still handles
+    every other way of asking.
+
+    Returns ``None`` when the comment is not a review command. ``review`` must be
+    a word of its own, so "reviews are noisy" is not a command.
+    """
+    if not body or not bot_login:
+        return None
+    names = {bot_login}
+    if bot_login.endswith("[bot]"):
+        names.add(bot_login[: -len("[bot]")])
+    for name in sorted((n for n in names if n), key=len, reverse=True):
+        pattern = re.compile(
+            r"@" + re.escape(name) + r"\s+review\b\s*[:：]?\s*(?P<note>.*)",
+            re.IGNORECASE | re.DOTALL,
+        )
+        match = pattern.search(body)
+        if match:
+            return (match.group("note") or "").strip()
+    return None
+
+
 def _parse_json_response(text: str) -> Dict[str, Any]:
     """Strip optional markdown fences and parse JSON."""
     text = text.strip()
@@ -1906,16 +1934,29 @@ def handle_review_request(
     ``session_records`` is the PR's session so far and ``comment_records`` the
     comments posted since the last run; the request itself becomes a turn, and
     a session that has never seen the PR is bootstrapped with the full diff.
+
+    The repository's build/test gates and the static analysis run here too, so a
+    repository that only ever reviews on demand gets the same protection as one
+    that reviews on every push — without them a broken build could be approved.
     """
     files = gh.list_files(owner, repo, number)
     if not files:
         gh.post_comment(owner, repo, number, f"@{author} 没有找到变更文件，无法评审。")
         return 0
 
+    log(f"Review requested via @-mention ({len(files)} files, ~{len(conversation)} chars context)...")
+    checks = run_review_checks(gh, owner, repo, number, pr, files, config)
+
     head_sha = pr.get("head", {}).get("sha", "")
     turns = list(comment_records)
     if not session.has_bootstrap(session_records):
-        turns.append(turn_record(build_diff_text(pr, files), "open", head_sha))
+        turns.append(
+            turn_record(
+                build_diff_text(pr, files) + context_suffix(checks.extra_context),
+                "open",
+                head_sha,
+            )
+        )
     turns.append(
         turn_record(
             f"## Review Request\n\n**{author}** asked for a review:\n\n{body}\n\n"
@@ -1925,9 +1966,9 @@ def handle_review_request(
         )
     )
 
-    log(f"Review requested via @-mention ({len(files)} files, ~{len(conversation)} chars context)...")
     ctx = run_agent_review(
-        ai, gh, owner, repo, number, pr, files, system_prompt, session_records, turns, config
+        ai, gh, owner, repo, number, pr, files, system_prompt, session_records, turns,
+        config, block_approve=checks.blocked,
     )
     if ctx is not None:
         return 0
@@ -2167,6 +2208,91 @@ REPLY_TOOLS.append(
         },
     }
 )
+
+
+@dataclass
+class ReviewChecks:
+    """What the repository-backed steps produced for one review.
+
+    Shared by both ways a review starts — an event, or someone asking for one —
+    so that neither can quietly do less than the other.
+    """
+
+    clone_dir: Optional[str] = None
+    kind: Optional["repo_kind.Kind"] = None
+    unity: Optional["unity_runner.UnityResult"] = None
+    dotnet: Optional["dotnet_runner.DotnetResult"] = None
+    blocked: bool = False
+    extra_context: str = ""
+    static_posted: int = 0
+
+
+def run_review_checks(
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    pr: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    config: "Config",
+    static_files: Optional[List[Dict[str, Any]]] = None,
+) -> ReviewChecks:
+    """Clone the pull request's head and run every gate the repository has.
+
+    The Unity build/test step, the .NET one and ReSharper all read the same
+    clone, and classifying it is what decides which of them has anything to do.
+    Commits and test results are posted here, before the model reviews, so the
+    review can be told about them and cannot approve past them.
+
+    ``static_files`` narrows what the static analysis reports on — a later push
+    passes its own diff, so a finding from an earlier push is not raised again.
+    """
+    checks = ReviewChecks()
+
+    # The head is cloned once, whatever the repository turns out to be: nothing
+    # has to be guessed about it before it is on disk.
+    staging = pr_workspace.clone_pr_head(
+        owner, repo, number, pr.get("head", {}).get("sha", ""), config.github_token
+    )
+    kind = repo_kind.detect(staging) if staging else repo_kind.Kind(repo_kind.KIND_OTHER)
+    checks.kind = kind
+    log(f"Repository kind: {kind.describe()}.")
+
+    # The Unity project directory is the PR's directory, and the CLI will not lay
+    # one out where a path already exists — so for a package the project is
+    # reserved first and only then is the clone renamed into it.
+    if kind.is_package:
+        unity_runner.reserve_project(owner, repo, number)
+    clone_dir = pr_workspace.place_clone(owner, repo, number)
+    checks.clone_dir = clone_dir
+
+    # A UPM package is built and tested in this PR's own Unity project; a
+    # repository's own solution is built (and tested, when it has tests) with the
+    # .NET SDK. Compile errors / test failures post as comments and block
+    # approval.
+    checks.unity = run_unity_checks(
+        gh, owner, repo, number, pr, files, config, clone_dir, kind
+    )
+    checks.dotnet = run_dotnet_checks(
+        gh, owner, repo, number, pr, files, config, clone_dir, kind
+    )
+    checks.blocked = (checks.unity.ran and not checks.unity.ok) or (
+        checks.dotnet.ran and not checks.dotnet.ok
+    )
+    status = "\n".join(s for s in (checks.unity.summary(), checks.dotnet.summary()) if s)
+    if status:
+        checks.extra_context = f"## 构建与测试状态\n\n{status}"
+
+    # Deterministic static analysis (ReSharper + the repo's .editorconfig) runs
+    # alongside the AI review, over every solution that covers the clone; its
+    # findings post as their own inline comments.
+    checks.static_posted = run_static_analysis(
+        gh, owner, repo, number, pr, static_files or files, config,
+        clone_dir=clone_dir, kind=kind, unity=checks.unity,
+    )
+    if checks.static_posted:
+        log(f"Static analysis posted {checks.static_posted} inline comment(s).")
+    return checks
 
 
 @dataclass
@@ -3325,8 +3451,15 @@ def main() -> int:
                 ai, gh, pr, feedback, author, owner, repo, number, target, config
             )
 
-        # Classify intent and route.
-        intent = classify_intent(ai, body)
+        # `review` is deterministic too, and for the same reason: a repository
+        # that only reviews on demand cannot afford the classifier reading a
+        # request to review as something else.
+        note = parse_review_command(body, bot_login)
+        if note is not None:
+            log("Review command: starting a review without the classifier.")
+            intent = "review"
+        else:
+            intent = classify_intent(ai, body)
         if intent == "code_change":
             return handle_code_change(
                 ai, gh, pr, body, author, owner, repo, number, conversation, bot_login
@@ -3443,35 +3576,10 @@ def main() -> int:
     if conversation:
         log(f"Using {len(entries)} prior review/comment entry(ies) as context.")
 
-    # The pull request's head is cloned once, whatever the repository turns out
-    # to be: the Unity step, the .NET gate and the static analysis all read it
-    # from the same place, and nothing has to be guessed about the repository
-    # before it is on disk. Classifying the clone is what decides which of those
-    # steps has anything to do.
-    staging = pr_workspace.clone_pr_head(
-        owner, repo, number, pr.get("head", {}).get("sha", ""), config.github_token
-    )
-    kind = repo_kind.detect(staging) if staging else repo_kind.Kind(repo_kind.KIND_OTHER)
-    log(f"Repository kind: {kind.describe()}.")
-
-    # The Unity project directory is the PR's directory, and the CLI will not lay
-    # one out where a path already exists — so for a package the project is
-    # reserved first and only then is the clone renamed into it.
-    if kind.is_package:
-        unity_runner.reserve_project(owner, repo, number)
-    clone_dir = pr_workspace.place_clone(owner, repo, number)
-
-    # A UPM package is built and tested in this PR's own Unity project; a pure C#
-    # repository is built (and tested, when it has tests) with the .NET SDK.
-    # Compile errors / test failures post as comments and block approval.
-    unity = run_unity_checks(gh, owner, repo, number, pr, files, config, clone_dir, kind)
-    dotnet = run_dotnet_checks(gh, owner, repo, number, pr, files, config, clone_dir, kind)
-    build_blocked = (unity.ran and not unity.ok) or (dotnet.ran and not dotnet.ok)
-    extra_context = ""
-    status = "\n".join(s for s in (unity.summary(), dotnet.summary()) if s)
-    if status:
-        extra_context = f"## 构建与测试状态\n\n{status}"
-
+    # The pull request's head is cloned once and every gate it has is run; the
+    # same call is made when someone asks for a review by hand, so neither route
+    # can quietly do less than the other.
+    #
     # On a later push, the diff of that push alone is what the review judges —
     # and what the static analysis reports on, so a finding raised two pushes ago
     # is not raised again just because its line is still in the pull request.
@@ -3485,16 +3593,12 @@ def main() -> int:
             except Exception as exc:  # noqa: BLE001 - fall back to the whole PR
                 log(f"Warning: could not diff the push ({before[:7]}..{after[:7]}): {exc}")
 
-    # Deterministic static analysis (ReSharper + the repo's .editorconfig) runs
-    # alongside the AI review, over every solution that covers the clone; its
-    # findings post as their own inline comments.
-    static_posted = run_static_analysis(
-        gh, owner, repo, number, pr,
-        push_files if push_files else files, config,
-        clone_dir=clone_dir, kind=kind, unity=unity,
+    checks = run_review_checks(
+        gh, owner, repo, number, pr, files, config,
+        static_files=push_files if push_files else None,
     )
-    if static_posted:
-        log(f"Static analysis posted {static_posted} inline comment(s).")
+    build_blocked = checks.blocked
+    extra_context = checks.extra_context
 
     # Preferred path: the model drives the review with tools. The session
     # supplies the conversation and receives this run's turns and every loop
