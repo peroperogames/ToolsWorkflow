@@ -504,6 +504,9 @@ def run_unity(
     except OSError as exc:
         log(f"Could not create the log directory {log_file.parent}: {exc}")
 
+    # `-nographics` is not optional on a headless runner, and the CLI does not
+    # add it: without it the Editor dies with "Error opening default X display"
+    # before it compiles anything. The CLI accepts it after `--` — unlike -quit.
     cmd = [
         cli, "run", project,
         "--log-file", str(log_file),
@@ -511,6 +514,7 @@ def run_unity(
         "--timeout", str(timeout),
         "--non-interactive",
         "--",
+        "-nographics",
         *extra_args,
     ]
     rc, output = -1, ""
@@ -543,6 +547,11 @@ def run_unity_tests(
     the editor quits before the test run writes anything, so the step looks like
     a pass with no tests. ``unity test`` exists for exactly this and writes the
     report itself.
+
+    Unlike ``unity run``, this command takes no arguments after ``--``: passing
+    any — even ``-nographics`` — leaves it exiting 0 with no report at all, which
+    would read as "no tests, no failures". So it is invoked exactly as it is and
+    the missing report is treated as a failed run rather than a clean one.
     """
     if results.exists():
         results.unlink()
