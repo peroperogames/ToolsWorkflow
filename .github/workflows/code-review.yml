@@ -98,6 +98,11 @@ on:
 jobs:
   review:
     runs-on: [build-server, unitypkg-share]
+    # The one ceiling the run cannot escape. A composite action's steps may not
+    # set `timeout-minutes` of their own, and each stage bounds its own
+    # subprocesses, so this bounds the job: 360 minutes is GitHub's default and
+    # a Unity build that wedges should not get to use it.
+    timeout-minutes: 150
     steps:
       - name: Generate token via GitHub App
         id: generate_token

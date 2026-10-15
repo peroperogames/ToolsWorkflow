@@ -82,20 +82,23 @@ runs:
     # No pip install here: the runner is expected to carry Python and the
     # dependencies already (see the README's Requirements section).
     #
-    # The pipeline is three steps, one process each, so that the runner — not
-    # the job's six-hour ceiling — is what kills a build that hangs. They run in
-    # order and the order is a constraint: `review` settles the open threads and
+    # The pipeline is three steps, one process each, and the order is a
+    # constraint rather than a preference: `review` settles the open threads and
     # approves, and nothing may post a finding after that.
+    #
+    # There is no `timeout-minutes` here. A composite action's steps do not
+    # accept it — the runner rejects the whole manifest with "Unexpected value
+    # 'timeout-minutes'" and no step runs at all — so the ceiling is the job's,
+    # set by the calling workflow, and everything below it is bounded by the
+    # deadlines the stages enforce on their own subprocesses.
     #
     # None of them is `continue-on-error`. A *finding* — a broken build, failing
     # tests, an analyzer that cannot run — is posted as a comment and still
     # exits 0, so the steps that follow do run. A *crash* stops the run, which is
-    # what it does today and what it should keep doing: turning that into a green
-    # job whose review silently had no build results is the one outcome worth
-    # failing for.
+    # what it should keep doing: turning that into a green job whose review
+    # silently had no build results is the one outcome worth failing for.
     - name: Build and test the pull request
       shell: bash
-      timeout-minutes: 90
       env:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         DRY_RUN: ${{ inputs.dry-run }}
@@ -119,7 +122,6 @@ runs:
 
     - name: Run the static analysis
       shell: bash
-      timeout-minutes: 30
       env:
         # No model key here on purpose: this stage runs the repository's own
         # .editorconfig and compilers, and never needs to talk to the model.
@@ -132,7 +134,6 @@ runs:
 
     - name: Review and settle the threads
       shell: bash
-      timeout-minutes: 120
       env:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         OPENAI_API_KEY: ${{ inputs.openai-api-key }}
