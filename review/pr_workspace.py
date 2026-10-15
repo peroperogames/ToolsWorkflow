@@ -38,8 +38,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Iterator, Optional, Tuple
 
 # Holds everything about a PR that is not the Unity project itself.
 META_DIRNAME = ".ai-review"
@@ -138,6 +139,55 @@ def is_project(owner: str, repo: str, number: int) -> bool:
     same check the Editor itself uses.
     """
     return (pr_dir(owner, repo, number) / "ProjectSettings" / "ProjectVersion.txt").is_file()
+
+
+def stash_dir(owner: str, repo: str, number: int) -> Path:
+    """Where the PR directory is parked while a Unity project is laid out."""
+    return owner_dir(owner) / f".{pr_name(repo, number)}.stash"
+
+
+@contextmanager
+def room_for_project(owner: str, repo: str, number: int) -> Iterator[None]:
+    """Free the PR directory so the Unity CLI can lay a project out in it.
+
+    ``unity projects create`` refuses a path that already exists, and the PR
+    directory can exist without being a project: a run that skipped or failed the
+    Unity step still put the session and the clone there. Waiting for it to
+    become a project is not an option — it never will, and the pull request would
+    be stuck without a Unity step forever.
+
+    So the directory is moved aside for the duration and merged back afterwards,
+    which is a rename within one parent directory. Whatever the new project
+    already has wins, and everything the PR directory had (the session, the
+    clone) is moved back into it. If the project is never created, the previous
+    state is restored unchanged and the next run tries again.
+    """
+    project = pr_dir(owner, repo, number)
+    stash = stash_dir(owner, repo, number)
+    moved = False
+    if project.exists():
+        shutil.rmtree(stash, ignore_errors=True)
+        try:
+            shutil.move(str(project), str(stash))
+            moved = True
+        except OSError as exc:
+            log(f"Could not make room for the Unity project: {exc}")
+
+    try:
+        yield
+    finally:
+        # Never `return` from here: it would swallow an exception raised in the
+        # body, which is exactly the failure this has to let through.
+        if moved:
+            try:
+                project.mkdir(parents=True, exist_ok=True)
+                for entry in stash.iterdir():
+                    target = project / entry.name
+                    if not target.exists():
+                        shutil.move(str(entry), str(target))
+            except OSError as exc:
+                log(f"Could not move the PR directory's contents back: {exc}")
+            shutil.rmtree(stash, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -255,6 +305,7 @@ def stale_dirs(owner: str, repo: str, number: int):
     yield root / f"{key}.json"
     yield root / "ai-review-pkgs" / key
     yield staging_dir(owner, repo, number)
+    yield stash_dir(owner, repo, number)
 
 
 def delete(owner: str, repo: str, number: int) -> None:

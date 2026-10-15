@@ -167,8 +167,13 @@ def ensure_project(owner: str, repo: str, number: int, cli: str) -> Optional[str
         # `new` never links Unity Cloud; `create` has to be told not to.
         cmd.append("--no-cloud")
 
+    # The PR's directory can already exist without being a project — an earlier
+    # run that skipped or failed this step put the session and the clone there —
+    # and the CLI refuses to create a project where a path exists. Move it aside
+    # for the duration; the contents come back afterwards either way.
     try:
-        proc = subprocess.run(cmd, timeout=UNITY_TIMEOUT, capture_output=True, text=True)
+        with pr_workspace.room_for_project(owner, repo, number):
+            proc = subprocess.run(cmd, timeout=UNITY_TIMEOUT, capture_output=True, text=True)
     except (subprocess.TimeoutExpired, OSError) as exc:
         log(f"Could not create the Unity project: {exc}")
         return None
