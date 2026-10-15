@@ -53,6 +53,19 @@ EDITOR_FAILURES = (
     "is not installed",
 )
 
+# The ways Unity can be asked to write its project files. No single one exists
+# everywhere: UnityEditor.SyncVS is the Visual Studio integration and quietly
+# does nothing where Visual Studio is not a thing — a headless Linux runner —
+# while the Rider package's entry point is a direct call into its project
+# generator and ships with the template on every platform. They are tried in
+# turn until files actually appear, because a zero exit code is not the same as
+# having generated anything, which is exactly how a silent no-op was mistaken
+# for success.
+DEFAULT_SYNC_METHODS = (
+    "UnityEditor.SyncVS.SyncSolution",
+    "Packages.Rider.Editor.RiderScriptEditor.SyncSolution",
+)
+
 # The template a fresh per-PR project is created from, and the editor it is
 # created for. Both are what `unity projects create` takes.
 DEFAULT_EDITOR_VERSION = "2022.3.62f3"
@@ -741,18 +754,21 @@ def generate_and_build(
     code does not compile.
     """
     sync_method = os.environ.get("UNITY_SYNC_METHOD", "").strip()
-    methods = [sync_method] if sync_method else [
-        "UnityEditor.SyncVS.SyncSolution",  # built-in, regenerates sln/csproj
-    ]
+    methods = [sync_method] if sync_method else list(DEFAULT_SYNC_METHODS)
     rc, text = -1, ""
-    for method in methods:
+    sln = None
+    for index, method in enumerate(methods, start=1):
         log(f"Unity: generating project files via {method} ...")
         rc, text = run_unity(cli, project, ["-executeMethod", method], UNITY_TIMEOUT, log_file)
-        if rc == 0:
+        # Success is the files existing, not the exit code: the Visual Studio
+        # entry point exits 0 on a machine with no Visual Studio and writes
+        # nothing at all.
+        sln = find_solution(project)
+        if sln:
             break
+        if index < len(methods):
+            log(f"  {method} wrote no project files; trying the next one.")
 
-    errors = build_log.parse_compile_errors(text)
-    sln = find_solution(project)
     if sln:
         # Unity's solution has to be made acceptable to MSBuild before anything
         # else (ReSharper) can build it.
@@ -769,6 +785,8 @@ def generate_and_build(
         said = " ".join(text.split())[-800:]
         if said:
             log(f"Unity said: {said}")
+
+    errors = build_log.parse_compile_errors(text)
 
     if errors:
         log(f"Unity compile: {len(errors)} error(s).")
