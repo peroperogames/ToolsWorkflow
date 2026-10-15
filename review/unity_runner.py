@@ -34,6 +34,25 @@ import repo_kind
 
 UNITY_TIMEOUT = int(os.environ.get("UNITY_TIMEOUT", "1800"))  # 30 min default
 
+# What Unity says when it cannot run for a reason that is not the code's fault.
+# These are phrases, not the word "license": Unity's logs name its licensing
+# module in runs that are perfectly healthy, so matching on that reports a
+# licensing failure that never happened and hides the one that did.
+LICENSE_FAILURES = (
+    "no valid unity editor license",
+    "no valid unity license",
+    "failed to acquire license",
+    "license is not valid",
+    "licensing error",
+)
+EDITOR_FAILURES = (
+    "editor not found",
+    "no editor found",
+    "no installed editor",
+    "editor is not installed",
+    "is not installed",
+)
+
 # The template a fresh per-PR project is created from, and the editor it is
 # created for. Both are what `unity projects create` takes.
 DEFAULT_EDITOR_VERSION = "2022.3.62f3"
@@ -668,21 +687,26 @@ def generate_and_build(
         return True, False, errors, sln
     if rc == 0:
         return True, True, errors, sln
-    # Unity exited without compiling anything to report. Say which of the
-    # infrastructure reasons it was, because they are fixed in different places.
+    # Say which infrastructure reason it was, because they are fixed in different
+    # places — and always report what Unity actually said, so a wrong guess here
+    # costs a confused log line rather than the answer.
     lowered = text.lower()
-    if "licens" in lowered:
+    if any(marker in lowered for marker in LICENSE_FAILURES):
         log(
             "Unity has no valid license for the user the runner runs as; skipping "
             "the Unity step. Activate the editor for that user and re-run."
         )
-    elif "not installed" in lowered or "no editor" in lowered or "editor not found" in lowered:
+    elif any(marker in lowered for marker in EDITOR_FAILURES):
         log(
             "The editor this project needs is not installed for the user the runner "
             f"runs as ({editor_version()}); skipping the Unity step."
         )
     else:
         log(f"Unity exited {rc} without compile errors; skipping the Unity step.")
+    log(f"Editor log: {log_file}")
+    said = " ".join(text.split())[-800:]
+    if said:
+        log(f"Unity said: {said}")
     return False, False, errors, sln
 
 
