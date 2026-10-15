@@ -57,7 +57,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.24"
+VERSION = "2026-10-14.unity.25"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -782,9 +782,10 @@ def review_files(
 
 RESOLVE_DECIDER_PROMPT = (
     "Earlier review comments of yours on a pull request are listed below as "
-    "unresolved threads. The code below is the diff of the LATEST push only — "
-    "that is what changed since your review.\n"
-    "Decide which of those threads are now ADDRESSED by those changes and can be "
+    "unresolved threads. The code below is what to judge them against: the diff "
+    "of the latest push when a push triggered this review, the whole pull request "
+    "otherwise.\n"
+    "Decide which of those threads are now ADDRESSED by that code and can be "
     "marked resolved.\n"
     'Reply with ONLY a JSON object: {"resolved": ["<thread id>", ...]}\n'
     "Rules:\n"
@@ -1619,15 +1620,21 @@ def settle_threads_and_approve(
     repo: str,
     number: int,
     pr: Dict[str, Any],
-    files: List[Dict[str, Any]],
     conversation: str = "",
-    push_files: Optional[List[Dict[str, Any]]] = None,
+    diff_files: Optional[List[Dict[str, Any]]] = None,
     allow_approve: bool = True,
 ) -> None:
-    """Resolve the threads that are done with, then approve if none are left."""
+    """Resolve the threads that are done with, then approve if none are left.
+
+    Called after every review, not only after a push: a review is the bot looking
+    at the current state, so it is also the moment to retire what an earlier
+    round raised and the code has since dealt with. ``diff_files`` is what the
+    threads are judged against — the push's own diff when a push triggered this
+    run, the whole pull request otherwise.
+    """
     decide_resolved_threads(
-        ai, gh, owner, repo, number, pr, files, "perotoolsbot[bot]",
-        push_files=push_files, conversation=conversation,
+        ai, gh, owner, repo, number, pr, "perotoolsbot[bot]",
+        diff_files=diff_files, conversation=conversation,
     )
 
     if not allow_approve:
@@ -1689,14 +1696,13 @@ def decide_resolved_threads(
     repo: str,
     number: int,
     pr: Dict[str, Any],
-    files: List[Dict[str, Any]],
     bot_login: str,
-    push_files: Optional[List[Dict[str, Any]]] = None,
+    diff_files: Optional[List[Dict[str, Any]]] = None,
     conversation: str = "",
 ) -> int:
     """Resolve the review threads that have been settled.
 
-    A thread counts as settled when the latest push fixed it (``push_files``) or
+    A thread counts as settled when the code dealt with it (``diff_files``) or
     when the discussion concluded it (``conversation``) — a concern answered in
     the thread is resolved even if no code changed.
     """
@@ -1736,9 +1742,9 @@ def decide_resolved_threads(
         for c in candidates
     )
     context = "## Unresolved threads\n\n" + listing
-    if push_files is not None:
-        context += "\n\n## Changes in the latest push\n\n" + build_diff_text(
-            pr, push_files
+    if diff_files is not None:
+        context += "\n\n## Changes under review\n\n" + build_diff_text(
+            pr, diff_files
         )
     if conversation:
         context += "\n\n## Discussion so far\n\n" + conversation
@@ -1971,6 +1977,10 @@ def handle_review_request(
         config, block_approve=checks.blocked,
     )
     if ctx is not None:
+        settle_after_review(
+            ai, gh, owner, repo, number, pr, files, config, conversation,
+            not checks.blocked,
+        )
         return 0
 
     review_text, raw_comments, _general = perform_review(
@@ -2001,7 +2011,43 @@ def handle_review_request(
 
     gh.post_comment(owner, repo, number, f"@{author} 评审已发布。")
     log(f"Review posted on request ({event}).")
+    settle_after_review(
+        ai, gh, owner, repo, number, pr, files, config, conversation,
+        event == "APPROVE" and not checks.blocked,
+    )
     return 0
+
+
+def settle_after_review(
+    ai: AIClient,
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    pr: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    config: "Config",
+    conversation: str,
+    allow_approve: bool,
+) -> None:
+    """Retire what an earlier round raised, once a review has finished.
+
+    Every review is the bot looking at the current state of the pull request, so
+    every review is also the moment to resolve the threads the code has since
+    dealt with — not only the pushes it happens to be triggered by. A repository
+    that reviews on demand would otherwise never retire anything.
+
+    The threads are judged against the whole pull request here, because that is
+    what this run looked at.
+    """
+    if config.dry_run:
+        return
+    settle_threads_and_approve(
+        ai, gh, owner, repo, number, pr,
+        conversation=conversation,
+        diff_files=files,
+        allow_approve=allow_approve,
+    )
 
 
 def determine_event(review_text: str) -> str:
@@ -3544,10 +3590,11 @@ def main() -> int:
             log("Posted reply comment.")
 
         # A concern answered in the thread is settled even without a code change,
-        # so re-check the open threads and approve once nothing is left.
+        # so re-check the open threads and approve once nothing is left. No diff
+        # is passed: what settles a thread here is the discussion, not the code.
         if not config.dry_run:
             settle_threads_and_approve(
-                ai, gh, owner, repo, number, pr, [], conversation=conversation
+                ai, gh, owner, repo, number, pr, conversation=conversation
             )
         return 0
 
@@ -3612,12 +3659,15 @@ def main() -> int:
         block_approve=build_blocked,
     )
     if ctx is not None:
-        if incremental:
-            settle_threads_and_approve(
-                ai, gh, owner, repo, number, pr, files,
-                conversation=conversation,
-                allow_approve=not build_blocked,
-            )
+        # Every review retires what an earlier round raised and the code has
+        # since dealt with: a push is judged against its own diff, a review of
+        # the pull request's current state against the whole pull request.
+        settle_threads_and_approve(
+            ai, gh, owner, repo, number, pr,
+            conversation=conversation,
+            diff_files=push_files if push_files else files,
+            allow_approve=not build_blocked,
+        )
         return 0
 
     review_text, raw_comments, general = perform_review(
@@ -3662,13 +3712,12 @@ def main() -> int:
 
     # On a later push, retire the threads that push settled, then approve when
     # the review came back clean and nothing is left open.
-    if incremental:
-        settle_threads_and_approve(
-            ai, gh, owner, repo, number, pr, files,
-            conversation=conversation,
-            push_files=push_files,
-            allow_approve=(event == "APPROVE") and not build_blocked,
-        )
+    settle_threads_and_approve(
+        ai, gh, owner, repo, number, pr,
+        conversation=conversation,
+        diff_files=push_files if push_files else files,
+        allow_approve=(event == "APPROVE") and not build_blocked,
+    )
 
     return 0
 
