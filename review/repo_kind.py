@@ -131,6 +131,24 @@ class Kind:
     def has_solution(self) -> bool:
         return bool(self.solution)
 
+    def to_dict(self) -> dict:
+        """Plain data, so a classification can outlive the process that made it."""
+        return {
+            "name": self.name,
+            "package_name": self.package_name,
+            "package_root": self.package_root,
+            "solution": self.solution,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Kind":
+        return cls(
+            name=str(data.get("name") or ""),
+            package_name=str(data.get("package_name") or ""),
+            package_root=str(data.get("package_root") or ""),
+            solution=str(data.get("solution") or ""),
+        )
+
     def describe(self) -> str:
         if self.name == KIND_UNITY:
             return f"Unity package {self.package_name}"

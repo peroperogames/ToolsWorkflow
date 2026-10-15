@@ -89,8 +89,60 @@ runs:
   steps:
     # No pip install here: the runner is expected to carry Python and the
     # dependencies already (see the README's Requirements section).
-    - name: Run AI code review
+    #
+    # The pipeline is three steps, one process each, so that the runner — not
+    # the job's six-hour ceiling — is what kills a build that hangs. They run in
+    # order and the order is a constraint: `review` settles the open threads and
+    # approves, and nothing may post a finding after that.
+    #
+    # None of them is `continue-on-error`. A *finding* — a broken build, failing
+    # tests, an analyzer that cannot run — is posted as a comment and still
+    # exits 0, so the steps that follow do run. A *crash* stops the run, which is
+    # what it does today and what it should keep doing: turning that into a green
+    # job whose review silently had no build results is the one outcome worth
+    # failing for.
+    - name: Build and test the pull request
       shell: bash
+      timeout-minutes: 90
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        REVIEW_WORK_DIR: ${{ inputs.state-dir }}
+        UNITY_CLI: ${{ inputs.unity-cli }}
+        UNITY_EDITOR_VERSION: ${{ inputs.unity-editor-version }}
+        UNITY_TEMPLATE: ${{ inputs.unity-template }}
+        UNITY_SYNC_METHOD: ${{ inputs.unity-sync-method }}
+      run: |
+        # A CI service account has no login session, so XDG_RUNTIME_DIR is either
+        # unset or — worse — inherited from whoever started the runner, which is
+        # another user's directory. The Unity CLI's auth broker needs one it can
+        # create a socket in and refuses to serve otherwise, which shows up much
+        # later as a licence failure. Point it at this user's own directory, or
+        # drop it rather than hand over someone else's.
+        if [ -d "/run/user/$(id -u)" ]; then
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+        else
+          unset XDG_RUNTIME_DIR
+        fi
+        python3 "$GITHUB_ACTION_PATH/main.py" checks
+
+    - name: Run the static analysis
+      shell: bash
+      timeout-minutes: 30
+      env:
+        # No model key here on purpose: this stage runs the repository's own
+        # .editorconfig and compilers, and never needs to talk to the model.
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        REVIEW_WORK_DIR: ${{ inputs.state-dir }}
+        INSPECT_JB: ${{ inputs.resharper-cli }}
+        INSPECT_DOTNET_SDK: ${{ inputs.resharper-dotnet-sdk }}
+        INSPECT_BUILD: ${{ inputs.resharper-build }}
+      run: python3 "$GITHUB_ACTION_PATH/main.py" static
+
+    - name: Review and settle the threads
+      shell: bash
+      timeout-minutes: 120
       env:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         OPENAI_API_KEY: ${{ inputs.openai-api-key }}
@@ -105,23 +157,4 @@ runs:
         DRY_RUN: ${{ inputs.dry-run }}
         REVIEW_WORK_DIR: ${{ inputs.state-dir }}
         PROJECT_PROMPT_PATH: ${{ inputs.project-prompt-path }}
-        UNITY_CLI: ${{ inputs.unity-cli }}
-        UNITY_EDITOR_VERSION: ${{ inputs.unity-editor-version }}
-        UNITY_TEMPLATE: ${{ inputs.unity-template }}
-        UNITY_SYNC_METHOD: ${{ inputs.unity-sync-method }}
-        INSPECT_JB: ${{ inputs.resharper-cli }}
-        INSPECT_DOTNET_SDK: ${{ inputs.resharper-dotnet-sdk }}
-        INSPECT_BUILD: ${{ inputs.resharper-build }}
-      run: |
-        # A CI service account has no login session, so XDG_RUNTIME_DIR is either
-        # unset or — worse — inherited from whoever started the runner, which is
-        # another user's directory. The Unity CLI's auth broker needs one it can
-        # create a socket in and refuses to serve otherwise, which shows up much
-        # later as a licence failure. Point it at this user's own directory, or
-        # drop it rather than hand over someone else's.
-        if [ -d "/run/user/$(id -u)" ]; then
-          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-        else
-          unset XDG_RUNTIME_DIR
-        fi
-        python3 "$GITHUB_ACTION_PATH/main.py"
+      run: python3 "$GITHUB_ACTION_PATH/main.py" review

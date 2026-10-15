@@ -105,6 +105,17 @@ def lock_path(owner: str, repo: str, number: int) -> Path:
     return meta_dir(owner, repo, number) / ".lock"
 
 
+def stage_state_path(owner: str, repo: str, number: int, run: str = "") -> Path:
+    """What the checks stage found, for the stages that run after it.
+
+    Named after the run, because two runs of the same pull request can overlap —
+    a push and an @-mention a minute later, say — and each has to read the
+    results of its *own* build rather than of whichever one finished last. Runs
+    happen one stage at a time, so there is nothing else to coordinate.
+    """
+    return meta_dir(owner, repo, number) / f"checks-{sanitize(run) or 'local'}.json"
+
+
 def package_dir(owner: str, repo: str, number: int) -> Path:
     """The PR head clone the Unity project references as a ``file:`` package."""
     return meta_dir(owner, repo, number) / "pkg"

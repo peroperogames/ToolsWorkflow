@@ -42,6 +42,7 @@ import dotnet_runner
 import pr_workspace
 import repo_kind
 import session
+import stage_state
 import unity_runner
 
 # The prompt file is resolved next to this script so the tool works regardless
@@ -57,7 +58,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.38"
+VERSION = "2026-10-14.unity.39"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -312,13 +313,19 @@ def load_prompt() -> str:
     return FALLBACK_PROMPT
 
 
-def load_config() -> Config:
-    """Build the runtime configuration from environment variables."""
+def load_config(require_openai: bool = True) -> Config:
+    """Build the runtime configuration from environment variables.
+
+    ``require_openai`` is False for the stages that never call the model. Those
+    stages run the repository's own build, tests and analyzers — arbitrary code
+    from the pull request — and there is no reason for the model's key to be in
+    their environment at all.
+    """
     github_token = os.environ.get("GITHUB_TOKEN", "").strip()
     openai_token = os.environ.get("OPENAI_API_KEY", "").strip()
     if not github_token:
         raise SystemExit("Error: GITHUB_TOKEN environment variable is required.")
-    if not openai_token:
+    if require_openai and not openai_token:
         raise SystemExit("Error: OPENAI_API_KEY environment variable is required.")
 
     try:
@@ -2080,7 +2087,7 @@ def handle_review_request(
         return 0
 
     log(f"Review requested via @-mention ({len(files)} files, ~{len(conversation)} chars context)...")
-    checks = run_review_checks(gh, owner, repo, number, pr, files, config)
+    checks = run_checks_and_static(gh, owner, repo, number, pr, files, config)
 
     head_sha = pr.get("head", {}).get("sha", "")
     turns = list(comment_records)
@@ -2411,17 +2418,19 @@ def run_review_checks(
     pr: Dict[str, Any],
     files: List[Dict[str, Any]],
     config: "Config",
-    static_files: Optional[List[Dict[str, Any]]] = None,
 ) -> ReviewChecks:
-    """Clone the pull request's head and run every gate the repository has.
+    """Clone the pull request's head and run every build/test gate it has.
 
-    The Unity build/test step, the .NET one and ReSharper all read the same
-    clone, and classifying it is what decides which of them has anything to do.
-    Commits and test results are posted here, before the model reviews, so the
-    review can be told about them and cannot approve past them.
+    The Unity build/test step and the .NET one read the same clone, and
+    classifying it is what decides which of them has anything to do. Commits and
+    test results are posted here, before the model reviews, so the review can be
+    told about them and cannot approve past them.
 
-    ``static_files`` narrows what the static analysis reports on — a later push
-    passes its own diff, so a finding from an earlier push is not raised again.
+    The static analysis is *not* here. It needs this step's clone and the
+    projects Unity generated, but it runs as its own stage with its own timeout,
+    so the two are joined by :class:`stage_state.CheckState` rather than by a
+    call. :func:`run_checks_and_static` is that call, for the one path that has
+    no stages to lean on — a review someone asked for in a comment.
     """
     checks = ReviewChecks()
 
@@ -2458,13 +2467,34 @@ def run_review_checks(
     status = "\n".join(s for s in (checks.unity.summary(), checks.dotnet.summary()) if s)
     if status:
         checks.extra_context = f"## 构建与测试状态\n\n{status}"
+    return checks
+
+
+def run_checks_and_static(
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    pr: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    config: "Config",
+    static_files: Optional[List[Dict[str, Any]]] = None,
+) -> ReviewChecks:
+    """Build/test the pull request and run the static analysis, in one process.
+
+    The order matters and is the same one the stages run in: the analysis is
+    pointed at the projects the Unity step just generated. Used by
+    :func:`handle_review_request`, where the whole review arrives as a single
+    comment and there are no stages to hand anything between.
+    """
+    checks = run_review_checks(gh, owner, repo, number, pr, files, config)
 
     # Deterministic static analysis (ReSharper + the repo's .editorconfig) runs
-    # alongside the AI review, over every solution that covers the clone; its
-    # findings post as their own inline comments.
+    # over every solution that covers the clone; its findings post as their own
+    # inline comments.
     checks.static_posted = run_static_analysis(
         gh, owner, repo, number, pr, static_files or files, config,
-        clone_dir=clone_dir, kind=kind, unity=checks.unity,
+        clone_dir=checks.clone_dir, kind=checks.kind, unity=checks.unity,
     )
     if checks.static_posted:
         log(f"Static analysis posted {checks.static_posted} inline comment(s).")
@@ -3493,34 +3523,179 @@ def act_on_clean_verdict(
         ctx.approved = True
 
 
-def main() -> int:
-    force_utf8_output()
-    config = load_config()
+# --------------------------------------------------------------------------- #
+# stages
+# --------------------------------------------------------------------------- #
 
-    event_name, payload = load_event()
+# The pipeline runs as three stages inside one job, each its own process with its
+# own timeout, so a hung build is killed by the runner rather than by the job's
+# six-hour ceiling. The order is a constraint, not a preference: `review` settles
+# the open threads and approves, and nothing may post a finding after that, or
+# the pull request would be approved with an unresolved thread on it.
+#
+# `all` runs the three in order in one process. That is what a manual run wants,
+# and it is the fallback if the split ever has to be undone.
+STAGES = ("checks", "static", "review")
 
-    # Comments reach us as `issue_comment` (the PR conversation) or as
-    # `pull_request_review_comment` (an inline review-comment thread). GitHub
-    # exposes no threading for the former, so an @-mention is the trigger in
-    # both cases.
-    is_issue_comment = event_name == "issue_comment"
-    is_review_comment = event_name == "pull_request_review_comment"
-    comment: Dict[str, Any] = {}
-    if is_issue_comment or is_review_comment:
-        comment = payload.get("comment") or {}
-        if is_issue_comment:
-            issue = payload.get("issue") or {}
-            if not issue.get("pull_request"):
-                log("Ignoring comment on a non-pull-request issue.")
-                return 0
-        author = (comment.get("user") or {}).get("login", "")
-        if author.endswith("[bot]"):
-            log("Ignoring comment from a bot (prevents reply loops).")
-            return 0
 
-    owner, repo, number = resolve_pull_request(event_name, payload)
+def _comment_event(event_name: str) -> bool:
+    """Did this run start from a comment rather than from the pull request?
 
-    gh = GitHubClient(config.github_token)
+    Comments reach us as `issue_comment` (the PR conversation) or as
+    `pull_request_review_comment` (an inline review-comment thread). GitHub
+    exposes no threading for the former, so an @-mention is the trigger in both
+    cases, and a reply is answered in one step — there are no build results to
+    carry between stages, because a reply builds nothing.
+    """
+    return event_name in ("issue_comment", "pull_request_review_comment")
+
+
+def _may_be_incremental(event_name: str, payload: Dict[str, Any]) -> bool:
+    """Could this run be a later push at all? Cheap, and needs no API call."""
+    return (
+        event_name in ("pull_request", "pull_request_target")
+        and payload.get("action") == "synchronize"
+    )
+
+
+def _incremental_push(event_name: str, payload: Dict[str, Any], fresh: List[Dict[str, Any]]) -> bool:
+    """Is this a later push to a pull request the bot has already reviewed?
+
+    A push the bot has never seen is a first review, not an incremental one: the
+    whole pull request is new to it, so the whole pull request is what it judges.
+    """
+    if not _may_be_incremental(event_name, payload):
+        return False
+    return any((e.get("who") or "").endswith("[bot]") for e in fresh)
+
+
+def _push_diff(
+    gh: GitHubClient, owner: str, repo: str, number: int, payload: Dict[str, Any]
+) -> Optional[List[Dict[str, Any]]]:
+    """The files one push touched, or None when that cannot be determined.
+
+    Reporting too much is a smaller failure than reporting nothing, so every
+    problem here falls back to the whole pull request rather than to silence.
+    """
+    before, after = payload.get("before"), payload.get("after")
+    if not before or not after:
+        return None
+    try:
+        files = gh.compare(owner, repo, before, after)
+    except Exception as exc:  # noqa: BLE001 - fall back to the whole PR
+        log(f"Warning: could not diff the push ({before[:7]}..{after[:7]}): {exc}")
+        return None
+    log(f"Latest push touched {len(files)} file(s).")
+    return files
+
+
+def _push_scope(
+    gh: GitHubClient, owner: str, repo: str, number: int, event_name: str, payload: Dict[str, Any]
+) -> Optional[List[Dict[str, Any]]]:
+    """What a later push should be judged by, or None for the whole pull request.
+
+    The conversation is only read when this could be a later push at all, since
+    that is the only case where the answer depends on it.
+    """
+    if not _may_be_incremental(event_name, payload):
+        return None
+    if not _incremental_push(event_name, payload, fetch_conversation(gh, owner, repo, number)):
+        return None
+    return _push_diff(gh, owner, repo, number, payload)
+
+
+def _state_path(owner: str, repo: str, number: int) -> Path:
+    """This run's checks file — see :func:`pr_workspace.stage_state_path`."""
+    return pr_workspace.stage_state_path(owner, repo, number, stage_state.current_run())
+
+
+def stage_checks(
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    pr: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    config: "Config",
+) -> int:
+    """Build and test the pull request, and write down what the rest needs.
+
+    Posts the build/test comments itself, before the model reviews, so the review
+    can be told about them and cannot approve past them.
+    """
+    checks = run_review_checks(gh, owner, repo, number, pr, files, config)
+    state = stage_state.CheckState.from_checks(
+        checks,
+        pr.get("head", {}).get("sha", ""),
+        stage_state.current_run(),
+        checks.clone_dir,
+    )
+    state_path = _state_path(owner, repo, number)
+    if stage_state.save(state, state_path):
+        log(f"Wrote {state_path} for the stages that run after this one.")
+    return 0
+
+
+def stage_static(
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    pr: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    config: "Config",
+    event_name: str,
+    payload: Dict[str, Any],
+) -> int:
+    """Run the static analysis over what the checks stage left behind.
+
+    It needs two things from that stage that cannot be recomputed here: the
+    clone, and the projects Unity generated for the package — which exist only
+    because the build ran. No state therefore means no analysis, and it says so.
+    """
+    state = stage_state.load(
+        _state_path(owner, repo, number),
+        pr.get("head", {}).get("sha", ""),
+    )
+    if state is None:
+        log(
+            "The checks stage reported nothing for this run: there is no clone and "
+            "no generated project to analyse. Skipping static analysis."
+        )
+        return 0
+    if not state.clone_dir or not os.path.isdir(state.clone_dir):
+        log(f"No source directory at {state.clone_dir or '(none)'}; skipping static analysis.")
+        return 0
+
+    # On a later push the analysis covers that push alone, so a finding from an
+    # earlier one is not raised again just because its line is still there.
+    scope = _push_scope(gh, owner, repo, number, event_name, payload)
+    posted = run_static_analysis(
+        gh, owner, repo, number, pr, scope or files, config,
+        clone_dir=state.clone_dir, kind=state.kind, unity=state.unity_result(),
+    )
+    if posted:
+        log(f"Static analysis posted {posted} inline comment(s).")
+    state.static_posted = posted
+    stage_state.save(state, _state_path(owner, repo, number))
+    return 0
+
+
+def stage_review(
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    pr: Dict[str, Any],
+    config: "Config",
+    event_name: str,
+    payload: Dict[str, Any],
+) -> int:
+    """Answer a comment, or review the pull request with the model and settle it.
+
+    Done last, always: it approves, and an approval has to account for everything
+    the other stages posted.
+    """
     ai = AIClient(
         config.openai_token,
         model=config.model,
@@ -3528,33 +3703,7 @@ def main() -> int:
         fallback_model=config.fallback_model,
     )
 
-    log(f"ai-review {VERSION}")
-    log(f"Repository: {owner}/{repo}")
-    log(f"Pull Request: #{number}")
-    log(f"Model: {config.model}")
-    log(f"Language: {config.language}")
-
-    pr = gh.get_pull_request(owner, repo, number)
-
-    # Closed PRs need no review, and nothing about them should outlive them: the
-    # PR's one directory holds its agent session, its Unity project and the
-    # package clone, and all three go together.
-    if (pr.get("state") or "open") == "closed":
-        unity_runner.cleanup(owner, repo, number)
-        log(
-            f"Pull Request #{number} is closed; deleted its session, Unity "
-            "project and package clone."
-        )
-        return 0
-
-    # Merges from release branches back to master/main don't need review.
-    head_ref = pr.get("head", {}).get("ref", "")
-    base_ref = pr.get("base", {}).get("ref", "")
-    if head_ref.startswith("release/") and base_ref in ("master", "main"):
-        log(f"Skipping review: merge from {head_ref} to {base_ref}.")
-        return 0
-
-    # Built here rather than at the top of main() so the project prompt is only
+    # Built here rather than at the top of the run so the project prompt is only
     # fetched for pull requests that are actually reviewed, and fetched once for
     # both prompts. The built-in prompt keeps the tool contract and the language
     # directive keeps the last word; only the criteria in between are added.
@@ -3572,6 +3721,12 @@ def main() -> int:
     records = session.load(owner, repo, number)
     stored = session.entries(records)
     fresh = fetch_conversation(gh, owner, repo, number)
+
+    is_issue_comment = event_name == "issue_comment"
+    is_review_comment = event_name == "pull_request_review_comment"
+    comment = (
+        (payload.get("comment") or {}) if is_issue_comment or is_review_comment else {}
+    )
 
     # Reply mode.
     if is_issue_comment or is_review_comment:
@@ -3747,11 +3902,7 @@ def main() -> int:
     # The PR's first pass gets the full review. Later pushes only get a light
     # incremental pass: just the issues the new commits introduced, as inline
     # comments.
-    incremental = (
-        event_name in ("pull_request", "pull_request_target")
-        and payload.get("action") == "synchronize"
-        and any((e.get("who") or "").endswith("[bot]") for e in fresh)
-    )
+    incremental = _incremental_push(event_name, payload, fresh)
     review_prompt = system_prompt + INCREMENTAL_DIRECTIVE if incremental else system_prompt
     if incremental:
         log("Later push detected: running an incremental (unstructured) review.")
@@ -3768,29 +3919,24 @@ def main() -> int:
     if conversation:
         log(f"Using {len(entries)} prior review/comment entry(ies) as context.")
 
-    # The pull request's head is cloned once and every gate it has is run; the
-    # same call is made when someone asks for a review by hand, so neither route
-    # can quietly do less than the other.
-    #
     # On a later push, the diff of that push alone is what the review judges —
     # and what the static analysis reports on, so a finding raised two pushes ago
     # is not raised again just because its line is still in the pull request.
-    push_files: Optional[List[Dict[str, Any]]] = None
-    if incremental:
-        before, after = payload.get("before"), payload.get("after")
-        if before and after:
-            try:
-                push_files = gh.compare(owner, repo, before, after)
-                log(f"Latest push touched {len(push_files)} file(s).")
-            except Exception as exc:  # noqa: BLE001 - fall back to the whole PR
-                log(f"Warning: could not diff the push ({before[:7]}..{after[:7]}): {exc}")
+    push_files = _push_diff(gh, owner, repo, number, payload) if incremental else None
 
-    checks = run_review_checks(
-        gh, owner, repo, number, pr, files, config,
-        static_files=push_files if push_files else None,
+    # The build and the tests ran in their own stage, and the static analysis in
+    # another. What they found arrives as a file rather than as a return value.
+    checks_state = stage_state.load(
+        _state_path(owner, repo, number),
+        pr.get("head", {}).get("sha", ""),
     )
-    build_blocked = checks.blocked
-    extra_context = checks.extra_context
+    if checks_state is None:
+        log(
+            "The checks stage reported nothing for this run; reviewing without "
+            "build/test status, and approving only on the model's verdict."
+        )
+    build_blocked = checks_state.blocked if checks_state else False
+    extra_context = checks_state.extra_context if checks_state else ""
 
     # Preferred path: the model drives the review with tools. The session
     # supplies the conversation and receives this run's turns and every loop
@@ -3864,6 +4010,109 @@ def main() -> int:
         allow_approve=(event == "APPROVE") and not build_blocked,
     )
 
+    return 0
+
+
+def run_stage(stage: str) -> int:
+    """Set the run up and hand it to one stage.
+
+    Everything here is cheap and shared: which pull request this is, whether it
+    is still open, and whether it needs reviewing at all. The expensive work —
+    the clone, the editor, the analysis, the model — belongs to the stages, so
+    that a stage which has nothing to do costs nothing.
+    """
+    config = load_config(require_openai=(stage == "review"))
+    event_name, payload = load_event()
+
+    # Two kinds of comment are not for us, and neither is about a pull request at
+    # all, so both are settled before one is resolved: the workflow fires on
+    # `issue_comment` for plain issues too, and the bot's own comment comes back
+    # to us as an event of its own.
+    if event_name == "issue_comment" and not (payload.get("issue") or {}).get("pull_request"):
+        log("Ignoring comment on a non-pull-request issue.")
+        return 0
+    if _comment_event(event_name):
+        author = ((payload.get("comment") or {}).get("user") or {}).get("login", "")
+        if author.endswith("[bot]"):
+            log("Ignoring comment from a bot (prevents reply loops).")
+            return 0
+
+    owner, repo, number = resolve_pull_request(event_name, payload)
+    gh = GitHubClient(config.github_token)
+
+    log(f"ai-review {VERSION} [{stage}]")
+    log(f"Repository: {owner}/{repo}")
+    log(f"Pull Request: #{number}")
+    if stage == "review":
+        log(f"Model: {config.model}")
+        log(f"Language: {config.language}")
+
+    pr = gh.get_pull_request(owner, repo, number)
+
+    # Closed PRs need no review, and nothing about them should outlive them: the
+    # PR's one directory holds its agent session, its Unity project and the
+    # package clone, and all three go together. The first stage does it, once.
+    if (pr.get("state") or "open") == "closed":
+        if stage == STAGES[0]:
+            unity_runner.cleanup(owner, repo, number)
+            log(
+                f"Pull Request #{number} is closed; deleted its session, Unity "
+                "project and package clone."
+            )
+        return 0
+
+    # Merges from release branches back to master/main don't need review.
+    head_ref = pr.get("head", {}).get("ref", "")
+    base_ref = pr.get("base", {}).get("ref", "")
+    if head_ref.startswith("release/") and base_ref in ("master", "main"):
+        log(f"Skipping review: merge from {head_ref} to {base_ref}.")
+        return 0
+
+    # Nothing to build, analyse or approve in a reply, so the two stages that
+    # only exist for a review stand down and the reply is answered in one step.
+    if stage in ("checks", "static") and _comment_event(event_name):
+        log(f"Nothing for the {stage} stage to do: this run answers a comment.")
+        return 0
+
+    if stage == "checks":
+        files = _changed_files(gh, owner, repo, number)
+        if not files:
+            log("No changed files found; nothing to check.")
+            return 0
+        return stage_checks(gh, owner, repo, number, pr, files, config)
+
+    if stage == "static":
+        return stage_static(
+            gh, owner, repo, number, pr,
+            _changed_files(gh, owner, repo, number), config,
+            event_name, payload,
+        )
+
+    return stage_review(gh, owner, repo, number, pr, config, event_name, payload)
+
+
+def _changed_files(
+    gh: GitHubClient, owner: str, repo: str, number: int
+) -> List[Dict[str, Any]]:
+    """The pull request's changed files, or an empty list."""
+    try:
+        return gh.list_files(owner, repo, number)
+    except Exception as exc:  # noqa: BLE001 - a missing diff is not fatal here
+        log(f"Warning: could not list the changed files: {exc}")
+        return []
+
+
+def main() -> int:
+    force_utf8_output()
+    stage = (sys.argv[1] if len(sys.argv) > 1 else "all").strip().lower()
+    if stage not in (*STAGES, "all"):
+        log(f"Unknown stage {stage!r}; expected one of: {', '.join((*STAGES, 'all'))}.")
+        return 2
+
+    for name in STAGES if stage == "all" else (stage,):
+        code = run_stage(name)
+        if code:
+            return code
     return 0
 
 

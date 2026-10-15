@@ -47,8 +47,13 @@ The runner is expected to carry these already; the action installs nothing.
 The tool reads all configuration from environment variables — no command-line arguments are required:
 
 ```bash
-python main.py
+python main.py            # all three stages, in order, in one process
+python main.py checks     # build and test only
+python main.py static     # static analysis only, over what `checks` left behind
+python main.py review     # the model's review and the thread settling
 ```
+
+The action passes one stage per step; running `main.py` bare does all three, which is what a manual run wants. A single stage is how you re-run just that part against a pull request that is already checked out, and an unknown stage name exits `2` rather than guessing.
 
 Every setting is reachable three ways: the `with:` input when calling the reusable workflow, the same input when using the composite action directly, and the environment variable when running `main.py` yourself. The table lists all three so they cannot drift apart.
 
@@ -161,6 +166,8 @@ on:
 
 ## Review pipeline
 
+The work is grouped into three steps of one job — `checks` (5–7), `static` (8) and `review` (1–4, 9–10) — which is why the numbering here does not follow the step order: the session and the prompts are only needed by the step that talks to the model. See [Three stages, three timeouts](#three-stages-three-timeouts) for what the split buys and the one ordering rule it must not break.
+
 1. Fetch PR metadata; if the PR is closed, delete the PR's whole working directory and stop — see [One directory per pull request](#one-directory-per-pull-request). Merges from `release/*` back to `master`/`main` are skipped. The PR's **first** pass gets the full review; later `synchronize` pushes get a light incremental pass covering only what the new commits introduced. Once a PR is known to need reviewing, the repository's own criteria are fetched from its head and merged into the prompt — see [Project review criteria](#project-review-criteria).
 2. Load the PR's **session** — one append-only message log per pull request, the model's accumulated memory of everything it has seen and produced here: turns, its own replies, tool calls and results. Reviews, conversation comments **and inline review comments** are fetched from GitHub, and whatever was posted since the last run is appended as new turns. A missing or damaged session is rebuilt from GitHub (it is an optimization, not state the bot depends on), and it is deleted with the rest of the PR's directory when the PR closes. Later runs therefore continue the conversation instead of re-sending the prompt and the whole diff: a push appends just its own diff, and the model keeps the files it read and the reasoning it did.
 3. Build the diff payload from the per-file patches — every line is prefixed with its absolute line number so the model can quote a line instead of computing line numbers itself.
@@ -180,6 +187,28 @@ on:
     - Once no unresolved thread remains and the review came back clean, the bot submits an `APPROVE` review. Thread resolution uses the GraphQL API — the REST API cannot do it.
     - A failed build or test retires threads but never approves.
 
+### Three stages, three timeouts
+
+The action runs the pipeline as three steps, one Python process each, and the split is about what can go wrong rather than about tidiness:
+
+| Step | What it does | Timeout |
+| --- | --- | --- |
+| `main.py checks` | clone, classify, build, test — and write down what the rest needs | 90 min |
+| `main.py static` | `jb inspectcode` over what the checks stage left behind | 30 min |
+| `main.py review` | the model's review, then settle the threads and approve | 120 min |
+
+**The runner, not the job, is what kills a hung build.** Every call site already passes a timeout, but `subprocess.run(timeout=...)` only kills its direct child, and then waits for the pipes to close: the editor that `unity run` started is a *grandchild* holding stdout, so if the CLI wedges while the editor lives, that wait can last until the job's six-hour ceiling. A step's `timeout-minutes` is enforced by the runner on the whole process tree, which is what actually ends it. On a self-hosted runner whose editor occasionally hangs, that difference is the whole point of the split.
+
+**The order is a constraint, not a preference.** `review` settles the open threads and approves, and it is what decides whether anything may be approved at all. A static analysis that posted a finding *after* that step would leave the pull request approved with a fresh unresolved thread on it. So the analysis always runs before the review, and `review` is always last.
+
+**A finding does not fail a step; a crash does.** No step is `continue-on-error`. A broken build, failing tests, a missing analyzer — each is posted as a comment and the step still exits 0, so the steps after it run. A crash or a timeout stops the run and turns the job red, exactly as it does today. The split must not turn a loud failure into a green job whose review quietly had no build results; that is the failure mode this pipeline has spent the most effort on.
+
+**The model's key is not in the step that runs the pull request's code.** `checks` and `static` execute arbitrary code from the pull request — MSBuild targets, Unity editor code, test assemblies, the repository's own analyzers. Neither needs to call the model, so neither is given `OPENAI_API_KEY`; `load_config(require_openai=False)` is what enforces it. Each step also declares only the environment its own stage reads, so the shared configuration surface is two variables instead of twenty.
+
+**What the later stages need is written to `.ai-review/checks-<run>.json`**, because processes cannot share memory: the clone, the classification, the generated projects to inspect, whether the build blocked approval, and the build status to hand the model. Nothing else — compile errors and test failures were already posted as comments by the time it is written. The file is named after the run, so two runs of one pull request (a push and an @-mention a minute later) each read their own results rather than whichever finished last, and it is validated on load against both the run and the head SHA. No state is not an error: the static analysis says it has no clone to analyse and stands down, and the review proceeds without build status, saying so.
+
+`main.py all` runs the three in order in one process. That is what a manual run on the runner wants, and it is the fallback if the split ever has to be undone. `main.py <stage>` alone is the other half of the same idea: with a PR already checked out, `python3 main.py static` re-runs just the analysis against the same clone.
+
 ### One directory per pull request
 
 A pull request owns exactly one directory on the runner, named `<repo>-PR<number>` (e.g. `ToolsWorkflow-PR42`) under `<state-dir>/<owner>/`. Everything a review of it needs lives inside:
@@ -191,6 +220,7 @@ A pull request owns exactly one directory on the runner, named `<repo>-PR<number
     .ai-review/pkg/                        the PR head clone the project references as a file: package
     .ai-review/editor.log                  Unity's batch-mode log
     .ai-review/resharper-*.xml             ReSharper's reports, one per solution inspected
+    .ai-review/checks-<run>.json           what the checks stage found, for the stages after it
 ```
 
 The session and the Unity project therefore share one lifecycle: both are created on the PR's first review, both are reused by every later review of that PR (the clone is `git`-synced to the new head, the session is appended to rather than rebuilt), and both are deleted together when the PR closes. The owner is a path component above the per-PR directory rather than part of its name, so the leaf keeps the name the PR is known by while two organizations sharing a repository name still get separate directories.
@@ -304,5 +334,6 @@ Praise is not a finding. A comment that only compliments a change — however te
 - `build_log.py` — shared parsing of MSBuild compiler errors, NUnit and TRX test reports.
 - `inspect_code.py` — ReSharper static analysis (`.editorconfig`-driven, multi-solution).
 - `pr_workspace.py` — the one directory per PR: session, Unity project and package clone together, plus the PR head clone.
+- `stage_state.py` — what the checks stage hands to the static and review stages, as a per-run JSON file inside the PR's directory.
 - `session.py` — per-PR session log (append-only JSONL, inside the PR's directory).
 - `prompt.md` — default review prompt (auto-improveable via natural language).
