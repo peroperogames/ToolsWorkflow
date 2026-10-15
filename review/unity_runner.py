@@ -766,6 +766,9 @@ def generate_and_build(
             "project-generation step did not run. Nothing can be inspected "
             "statically for this pull request."
         )
+        said = " ".join(text.split())[-800:]
+        if said:
+            log(f"Unity said: {said}")
 
     if errors:
         log(f"Unity compile: {len(errors)} error(s).")
