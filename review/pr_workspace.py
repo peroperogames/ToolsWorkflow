@@ -35,12 +35,13 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional, Tuple
+
+import subproc
 
 # Holds everything about a PR that is not the Unity project itself.
 META_DIRNAME = ".ai-review"
@@ -210,10 +211,7 @@ def log(message: str) -> None:
 
 
 def _run_git(args: list, cwd: Optional[str] = None, timeout: int = 300) -> Tuple[int, str]:
-    proc = subprocess.run(
-        ["git", *args], cwd=cwd, timeout=timeout, capture_output=True, text=True
-    )
-    return proc.returncode, (proc.stdout + proc.stderr)
+    return subproc.run(["git", *args], timeout, cwd=cwd)
 
 
 def _authed_url(owner: str, repo: str, token: str) -> str:

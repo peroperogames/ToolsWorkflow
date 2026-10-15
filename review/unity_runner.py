@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import build_log
 import pr_workspace
 import repo_kind
+import subproc
 import tool_path
 
 UNITY_TIMEOUT = int(os.environ.get("UNITY_TIMEOUT", "1800"))  # 30 min default
@@ -201,13 +202,12 @@ def ensure_project(owner: str, repo: str, number: int, cli: str) -> Optional[str
     # for the duration; the contents come back afterwards either way.
     try:
         with pr_workspace.room_for_project(owner, repo, number):
-            proc = subprocess.run(cmd, timeout=UNITY_TIMEOUT, capture_output=True, text=True)
+            rc, output = subproc.run(cmd, UNITY_TIMEOUT)
     except (subprocess.TimeoutExpired, OSError) as exc:
         log(f"Could not create the Unity project: {exc}")
         return None
-    if proc.returncode != 0 or not pr_workspace.is_project(owner, repo, number):
-        tail = (proc.stdout + proc.stderr).strip()[-500:]
-        log(f"unity projects {subcommand} failed (exit {proc.returncode}): {tail}")
+    if rc != 0 or not pr_workspace.is_project(owner, repo, number):
+        log(f"unity projects {subcommand} failed (exit {rc}): {output.strip()[-500:]}")
         return None
     log(f"Unity project created at {project}.")
     prepare_manifest(str(project))
@@ -242,13 +242,10 @@ def unregister_project(owner: str, repo: str, number: int) -> None:
         return
     project = project_dir(owner, repo, number)
     try:
-        proc = subprocess.run(
-            [cli, "projects", "remove", project, "--force", "--non-interactive"],
-            timeout=120,
-            capture_output=True,
-            text=True,
+        rc, _output = subproc.run(
+            [cli, "projects", "remove", project, "--force", "--non-interactive"], 120
         )
-        if proc.returncode == 0:
+        if rc == 0:
             log("Removed the project from the Unity Hub registry.")
         else:
             # Usually just "not registered" — `projects create` only writes the
@@ -528,9 +525,7 @@ def run_unity(
     ]
     rc, output = -1, ""
     try:
-        proc = subprocess.run(cmd, timeout=timeout + 120, capture_output=True, text=True)
-        rc = proc.returncode
-        output = (proc.stdout or "") + (proc.stderr or "")
+        rc, output = subproc.run(cmd, timeout + 120)
     except subprocess.TimeoutExpired:
         log(f"Unity timed out after {timeout}s.")
     except OSError as exc:
@@ -572,8 +567,7 @@ def run_unity_tests(
         "--non-interactive",
     ]
     try:
-        proc = subprocess.run(cmd, timeout=timeout + 120, capture_output=True, text=True)
-        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+        return subproc.run(cmd, timeout + 120)
     except subprocess.TimeoutExpired:
         log(f"Unity tests timed out after {timeout}s.")
     except OSError as exc:

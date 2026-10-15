@@ -77,7 +77,7 @@ Every setting is reachable three ways: the `with:` input when calling the reusab
 | `unity-sync-method` | `UNITY_SYNC_METHOD` | `UnityEditor.SyncVS.SyncSolution` | `-executeMethod` used in batch mode to regenerate the sln/csproj. |
 | `resharper-dotnet-sdk` | `INSPECT_DOTNET_SDK` | *(auto-detected)* | Pin the .NET SDK whose MSBuild `jb inspectcode` uses (`--dotnetcoresdk`). Empty lets it pick, which means the **newest** installed SDK — and a preview or half-installed one fails the build before any report is written. |
 | `resharper-build` | `INSPECT_BUILD` | `false` | Let `jb inspectcode` build the solution before inspecting it. Off by default: the pipeline already compiled the code, and Unity's generated projects do not build cleanly under a generic MSBuild, which fails the step with no report at all. |
-| — | `UNITY_TIMEOUT` / `DOTNET_TIMEOUT` | `1800` | Seconds either build step may take before it is abandoned and reported as skipped. |
+| — | `UNITY_TIMEOUT` / `DOTNET_TIMEOUT` | `1800` | Seconds either build step may take before it is ended — the tool and everything it started — and reported as skipped. |
 | — | `UNITY_TEST_PLATFORMS` | `EditMode` | Comma list of Unity test platforms to run. |
 
 `code-review.yml` also needs the `APP_ID`, `APP_PK` and `OPENAI_API_KEY` secrets; `main.py` additionally reads `GITHUB_REPOSITORY`, `GITHUB_EVENT_NAME` and `GITHUB_EVENT_PATH` (set by Actions) or `GITHUB_PR_NUMBER` for a manual run.
@@ -192,7 +192,7 @@ on:
 
 ## Review pipeline
 
-The work is grouped into three steps of one job — `checks` (5–7), `static` (8) and `review` (1–4, 9–10) — which is why the numbering here does not follow the step order: the session and the prompts are only needed by the step that talks to the model. See [Three stages, three timeouts](#three-stages-three-timeouts) for what the split buys and the one ordering rule it must not break.
+The work is grouped into three steps of one job — `checks` (5–7), `static` (8) and `review` (1–4, 9–10) — which is why the numbering here does not follow the step order: the session and the prompts are only needed by the step that talks to the model. See [Three stages, one job](#three-stages-one-job) for what the split buys and the one ordering rule it must not break.
 
 1. Fetch PR metadata; if the PR is closed, delete the PR's whole working directory and stop — see [One directory per pull request](#one-directory-per-pull-request). Merges from `release/*` back to `master`/`main` are skipped. The PR's **first** pass gets the full review; later `synchronize` pushes get a light incremental pass covering only what the new commits introduced. Once a PR is known to need reviewing, the repository's own criteria are fetched from its head and merged into the prompt — see [Project review criteria](#project-review-criteria).
 2. Load the PR's **session** — one append-only message log per pull request, the model's accumulated memory of everything it has seen and produced here: turns, its own replies, tool calls and results. Reviews, conversation comments **and inline review comments** are fetched from GitHub, and whatever was posted since the last run is appended as new turns. A missing or damaged session is rebuilt from GitHub (it is an optimization, not state the bot depends on), and it is deleted with the rest of the PR's directory when the PR closes. Later runs therefore continue the conversation instead of re-sending the prompt and the whole diff: a push appends just its own diff, and the model keeps the files it read and the reasoning it did.
@@ -213,21 +213,23 @@ The work is grouped into three steps of one job — `checks` (5–7), `static` (
     - Once no unresolved thread remains and the review came back clean, the bot submits an `APPROVE` review. Thread resolution uses the GraphQL API — the REST API cannot do it.
     - A failed build or test retires threads but never approves.
 
-### Three stages, three timeouts
+### Three stages, one job
 
-The action runs the pipeline as three steps, one Python process each, and the split is about what can go wrong rather than about tidiness:
+The action runs the pipeline as three steps, one Python process each:
 
-| Step | What it does | Timeout |
-| --- | --- | --- |
-| `main.py checks` | clone, classify, build, test — and write down what the rest needs | 90 min |
-| `main.py static` | `jb inspectcode` over what the checks stage left behind | 30 min |
-| `main.py review` | the model's review, then settle the threads and approve | 120 min |
+| Step | What it does |
+| --- | --- |
+| `main.py checks` | clone, classify, build, test — and write down what the rest needs |
+| `main.py static` | `jb inspectcode` over what the checks stage left behind |
+| `main.py review` | the model's review, then settle the threads and approve |
 
-**The runner, not the job, is what kills a hung build.** Every call site already passes a timeout, but `subprocess.run(timeout=...)` only kills its direct child, and then waits for the pipes to close: the editor that `unity run` started is a *grandchild* holding stdout, so if the CLI wedges while the editor lives, that wait can last until the job's six-hour ceiling. A step's `timeout-minutes` is enforced by the runner on the whole process tree, which is what actually ends it. On a self-hosted runner whose editor occasionally hangs, that difference is the whole point of the split.
+**No step sets a timeout, because a composite action's steps cannot.** `timeout-minutes` is rejected outright — "Unexpected value 'timeout-minutes'" — and the runner refuses the whole manifest, so no step runs at all. The ceiling is therefore the job's, set to 150 minutes in `code-review.yml` rather than GitHub's 360-minute default, and everything under it is bounded by the deadlines the stages put on their own subprocesses.
+
+**A deadline ends the tool, not just the process that started it.** `subprocess.run(timeout=...)` kills its direct child, which is the CLI — and leaves everything the CLI started running: the editor `unity run` launched, MSBuild's worker nodes, `inspectcode`'s JVM. On a runner reused across jobs those accumulate, and an editor left behind holds the PR's Unity project lock. `subproc.py` gives the child a session of its own and signals the whole process group — SIGTERM, then SIGKILL after a grace period — so the deadline leaves nothing behind. Measured on Linux, for a tool that starts a helper and hangs: both return at the deadline, and only `subproc.run` returns with the helper gone.
 
 **The order is a constraint, not a preference.** `review` settles the open threads and approves, and it is what decides whether anything may be approved at all. A static analysis that posted a finding *after* that step would leave the pull request approved with a fresh unresolved thread on it. So the analysis always runs before the review, and `review` is always last.
 
-**A finding does not fail a step; a crash does.** No step is `continue-on-error`. A broken build, failing tests, a missing analyzer — each is posted as a comment and the step still exits 0, so the steps after it run. A crash or a timeout stops the run and turns the job red, exactly as it does today. The split must not turn a loud failure into a green job whose review quietly had no build results; that is the failure mode this pipeline has spent the most effort on.
+**A finding does not fail a step; a crash does.** No step is `continue-on-error`. A broken build, failing tests, a missing analyzer — each is posted as a comment and the step still exits 0, so the steps after it run. A crash stops the run and turns the job red, exactly as it does in one process. The split must not turn a loud failure into a green job whose review quietly had no build results; that is the failure mode this pipeline has spent the most effort on.
 
 **The model's key is not in the step that runs the pull request's code.** `checks` and `static` execute arbitrary code from the pull request — MSBuild targets, Unity editor code, test assemblies, the repository's own analyzers. Neither needs to call the model, so neither is given `OPENAI_API_KEY`; `load_config(require_openai=False)` is what enforces it. Each step also declares only the environment its own stage reads, so the shared configuration surface is two variables instead of twenty.
 
@@ -362,5 +364,6 @@ Praise is not a finding. A comment that only compliments a change — however te
 - `pr_workspace.py` — the one directory per PR: session, Unity project and package clone together, plus the PR head clone.
 - `stage_state.py` — what the checks stage hands to the static and review stages, as a per-run JSON file inside the PR's directory.
 - `tool_path.py` — finding `unity`, `jb` and `dotnet` without being told where they are, and telling "not installed" apart from "not this user's to run".
+- `subproc.py` — running an external tool under a deadline that ends the whole process group, so a killed build leaves no editor, MSBuild node or JVM behind.
 - `session.py` — per-PR session log (append-only JSONL, inside the PR's directory).
 - `prompt.md` — default review prompt (auto-improveable via natural language).

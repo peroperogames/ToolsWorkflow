@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import build_log
 import repo_kind
+import subproc
 import tool_path
 
 DOTNET_TIMEOUT = int(os.environ.get("DOTNET_TIMEOUT", "1800"))
@@ -120,8 +121,7 @@ def solution_has_tests(solution: str) -> bool:
 
 def _run(cmd: List[str], cwd: str, timeout: int) -> Tuple[int, str]:
     try:
-        proc = subprocess.run(cmd, cwd=cwd, timeout=timeout, capture_output=True, text=True)
-        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+        return subproc.run(cmd, timeout, cwd=cwd)
     except subprocess.TimeoutExpired:
         log(f"{cmd[1]} timed out after {timeout}s.")
         return -1, ""

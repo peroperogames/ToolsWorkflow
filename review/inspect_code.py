@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set
 
+import subproc
 import tool_path
 
 # Severity as reported by ReSharper -> whether we surface it. WARNING and above
@@ -148,13 +149,7 @@ def run_inspectcode(target: str, workdir: str, report: Path, timeout: int = 1200
 
     log(f"Running ReSharper inspectcode on {Path(target).name} ...")
     try:
-        proc = subprocess.run(
-            cmd,
-            cwd=workdir,
-            timeout=timeout,
-            capture_output=True,
-            text=True,
-        )
+        rc, output = subproc.run(cmd, timeout, cwd=workdir)
     except FileNotFoundError:
         log(f"ReSharper CLI at {binary} could not be executed; skipping static analysis.")
         return False
@@ -162,9 +157,8 @@ def run_inspectcode(target: str, workdir: str, report: Path, timeout: int = 1200
         log(f"inspectcode timed out after {timeout}s; skipping static analysis.")
         return False
 
-    output = (proc.stdout or "") + (proc.stderr or "")
-    if proc.returncode != 0:
-        log(f"inspectcode exited {proc.returncode}: {output.strip()[-500:]}")
+    if rc != 0:
+        log(f"inspectcode exited {rc}: {output.strip()[-500:]}")
         # A report may still have been written; fall through and try to parse it.
     if not report.exists():
         log(f"inspectcode produced no report for {Path(target).name}.")
