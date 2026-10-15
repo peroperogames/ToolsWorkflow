@@ -655,6 +655,33 @@ def dedupe_solution(sln: str) -> int:
     return renamed
 
 
+def find_solution(project: str) -> Optional[str]:
+    """The solution Unity generated for this project, or None.
+
+    Normally it sits in the project root beside the project folders. The
+    recursive search is the fallback, so a solution generated somewhere else is
+    still inspected rather than silently skipped — and when there is none at
+    all, that is reported by the caller instead of looking like a clean build.
+    """
+    root = Path(project)
+    try:
+        found = sorted(root.glob("*.sln"))
+        if found:
+            return str(found[0])
+        found = sorted(
+            path
+            for path in root.rglob("*.sln")
+            if not {"Library", "Temp", "obj", "bin"}
+            & set(path.relative_to(root).parts[:-1])
+        )
+        if found:
+            log(f"The generated solution is not in the project root; using {found[0]}.")
+            return str(found[0])
+    except OSError as exc:
+        log(f"Could not look for a solution in {project}: {exc}")
+    return None
+
+
 def generate_and_build(
     cli: str, project: str, log_file: Path
 ) -> Tuple[bool, bool, List[Dict[str, Any]], Optional[str]]:
@@ -679,17 +706,20 @@ def generate_and_build(
             break
 
     errors = build_log.parse_compile_errors(text)
-    # Locate the generated solution in the project root.
-    sln = None
-    try:
-        slns = sorted(Path(project).glob("*.sln"))
-        sln = str(slns[0]) if slns else None
-    except OSError:
-        pass
+    sln = find_solution(project)
     if sln:
         # Unity's solution has to be made acceptable to MSBuild before anything
         # else (ReSharper) can build it.
         dedupe_solution(sln)
+    else:
+        # Exiting 0 without a solution means the generation step did not really
+        # run — and with no compile errors either, "compiled" would otherwise be
+        # a pass nothing backs up.
+        log(
+            f"Unity exited {rc} but produced no solution in {project}: the "
+            "project-generation step did not run. Nothing can be inspected "
+            "statically for this pull request."
+        )
 
     if errors:
         log(f"Unity compile: {len(errors)} error(s).")
