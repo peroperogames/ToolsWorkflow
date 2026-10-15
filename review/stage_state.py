@@ -30,7 +30,21 @@ from typing import Any, Dict, List, Optional
 import repo_kind
 import unity_runner
 
-STATE_VERSION = 1
+STATE_VERSION = 2
+
+# The heading the model is shown the build status under.
+BUILD_STATUS_HEADER = "## 构建与测试状态"
+
+
+def build_status_context(unity_summary: str, dotnet_summary: str) -> str:
+    """The build/test section handed to the model, or "" when nothing ran.
+
+    Built from the two summaries rather than stored beside them, so there is one
+    spelling of it: the checks stage puts it in the state, and a review that has
+    to run the gates itself builds the same string from the same parts.
+    """
+    status = "\n".join(s for s in (unity_summary, dotnet_summary) if s)
+    return f"{BUILD_STATUS_HEADER}\n\n{status}" if status else ""
 
 
 @dataclass
@@ -42,11 +56,17 @@ class CheckState:
     clone_dir: str = ""
     kind: Optional[repo_kind.Kind] = None
     blocked: bool = False
-    extra_context: str = ""
+    unity_summary: str = ""
+    dotnet_summary: str = ""
     unity_ran: bool = False
     unity_sln: Optional[str] = None
     unity_package_projects: List[str] = field(default_factory=list)
     static_posted: int = 0
+
+    @property
+    def extra_context(self) -> str:
+        """What the review tells the model about the build and the tests."""
+        return build_status_context(self.unity_summary, self.dotnet_summary)
 
     @classmethod
     def from_checks(
@@ -63,7 +83,8 @@ class CheckState:
             clone_dir=clone_dir or "",
             kind=checks.kind,
             blocked=bool(checks.blocked),
-            extra_context=checks.extra_context,
+            unity_summary=unity.summary(),
+            dotnet_summary=checks.dotnet.summary(),
             unity_ran=bool(unity.ran),
             unity_sln=unity.sln_path,
             unity_package_projects=list(unity.package_projects),
@@ -89,7 +110,8 @@ class CheckState:
             "clone_dir": self.clone_dir,
             "kind": self.kind.to_dict() if self.kind else None,
             "blocked": self.blocked,
-            "extra_context": self.extra_context,
+            "unity_summary": self.unity_summary,
+            "dotnet_summary": self.dotnet_summary,
             "unity": {
                 "ran": self.unity_ran,
                 "sln_path": self.unity_sln,
@@ -108,7 +130,8 @@ class CheckState:
             clone_dir=str(data.get("clone_dir") or ""),
             kind=repo_kind.Kind.from_dict(kind_data) if kind_data else None,
             blocked=bool(data.get("blocked")),
-            extra_context=str(data.get("extra_context") or ""),
+            unity_summary=str(data.get("unity_summary") or ""),
+            dotnet_summary=str(data.get("dotnet_summary") or ""),
             unity_ran=bool(unity.get("ran")),
             unity_sln=unity.get("sln_path") or None,
             unity_package_projects=[

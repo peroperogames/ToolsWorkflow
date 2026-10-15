@@ -1431,6 +1431,12 @@ class CommandSpec:
     argument: str  # what the text after the command is called in logs
     summary: str
     handler: Callable[["CommandContext", Command], int]
+    # Does answering this command need the repository's build, tests and static
+    # analysis? A command is deterministic, so this is too — and it is what lets
+    # the checks stage know it has work to do before the model has been asked
+    # anything. A command that does not (rewriting the review criteria, say) must
+    # not pay for a Unity build.
+    needs_checks: bool = False
 
 
 @dataclass
@@ -1546,19 +1552,20 @@ def handle_rebuild_command(ctx: CommandContext, command: Command) -> int:
         return 0
 
     log("Rebuild command: running the build, test and static-analysis steps.")
-    checks = run_review_checks(
+    gates = resolve_checks(
         ctx.gh, ctx.owner, ctx.repo, ctx.number, ctx.pr, files, ctx.config
     )
 
-    kind = checks.kind.describe() if checks.kind else "unknown"
-    lines = ["🔧 **重新构建与测试**（只跑门禁，未做评审）", f"仓库类型：{kind}", ""]
-    summaries = [s for s in (checks.unity.summary(), checks.dotnet.summary()) if s]
-    if summaries:
-        lines.extend(summaries)
+    kind_line = gates.kind.describe() if gates.kind else "unknown"
+    lines = ["🔧 **重新构建与测试**（只跑门禁，未做评审）", f"仓库类型：{kind_line}", ""]
+    if gates.extra_context:
+        # The section as the model would see it, minus its heading: the same
+        # words, from the same place.
+        lines.append(gates.extra_context.split("\n\n", 1)[-1])
     else:
         lines.append("没有构建/测试步骤运行——该仓库没有，或工具链不可用，详见日志。")
-    if checks.static_posted:
-        lines.append(f"ReSharper：新提出 {checks.static_posted} 条行内意见。")
+    if gates.static_posted:
+        lines.append(f"ReSharper：新提出 {gates.static_posted} 条行内意见。")
     body = "\n".join(lines)
 
     if ctx.config.dry_run:
@@ -1576,10 +1583,13 @@ COMMANDS: Tuple[CommandSpec, ...] = (
         "prompt", "feedback", "rewrite the review criteria and open a PR",
         handle_prompt_command,
     ),
-    CommandSpec("review", "note", "review the pull request now", handle_review_command),
+    CommandSpec(
+        "review", "note", "review the pull request now", handle_review_command,
+        needs_checks=True,
+    ),
     CommandSpec(
         "rebuild", "note", "re-run the build/test/static steps only",
-        handle_rebuild_command,
+        handle_rebuild_command, needs_checks=True,
     ),
 )
 COMMAND_BY_NAME = {spec.name: spec for spec in COMMANDS}
@@ -2087,14 +2097,14 @@ def handle_review_request(
         return 0
 
     log(f"Review requested via @-mention ({len(files)} files, ~{len(conversation)} chars context)...")
-    checks = run_checks_and_static(gh, owner, repo, number, pr, files, config)
+    gates = resolve_checks(gh, owner, repo, number, pr, files, config)
 
     head_sha = pr.get("head", {}).get("sha", "")
     turns = list(comment_records)
     if not session.has_bootstrap(session_records):
         turns.append(
             turn_record(
-                build_diff_text(pr, files) + context_suffix(checks.extra_context),
+                build_diff_text(pr, files) + context_suffix(gates.extra_context),
                 "open",
                 head_sha,
             )
@@ -2110,12 +2120,12 @@ def handle_review_request(
 
     ctx = run_agent_review(
         ai, gh, owner, repo, number, pr, files, system_prompt, session_records, turns,
-        config, block_approve=checks.blocked,
+        config, block_approve=gates.blocked,
     )
     if ctx is not None:
         settle_after_review(
             ai, gh, owner, repo, number, pr, files, config, conversation,
-            not checks.blocked,
+            not gates.blocked,
         )
         return 0
 
@@ -2149,7 +2159,7 @@ def handle_review_request(
     log(f"Review posted on request ({event}).")
     settle_after_review(
         ai, gh, owner, repo, number, pr, files, config, conversation,
-        event == "APPROVE" and not checks.blocked,
+        event == "APPROVE" and not gates.blocked,
     )
     return 0
 
@@ -2410,6 +2420,64 @@ class ReviewChecks:
     static_posted: int = 0
 
 
+@dataclass
+class ReviewInputs:
+    """The build/test status a review needs, from whichever step produced it."""
+
+    blocked: bool = False
+    extra_context: str = ""
+    static_posted: int = 0
+    kind: Optional["repo_kind.Kind"] = None
+    from_stage: bool = False
+
+
+def resolve_checks(
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    pr: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    config: "Config",
+) -> ReviewInputs:
+    """The gates' results for this run, running them here only if nobody did.
+
+    The checks and static stages do this work when the run started from the pull
+    request, or from a comment naming a command that wants it — and they leave
+    the results in the state file. This then only reads them.
+
+    The one case that lands here is a review asked for in prose: recognising the
+    request needs the classifier, which is a model call, so the gates could not
+    have been run before this step. They run here, in the step that also holds
+    the model's key, and the log says so rather than leaving the step names to
+    imply otherwise.
+    """
+    state = stage_state.load(
+        _state_path(owner, repo, number), pr.get("head", {}).get("sha", "")
+    )
+    if state is not None:
+        log("Using the build and test results the checks stage left for this run.")
+        return ReviewInputs(
+            blocked=state.blocked,
+            extra_context=state.extra_context,
+            static_posted=state.static_posted,
+            kind=state.kind,
+            from_stage=True,
+        )
+
+    log(
+        "The checks stage did not run for this one; running the build, the tests "
+        "and the static analysis here instead."
+    )
+    checks = run_checks_and_static(gh, owner, repo, number, pr, files, config)
+    return ReviewInputs(
+        blocked=checks.blocked,
+        extra_context=checks.extra_context,
+        static_posted=checks.static_posted,
+        kind=checks.kind,
+    )
+
+
 def run_review_checks(
     gh: GitHubClient,
     owner: str,
@@ -2464,9 +2532,9 @@ def run_review_checks(
     checks.blocked = (checks.unity.ran and not checks.unity.ok) or (
         checks.dotnet.ran and not checks.dotnet.ok
     )
-    status = "\n".join(s for s in (checks.unity.summary(), checks.dotnet.summary()) if s)
-    if status:
-        checks.extra_context = f"## 构建与测试状态\n\n{status}"
+    checks.extra_context = stage_state.build_status_context(
+        checks.unity.summary(), checks.dotnet.summary()
+    )
     return checks
 
 
@@ -2484,8 +2552,9 @@ def run_checks_and_static(
 
     The order matters and is the same one the stages run in: the analysis is
     pointed at the projects the Unity step just generated. Used by
-    :func:`handle_review_request`, where the whole review arrives as a single
-    comment and there are no stages to hand anything between.
+    :func:`resolve_checks`, which reaches for it only when no stage did the work —
+    a review asked for in prose, where recognising the request is a model call
+    and so cannot have happened before the review step.
     """
     checks = run_review_checks(gh, owner, repo, number, pr, files, config)
 
@@ -3544,10 +3613,42 @@ def _comment_event(event_name: str) -> bool:
     Comments reach us as `issue_comment` (the PR conversation) or as
     `pull_request_review_comment` (an inline review-comment thread). GitHub
     exposes no threading for the former, so an @-mention is the trigger in both
-    cases, and a reply is answered in one step — there are no build results to
-    carry between stages, because a reply builds nothing.
+    cases.
     """
     return event_name in ("issue_comment", "pull_request_review_comment")
+
+
+# The bot's own login, used when the conversation does not name it. A constant
+# rather than a literal in two places: the checks stage has to recognise a
+# command before the review stage has read the conversation to find it.
+DEFAULT_BOT_LOGIN = "perotoolsbot[bot]"
+
+
+def _comment_command(payload: Dict[str, Any]) -> Optional["CommandSpec"]:
+    """The command this comment names, or None. No model call, by definition."""
+    body = (payload.get("comment") or {}).get("body") or ""
+    command = parse_command(body, DEFAULT_BOT_LOGIN)
+    return COMMAND_BY_NAME.get(command.name) if command else None
+
+
+def _stages_have_work(event_name: str, payload: Dict[str, Any]) -> bool:
+    """Should the checks and static stages run for this event?
+
+    A pull request event always. A comment only when it names a command that asks
+    for the repository's gates, which is decidable without the model — the person
+    who wrote the command knows what they meant.
+
+    A review asked for in *prose* cannot be known here: recognising it is the
+    classifier's job, and that is a model call inside the review stage. Those
+    runs build and analyse there instead, in the step that also holds the model's
+    key, and the log says which of the two happened. The alternative would be to
+    build for every comment that mentions the bot, including the ones asking a
+    question.
+    """
+    if not _comment_event(event_name):
+        return True
+    spec = _comment_command(payload)
+    return bool(spec and spec.needs_checks)
 
 
 def _may_be_incremental(event_name: str, payload: Dict[str, Any]) -> bool:
@@ -3733,7 +3834,7 @@ def stage_review(
         body = comment.get("body") or ""
         # Determine bot login from the conversation (bot-authored entries),
         # with an env-var fallback for the first run when no session exists yet.
-        bot_login = "perotoolsbot[bot]"
+        bot_login = DEFAULT_BOT_LOGIN
         addressed = comment_mentions_bot(body, bot_login)
         thread_context = ""
         if is_review_comment:
@@ -4068,9 +4169,11 @@ def run_stage(stage: str) -> int:
         log(f"Skipping review: merge from {head_ref} to {base_ref}.")
         return 0
 
-    # Nothing to build, analyse or approve in a reply, so the two stages that
-    # only exist for a review stand down and the reply is answered in one step.
-    if stage in ("checks", "static") and _comment_event(event_name):
+    # A comment that asks for nothing but an answer is answered in the review
+    # step and has nothing to build, so these two stand down. A comment naming a
+    # command that does want the gates is a different matter: it is recognised
+    # here, without the model, and the work happens where the other runs do it.
+    if stage in ("checks", "static") and not _stages_have_work(event_name, payload):
         log(f"Nothing for the {stage} stage to do: this run answers a comment.")
         return 0
 
