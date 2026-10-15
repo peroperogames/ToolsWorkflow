@@ -57,7 +57,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.33"
+VERSION = "2026-10-14.unity.34"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -2922,8 +2922,14 @@ def run_static_analysis(
     targets: List[str] = []
     if kind is not None and kind.has_solution:
         targets.append(kind.solution)
-    if unity is not None and unity.sln_path:
-        targets.append(unity.sln_path)
+    if unity is not None:
+        # The package's own generated projects come first: they are what the
+        # package is, so the analysis is about the reviewed code and nothing
+        # else, and a csproj works where a solution is missing or unusable. The
+        # solution is the fallback for whatever they do not cover.
+        targets.extend(unity.package_projects)
+        if not unity.package_projects and unity.sln_path:
+            targets.append(unity.sln_path)
     if not targets:
         if unity is not None and unity.ran:
             # The Unity step ran but generated nothing to inspect. "No solution

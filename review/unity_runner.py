@@ -682,6 +682,52 @@ def find_solution(project: str) -> Optional[str]:
     return None
 
 
+# `<Compile Include="..\..\.ai-review\pkg\Runtime\Tiny.cs" />`, the item every
+# generated csproj lists its sources in.
+_CS_COMPILE = re.compile(r'<Compile\s+Include="([^"]+)"', re.IGNORECASE)
+
+
+def package_projects(project: str, package_root: str) -> List[str]:
+    """The generated C# projects that compile the package under review.
+
+    Unity writes one csproj per assembly into the project root, and a package's
+    asmdefs get their own. That makes the package a target ReSharper can be
+    pointed at directly: a handful of files instead of the whole template, and no
+    dependence on the solution being generated or usable — a csproj is accepted
+    where a solution is not.
+
+    A csproj belongs to the package when any file it compiles lives under the
+    package root, which is what the assembly actually is.
+    """
+    if not package_root:
+        return []
+    root = Path(project)
+    try:
+        wanted = Path(package_root).resolve()
+        candidates = sorted(root.glob("*.csproj"))
+    except OSError as exc:
+        log(f"Could not look for generated projects in {project}: {exc}")
+        return []
+
+    found: List[str] = []
+    for csproj in candidates:
+        try:
+            text = csproj.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for match in _CS_COMPILE.finditer(text):
+            source = Path(match.group(1).replace("\\", "/"))
+            if not source.is_absolute():
+                source = csproj.parent / source
+            try:
+                source.resolve().relative_to(wanted)
+            except (ValueError, OSError):
+                continue
+            found.append(str(csproj))
+            break
+    return found
+
+
 def generate_and_build(
     cli: str, project: str, log_file: Path
 ) -> Tuple[bool, bool, List[Dict[str, Any]], Optional[str]]:
@@ -815,6 +861,9 @@ class UnityResult:
         self.compile_errors: List[Dict[str, Any]] = []
         self.test_failures: List[Dict[str, Any]] = []
         self.sln_path: Optional[str] = None
+        # The generated projects that compile the package itself — the precise
+        # thing static analysis should look at.
+        self.package_projects: List[str] = []
 
     @property
     def ok(self) -> bool:
@@ -870,6 +919,12 @@ def analyze(
         result.compiled = compiled
         result.compile_errors = errors
         result.sln_path = sln
+        result.package_projects = package_projects(project, kind.package_root)
+        if result.package_projects:
+            log(
+                "Generated projects for the package: "
+                + ", ".join(Path(p).name for p in result.package_projects)
+            )
 
         if compiled:
             results_dir = pr_workspace.meta_dir(owner, repo, number)
