@@ -84,6 +84,11 @@ def log(message: str) -> None:
 # ~/.local/bin, and a CI service account's PATH frequently does not include it.
 CLI_FALLBACK_DIRS = ("~/.local/bin", "/usr/local/bin", "/opt/unity/bin")
 
+# The CLI is resolved once per run: nothing about the answer can change while the
+# process lives, and every caller logging it again only lengthens the log.
+_CLI: Optional[str] = None
+_CLI_RESOLVED = False
+
 
 def unity_cli() -> Optional[str]:
     """Path to the Unity CLI, or None when it is not installed.
@@ -94,19 +99,31 @@ def unity_cli() -> Optional[str]:
     looked for: hardcoding its path is what made a runner whose editor lives
     somewhere else unable to run anything at all.
 
-    When it cannot be found, every path that was checked is logged. "Not on PATH"
-    is not enough to act on when the binary is installed and merely unreadable.
+    Resolved once per run and reported once, as a fact rather than a warning:
+    a login shell has ~/.local/bin on its PATH and the runner's service process
+    usually does not, so finding it there is the expected case, not a problem.
+    When it cannot be found at all, every path that was checked is listed.
     """
+    global _CLI, _CLI_RESOLVED
+    if not _CLI_RESOLVED:
+        _CLI = _resolve_unity_cli()
+        _CLI_RESOLVED = True
+    return _CLI
+
+
+def _resolve_unity_cli() -> Optional[str]:
     configured = os.environ.get("UNITY_CLI", "").strip()
     if configured:
         found = shutil.which(configured) or (configured if os.path.exists(configured) else None)
         if found:
+            log(f"Unity CLI: {found}")
             return found
         log(f"UNITY_CLI set but not found: {configured}")
         return None
 
     found = shutil.which("unity")
     if found:
+        log(f"Unity CLI: {found}")
         return found
 
     names = ("unity.exe", "unity") if os.name == "nt" else ("unity",)
@@ -116,7 +133,7 @@ def unity_cli() -> Optional[str]:
             candidate = Path(os.path.expanduser(directory)) / name
             tried.append(str(candidate))
             if candidate.is_file() and os.access(candidate, os.X_OK):
-                log(f"The Unity CLI is not on PATH; using {candidate}.")
+                log(f"Unity CLI: {candidate} (in {directory}; not on PATH here)")
                 return str(candidate)
 
     log(
