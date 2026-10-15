@@ -16,13 +16,14 @@ both are inspected and their findings de-duplicated.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set
+
+import tool_path
 
 # Severity as reported by ReSharper -> whether we surface it. WARNING and above
 # are worth a comment; SUGGESTION/HINT are too noisy to post on every PR.
@@ -82,38 +83,17 @@ def inspectcode_binary() -> Optional[str]:
 
 
 def _resolve_inspectcode() -> Optional[str]:
-    configured = os.environ.get("INSPECT_JB", "").strip()
-    if configured:
-        found = shutil.which(configured) or (configured if os.path.exists(configured) else None)
-        if found:
-            log(f"ReSharper CLI: {found}")
-            return found
-        log(f"INSPECT_JB set but not found: {configured}")
-        return None
-
-    found = shutil.which("jb")
-    if found:
-        log(f"ReSharper CLI: {found}")
-        return found
-
-    names = ("jb.exe", "jb") if os.name == "nt" else ("jb",)
-    tried: List[str] = []
-    for directory in JB_FALLBACK_DIRS:
-        for name in names:
-            candidate = Path(os.path.expanduser(directory)) / name
-            tried.append(str(candidate))
-            if candidate.is_file() and os.access(candidate, os.X_OK):
-                log(f"ReSharper CLI: {candidate} (in {directory}; not on PATH here)")
-                return str(candidate)
-
-    log(
-        "The ReSharper CLI ('jb') was not found, so there is no static analysis. "
-        "Checked PATH and: " + ", ".join(tried) + ". Install it for the user the "
-        "runner runs as — `dotnet tool install -g "
-        "JetBrains.ReSharper.GlobalTools` — and make sure that user's PATH has "
-        "it."
+    return tool_path.find(
+        "jb",
+        JB_FALLBACK_DIRS,
+        override_env="INSPECT_JB",
+        label="ReSharper CLI",
+        hint=(
+            "Install it for the user the runner runs as — `dotnet tool install -g "
+            "JetBrains.ReSharper.GlobalTools` — and make sure that user's PATH has "
+            "it. There is no static analysis without it."
+        ),
     )
-    return None
 
 
 def inspect_args() -> List[str]:

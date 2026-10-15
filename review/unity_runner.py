@@ -22,7 +22,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -31,6 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import build_log
 import pr_workspace
 import repo_kind
+import tool_path
 
 UNITY_TIMEOUT = int(os.environ.get("UNITY_TIMEOUT", "1800"))  # 30 min default
 
@@ -112,38 +112,17 @@ def unity_cli() -> Optional[str]:
 
 
 def _resolve_unity_cli() -> Optional[str]:
-    configured = os.environ.get("UNITY_CLI", "").strip()
-    if configured:
-        found = shutil.which(configured) or (configured if os.path.exists(configured) else None)
-        if found:
-            log(f"Unity CLI: {found}")
-            return found
-        log(f"UNITY_CLI set but not found: {configured}")
-        return None
-
-    found = shutil.which("unity")
-    if found:
-        log(f"Unity CLI: {found}")
-        return found
-
-    names = ("unity.exe", "unity") if os.name == "nt" else ("unity",)
-    tried: List[str] = []
-    for directory in CLI_FALLBACK_DIRS:
-        for name in names:
-            candidate = Path(os.path.expanduser(directory)) / name
-            tried.append(str(candidate))
-            if candidate.is_file() and os.access(candidate, os.X_OK):
-                log(f"Unity CLI: {candidate} (in {directory}; not on PATH here)")
-                return str(candidate)
-
-    log(
-        "The Unity CLI ('unity') was not found, so there is no Unity step. "
-        "Checked PATH and: " + ", ".join(tried) + ". "
-        "Install it for the user the runner runs as, and make sure that user's "
-        "PATH has it (the runner user must also be able to read and execute the "
-        "editor the CLI resolves)."
+    return tool_path.find(
+        "unity",
+        CLI_FALLBACK_DIRS,
+        override_env="UNITY_CLI",
+        label="Unity CLI",
+        hint=(
+            "Install it for the user the runner runs as, and make sure that user's "
+            "PATH has it — that user must also be able to read and execute the "
+            "editor the CLI resolves. There is no Unity step without it."
+        ),
     )
-    return None
 
 
 def editor_version() -> str:

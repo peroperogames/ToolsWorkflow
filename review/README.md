@@ -96,7 +96,20 @@ Each tool is instead looked for once per run, in order:
 
 The per-user directories are in that list because that is where these tools install themselves and because a CI service account's `PATH` never contains them: `dotnet tool install -g` writes to `~/.dotnet/tools`, and a runner started by `run.sh` or a service unit inherits a minimal `PATH`. A tool that works when typed by hand and is invisible to a job is that gap and nothing else, so it is closed here rather than left to each runner's configuration.
 
-The log says which one was used, once, as a fact rather than a warning — `Unity CLI: /home/actions/.local/bin/unity (in ~/.local/bin; not on PATH here)` — and when one cannot be found it names every path it checked, so the answer arrives in one run instead of a round of guessing. A step whose tool is missing says so and stands down; it never fails the review. If a runner keeps a tool somewhere genuinely unusual, the fix belongs in the runner's environment (put it on `PATH`, or link it into `~/.local/bin`), where it applies to every job rather than to this one — and for a one-off manual run, `UNITY_CLI`, `INSPECT_JB` and `DOTNET_PATH` are read from the environment as a break-glass override.
+The log says which one was used, once, as a fact rather than a warning — `Unity CLI: /home/actions/.local/bin/unity (in ~/.local/bin; not on PATH here)` — so a build that behaves differently on the runner than it does by hand starts with the answer to "which one ran". A step whose tool is missing says so and stands down; it never fails the review.
+
+**Not found, and not this user's to run, are reported differently**, because they need different fixes and look identical from the outside. A tool installed for *another* user — under `/root`, which a service account cannot even traverse — is invisible to `shutil.which` in exactly the way an uninstalled tool is, and the whole value of `whereis` finding it while the job cannot is the log saying which of the two happened:
+
+```
+ReSharper CLI ('jb') was not found. Checked PATH and: /home/actions/.dotnet/tools/jb,
+/home/actions/.local/bin/jb, /usr/local/bin/jb. Also: /root/.dotnet/tools cannot be read
+by this user. Install it for the user the runner runs as — `dotnet tool install -g
+JetBrains.ReSharper.GlobalTools` — and make sure that user's PATH has it.
+```
+
+`tool_path.py` is what does this: it looks in `PATH` and then in the fallback directories, and on a miss it also checks whether anything on that path exists but is out of reach — an unreadable directory, or a file without the execute bit. Install tools **as the runner's user** (`sudo -u actions …`): copying them in from another user's home keeps that user's ownership, which is how a runner ends up with a tool it can see and not use.
+
+If a runner keeps a tool somewhere genuinely unusual, the fix belongs in the runner's environment (put it on `PATH`, or link it into `~/.local/bin`), where it applies to every job rather than to this one — and for a one-off manual run, `UNITY_CLI`, `INSPECT_JB` and `DOTNET_PATH` are read from the environment as a break-glass override.
 
 ### Project review criteria
 
@@ -348,5 +361,6 @@ Praise is not a finding. A comment that only compliments a change — however te
 - `inspect_code.py` — ReSharper static analysis (`.editorconfig`-driven, multi-solution).
 - `pr_workspace.py` — the one directory per PR: session, Unity project and package clone together, plus the PR head clone.
 - `stage_state.py` — what the checks stage hands to the static and review stages, as a per-run JSON file inside the PR's directory.
+- `tool_path.py` — finding `unity`, `jb` and `dotnet` without being told where they are, and telling "not installed" apart from "not this user's to run".
 - `session.py` — per-PR session log (append-only JSONL, inside the PR's directory).
 - `prompt.md` — default review prompt (auto-improveable via natural language).

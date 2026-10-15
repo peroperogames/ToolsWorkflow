@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import build_log
 import repo_kind
+import tool_path
 
 DOTNET_TIMEOUT = int(os.environ.get("DOTNET_TIMEOUT", "1800"))
 
@@ -44,22 +44,20 @@ def dotnet_path() -> Optional[str]:
     """Path to the .NET SDK CLI, or None when it is not installed.
 
     Reported once as a fact, like the Unity CLI and ``jb``: which one was used is
-    the first thing worth knowing when a build behaves differently on a runner
-    than it does by hand.
+    the first thing worth knowing when a build behaves differently here than it
+    does by hand. Unlike those two it has no fallback directories — the SDK
+    installs itself onto ``PATH``.
     """
-    configured = os.environ.get("DOTNET_PATH", "").strip()
-    if configured:
-        found = shutil.which(configured) or (configured if os.path.exists(configured) else None)
-        if found:
-            return found
-        log(f"DOTNET_PATH set but not found: {configured}")
-        return None
-    found = shutil.which("dotnet")
-    if not found:
-        log("The .NET SDK ('dotnet') is not on PATH; skipping the build/test step.")
-    else:
-        log(f".NET SDK: {found}")
-    return found
+    return tool_path.find(
+        "dotnet",
+        (),
+        override_env="DOTNET_PATH",
+        label=".NET SDK",
+        hint=(
+            "Install it for the user the runner runs as. A repository that ships "
+            "its own solution is not built or tested without it."
+        ),
+    )
 
 
 def solution_projects(solution: str) -> List[Path]:
