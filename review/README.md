@@ -346,6 +346,37 @@ The first is what the package's asmdefs say it is, the second what Unity generat
 
 For a repository that ships its own solution, that solution stays a target as well — see [Review pipeline](#review-pipeline).
 
+### When ReSharper names the fix
+
+The naming inspection does not just object, it says what it wants instead — and the report carries no structured fix, only the sentence:
+
+```xml
+<Issue TypeId="InconsistentNaming" File="Runtime/TestScript.cs" Line="5"
+       Message="Name 'wrongMethodFormat' does not match rule 'Methods'.
+                Suggested name is 'WrongMethodFormat'." />
+```
+
+So the sentence is read, and when the rename is the whole fix it becomes a GitHub suggestion — the author gets a **Commit suggestion** button instead of a description of one:
+
+> ⚠️ **ReSharper**: Name 'wrongMethodFormat' does not match rule 'Methods'. Suggested name is 'WrongMethodFormat'.
+>
+> ```suggestion
+>     private void WrongMethodFormat() { }
+> ```
+
+Three conditions, because a suggestion is an *edit* one click from being committed, and a wrong one is worse than no suggestion at all:
+
+- **The identifier has to be on the line, exactly once, as a whole word.** `Test` inside `TestRunner` is not the name the report meant, and a line mentioning it twice does not say which one to change. A member access (`this.wrongMethodFormat`) is not rewritten either — the suggestion replaces the declaration, not a call.
+- **The block holds the whole line**, indentation included, because that is what the click substitutes.
+- **Nothing else in the clone may use the name.** This is the one that matters: a suggestion edits the single line it is anchored to, and a rename is usually more than one line. The clone is searched once for every name being renamed, and the search is not naive about declarations — an occurrence on a line ReSharper flagged with the *same* naming finding is a declaration of its own symbol, so the two `wrongMethodFormat` methods in CITest's two classes can each be renamed independently. Anything else is a use:
+
+```
+ReSharper: not suggesting a rename of 'wrongMethodFormat' at Runtime/TestScript.cs:3 —
+it is used elsewhere (first at Caller.cs:1), and a suggestion would edit this line only.
+```
+
+That occurrence is deliberately more permissive than the rewrite: `s.wrongMethodFormat()` — a preceding dot — is exactly the use that makes a one-line rename wrong, so the search counts it. A repository too large to walk in `RENAME_SCAN_FILES` files quietly loses its suggestions rather than costing the run. When none of this holds the comment is posted as it always was: the message already carries ReSharper's own "Suggested name is …", so the information is never withheld, only the button.
+
 ### A file no assembly compiles
 
 Unity compiles what an asmdef declares and nothing else. A `.cs` file sitting in a directory — or under a parent directory — with no asmdef is imported as an asset and compiled by no assembly at all, so the build succeeds, the tests pass, and the static analysis reports nothing: **three green results about code nothing has read.** It is also the answer to the question a reviewer asks when the analysis ran and said nothing about their file.

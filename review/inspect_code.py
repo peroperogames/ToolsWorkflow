@@ -16,12 +16,13 @@ both are inspected and their findings de-duplicated.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import subproc
 import tool_path
@@ -184,9 +185,11 @@ def run_inspectcode(target: str, workdir: str, report: Path, timeout: int = 1200
 def parse_report(report_path: str) -> List[Dict[str, Any]]:
     """Parse a ReSharper XML report into issue dicts.
 
-    Each issue: ``{file, line, severity, message, type}``. ``file`` is exactly
-    what the report says — a path relative to the *solution*, per JetBrains'
-    format — and the caller normalizes it with :func:`relative_to_clone`.
+    Each issue: ``{file, line, severity, message, type, rename}``. ``file`` is
+    exactly what the report says — a path relative to the *solution*, per
+    JetBrains' format — and the caller normalizes it with
+    :func:`relative_to_clone`. ``rename`` is the fix the naming inspection asks
+    for, when it asks for one; see :func:`suggested_rename`.
     """
     try:
         tree = ET.parse(report_path)
@@ -223,9 +226,40 @@ def parse_report(report_path: str) -> List[Dict[str, Any]]:
                 "severity": severity,
                 "message": issue.get("Message") or "",
                 "type": type_id,
+                "rename": suggested_rename(type_id, issue.get("Message") or ""),
             }
         )
     return issues
+
+
+# ReSharper's naming inspection is the one that says what it wants instead, and
+# it says it in prose — the report carries no structured fix, only the message
+# and the offset of the offending name:
+#
+#   <Issue TypeId="InconsistentNaming" File="Demo.cs" Offset="133-150" Line="5"
+#          Message="Name 'wrongMethodFormat' does not match rule 'Methods'.
+#                   Suggested name is 'WrongMethodFormat'." />
+#
+# So this reads a sentence and nothing more, and the caller treats it as one: it
+# only becomes a suggested edit when the rename cannot mean anything else.
+_SUGGESTED_NAME = re.compile(
+    r"Name '(?P<current>[^']+)' does not match rule '[^']*'\.\s*"
+    r"Suggested name is '(?P<suggested>[^']+)'\."
+)
+
+
+def suggested_rename(type_id: str, message: str) -> Optional[Tuple[str, str]]:
+    """``(current, suggested)`` when the finding names the rename it wants."""
+    if type_id != "InconsistentNaming":
+        return None
+    match = _SUGGESTED_NAME.search(message or "")
+    if not match:
+        return None
+    current = match.group("current").strip()
+    suggested = match.group("suggested").strip()
+    if not current or not suggested or current == suggested:
+        return None
+    return current, suggested
 
 
 def relative_to_clone(file_value: str, target: str, workdir: str) -> str:

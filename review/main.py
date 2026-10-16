@@ -58,7 +58,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.43"
+VERSION = "2026-10-14.unity.44"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -2872,6 +2872,85 @@ def report_build_result(
             gh.post_comment(owner, repo, number, body)
 
 
+def renamed_line(line: str, rename: Tuple[str, str]) -> Optional[str]:
+    """`line` with the identifier renamed, or None when that would be a guess.
+
+    A suggestion block replaces the whole line, so a guess here is not a wrong
+    comment — it is a wrong *edit*, one click from being committed. The
+    identifier therefore has to appear exactly once, as a whole word: `Test`
+    inside `TestRunner` is not the name the report meant, and a line mentioning it
+    twice does not say which one to change. Anything else keeps the plain
+    comment, which is what it would have been anyway.
+    """
+    current, suggested = rename
+    if not line or not current or not suggested or current == suggested:
+        return None
+    if suggested in line:
+        return None
+    whole = re.compile(r"(?<![\w.])" + re.escape(current) + r"(?![\w])")
+    if len(whole.findall(line)) != 1:
+        return None
+    return whole.sub(suggested, line, count=1)
+
+
+def suggestion_block(line: str) -> str:
+    """GitHub's one-click edit: a fenced block holding the whole line.
+
+    It has to be the complete text of the line it is anchored to, indentation
+    included, because that is what the author's click replaces it with.
+    """
+    return "```suggestion\n" + line + "\n```"
+
+
+# How many source files the rename check will read. Past this it declines rather
+# than walking a repository the size of which it has no idea of.
+RENAME_SCAN_FILES = 4000
+
+
+def occurrences_in_clone(workdir: str, names: Sequence[str]) -> Dict[str, Set[Tuple[str, int]]]:
+    """Where each name occurs in the clone's C# sources: ``{name: {(path, line)}}``.
+
+    One walk for all of them. Only used to decide whether a name appears
+    *anywhere but its own declaration*, so a repository too large to walk in
+    ``RENAME_SCAN_FILES`` files yields an empty map and costs the suggestions
+    rather than the run.
+    """
+    if not names or not workdir or not os.path.isdir(workdir):
+        return {}
+    wanted = set(names)
+    # Unlike the rewrite, a preceding dot does *not* disqualify an occurrence:
+    # `s.wrongMethodFormat()` is exactly the use that makes a one-line rename
+    # wrong, and it is the commonest way one appears.
+    patterns = {
+        name: re.compile(r"(?<![\w])" + re.escape(name) + r"(?![\w])") for name in wanted
+    }
+    found: Dict[str, Set[Tuple[str, int]]] = {name: set() for name in wanted}
+    read = 0
+    for path in repo_kind.walk_files(Path(workdir), lambda p: p.suffix == ".cs"):
+        read += 1
+        if read > RENAME_SCAN_FILES:
+            log(
+                f"ReSharper: more than {RENAME_SCAN_FILES} source files to search for "
+                f"{len(wanted)} name(s); not offering suggestions for them."
+            )
+            return {}
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if not any(name in text for name in wanted):
+            continue
+        try:
+            absolute = str(path.resolve())
+        except OSError:
+            continue
+        for number, line_text in enumerate(text.splitlines(), start=1):
+            for name, pattern in patterns.items():
+                if name in line_text and pattern.search(line_text):
+                    found[name].add((absolute, number))
+    return found
+
+
 def report_uncompiled_changes(
     gh: GitHubClient,
     owner: str,
@@ -3168,11 +3247,27 @@ def run_static_analysis(
     # findings under one line. The quote still decides the position; the number
     # only says which of several identical candidates was meant.
     patches = {f.get("filename", ""): (f.get("patch") or "") for f in files}
+    # (path, line, body) -> (the line as it is, the line with the rename applied,
+    # the name being renamed). Held aside rather than appended to the body here,
+    # because the body is built before the comment knows which line it will land
+    # on and a suggestion has to be that line's text.
+    proposals: Dict[Tuple[str, int, str], Tuple[str, str, str]] = {}
+    # Every place ReSharper reported the same naming finding for a name. Each is a
+    # declaration of its own symbol — a method of this class, a field of that one —
+    # so renaming one says nothing about the others. Anything else is a *use*.
+    declarations: Dict[str, Set[Tuple[str, int]]] = {}
     raw: List[Dict[str, Any]] = []
     seen: set = set()
     repeated = 0
     for issue in issues:
         path = issue["file"]
+        rename = issue.get("rename")
+        if rename:
+            try:
+                site = (str((Path(workdir) / path).resolve()), int(issue["line"]))
+            except OSError:
+                site = ("", 0)
+            declarations.setdefault(rename[0], set()).add(site)
         matched = path if path in patches else next(
             (fn for fn in patches if path.endswith(fn) or fn.endswith(path)), None
         )
@@ -3190,6 +3285,9 @@ def run_static_analysis(
         if (matched, _normalized(body)) in already:
             repeated += 1
             continue
+        replacement = renamed_line(quote, rename) if rename else None
+        if replacement is not None:
+            proposals[(matched, issue["line"], body)] = (quote, replacement, rename[0])
         raw.append(
             {
                 "path": matched,
@@ -3202,9 +3300,49 @@ def run_static_analysis(
     if repeated:
         log(f"ReSharper: {repeated} finding(s) skipped — already raised in an open thread.")
 
+    # A suggestion edits the one line it is anchored to. A rename that has uses
+    # elsewhere is therefore not a fix but half of one: the author clicks, the
+    # other references keep the old name, and the commit does not compile. So the
+    # name has to be used nowhere but where it is declared — which the report
+    # itself answers, since every use it did not flag is a line we must not touch.
+    if proposals:
+        names = sorted({p[2] for p in proposals.values()})
+        occurrences = occurrences_in_clone(workdir, names)
+        for key, (original, replacement, name) in list(proposals.items()):
+            elsewhere = occurrences.get(name, set()) - declarations.get(name, set())
+            if elsewhere:
+                path, line = sorted(elsewhere)[0]
+                log(
+                    f"ReSharper: not suggesting a rename of '{name}' at {key[0]}:{key[1]} — "
+                    f"it is used elsewhere (first at {Path(path).name}:{line}), and a "
+                    "suggestion would edit this line only."
+                )
+                del proposals[key]
+
     normalized = normalize_inline_comments(raw, files)
     if not normalized:
         return 0
+
+    suggested = 0
+    for comment in normalized:
+        proposal = proposals.get((comment["path"], comment["line"], comment["body"]))
+        if proposal is None:
+            continue
+        original, replacement = proposal[0], proposal[1]
+        # The block replaces the line the comment lands on, so if the anchor
+        # settled somewhere else the replacement is not that line's text — and a
+        # suggestion is an edit, not a remark. Not offered.
+        if _line_text(patches.get(comment["path"], ""), comment["line"]) != original:
+            log(
+                f"ReSharper: no suggested change for {comment['path']}:{comment['line']} "
+                "— the comment did not land on the line it was planned for."
+            )
+            continue
+        comment["body"] = comment["body"] + "\n\n" + suggestion_block(replacement)
+        suggested += 1
+    if suggested:
+        log(f"ReSharper: {suggested} finding(s) came with the fix ReSharper suggested.")
+
     if config.dry_run:
         for c in normalized:
             print(f"[static] {c['path']}:{c['line']} {c['body']}")
