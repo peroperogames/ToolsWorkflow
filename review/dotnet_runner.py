@@ -146,6 +146,11 @@ class DotnetResult:
         return self.compiled and self.tests_ok
 
     def summary(self) -> str:
+        """One line about this step, for the pull request.
+
+        The bot speaks the review's language on the pull request; :meth:`outcome`
+        is the same thing for the job log, which is English throughout.
+        """
         if not self.ran:
             return ""
         if self.ok:
@@ -156,6 +161,19 @@ class DotnetResult:
         if not self.tests_ok:
             parts.append(f"{len(self.test_failures)} 个单元测试失败")
         return "🔴 .NET: " + ";".join(parts) + "。"
+
+    def outcome(self) -> str:
+        """The same result for the job log. Empty when the step did not run."""
+        if not self.ran:
+            return ""
+        if self.ok:
+            return ".NET: built" + (" and tested." if self.tested else ".")
+        parts = []
+        if not self.compiled:
+            parts.append(f"{len(self.compile_errors)} compile error(s)")
+        if not self.tests_ok:
+            parts.append(f"{len(self.test_failures)} test failure(s)")
+        return ".NET: " + ", ".join(parts) + "."
 
 
 def analyze(clone_dir: str, solution: str, report_dir: Path) -> DotnetResult:

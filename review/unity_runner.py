@@ -962,6 +962,12 @@ class UnityResult:
         return self.compiled and self.tests_ok
 
     def summary(self) -> str:
+        """One line about this step, for the pull request.
+
+        The bot speaks the review's language on the pull request, so these are
+        the Chinese strings a reader there expects — and :meth:`outcome` is the
+        same thing for the job log, which is written in English throughout.
+        """
         if not self.ran:
             return ""
         if self.ok:
@@ -972,6 +978,24 @@ class UnityResult:
         if not self.tests_ok:
             parts.append(f"{len(self.test_failures)} 个单元测试失败")
         return "🔴 Unity: " + ";".join(parts) + "。"
+
+    def outcome(self) -> str:
+        """The same result for the job log.
+
+        Every other line the pipeline writes is English, and a lone Chinese
+        sentence in the middle of them reads as a mistake rather than as a
+        translation. Empty when the step did not run, like :meth:`summary`.
+        """
+        if not self.ran:
+            return ""
+        if self.ok:
+            return "Unity: compiled and tested."
+        parts = []
+        if not self.compiled:
+            parts.append(f"{len(self.compile_errors)} compile error(s)")
+        if not self.tests_ok:
+            parts.append(f"{len(self.test_failures)} test failure(s)")
+        return "Unity: " + ", ".join(parts) + "."
 
 
 def analyze(
