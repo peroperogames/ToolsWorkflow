@@ -292,7 +292,12 @@ Two things that do not work, and why:
 
 The CLI must be executable by the user the runner runs as, and so must the editor that the CLI resolves (a Hub under `/root` is not visible to a runner running as anyone else). Where the CLI itself lives is found rather than configured — see [Nothing asks where a tool is](#nothing-asks-where-a-tool-is).
 
-The action also normalises `XDG_RUNTIME_DIR` before running: a CI service account has no login session, so it is either unset or inherited from whoever started the runner — another user's directory — and the CLI's auth broker needs one it can create a socket in. Getting that wrong surfaces much later as a licence failure, so it is fixed here rather than left to each runner's configuration.
+`XDG_RUNTIME_DIR` is corrected once, in `main.py`'s `prepare_environment`, before any stage runs: a CI service account has no login session, so it is either unset or inherited from whoever started the runner — another user's directory, mode `0700`. **Two separate things break on it and both look like something else:**
+
+- The Unity CLI's auth broker cannot create its socket and refuses to serve, which surfaces much later as a **licence failure**.
+- ReSharper's Roslyn host cannot read its own working files — the run's log says `lstat("/run/user/0/.dotnet") == EACCES` — and **stops loading analyzers and source generators**. Every member a generator would have referenced is then reported as *never used*: a wrong comment on a pull request, caused by an environment variable.
+
+It is done in Python rather than in the action's shell because every stage needs it, including the review step, which runs the other two stages' work itself when a review was asked for in a comment. One place that every process goes through is the only version that stays true.
 
 ### Scoped registries
 

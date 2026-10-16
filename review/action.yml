@@ -97,6 +97,12 @@ runs:
     # exits 0, so the steps that follow do run. A *crash* stops the run, which is
     # what it should keep doing: turning that into a green job whose review
     # silently had no build results is the one outcome worth failing for.
+    # The environment every stage runs in is settled by main.py itself rather than
+    # by a block of shell here — see `prepare_environment`. It has to hold for the
+    # stage that runs ReSharper as much as for the one that runs Unity, and a
+    # comment path runs both inside the review step, so one place that every
+    # process goes through is the only version that stays true.
+    #
     # A closed pull request is not reviewed, so it is not reviewed here either:
     # one step, named for what it does, and none of the three that would say it
     # was built, analysed and read.
@@ -118,19 +124,7 @@ runs:
         UNITY_EDITOR_VERSION: ${{ inputs.unity-editor-version }}
         UNITY_TEMPLATE: ${{ inputs.unity-template }}
         UNITY_SYNC_METHOD: ${{ inputs.unity-sync-method }}
-      run: |
-        # A CI service account has no login session, so XDG_RUNTIME_DIR is either
-        # unset or — worse — inherited from whoever started the runner, which is
-        # another user's directory. The Unity CLI's auth broker needs one it can
-        # create a socket in and refuses to serve otherwise, which shows up much
-        # later as a licence failure. Point it at this user's own directory, or
-        # drop it rather than hand over someone else's.
-        if [ -d "/run/user/$(id -u)" ]; then
-          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-        else
-          unset XDG_RUNTIME_DIR
-        fi
-        python3 "$GITHUB_ACTION_PATH/main.py" checks
+      run: python3 "$GITHUB_ACTION_PATH/main.py" checks
 
     - name: Run the static analysis
       if: github.event.action != 'closed'

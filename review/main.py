@@ -58,7 +58,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.49"
+VERSION = "2026-10-14.unity.50"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -260,6 +260,43 @@ LANGUAGE_ALIASES = {
 def log(message: str) -> None:
     """Print a progress message to stderr (stdout is reserved for the review)."""
     print(message, file=sys.stderr)
+
+
+def prepare_environment() -> None:
+    """Point ``XDG_RUNTIME_DIR`` at a directory this user can actually use.
+
+    A CI service account has no login session, so the variable is either unset or
+    — worse — inherited from whoever started the runner, and that is another
+    user's directory, mode 0700, which this one cannot enter. Two separate things
+    break because of it, and both look like something else:
+
+    * The Unity CLI's auth broker cannot create its socket and refuses to serve,
+      which surfaces much later as a licence failure.
+    * ReSharper's Roslyn host cannot read its own working files —
+      ``lstat("/run/user/0/.dotnet") == EACCES`` — and stops loading analyzers and
+      source generators. Every member a generator would have referenced is then
+      reported as never used: a wrong comment on a pull request, from an
+      environment variable.
+
+    So it is pointed at this user's own runtime directory where one exists, and
+    dropped rather than handed someone else's where it does not. Done here rather
+    than in the action's shell so that every stage, and every stage that runs
+    another stage's work, gets it.
+    """
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:  # Windows: no such directory, nothing to correct.
+        return
+
+    own = f"/run/user/{getuid()}"
+    current = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    if os.path.isdir(own):
+        if current != own:
+            log(f"XDG_RUNTIME_DIR: {current or '(unset)'} -> {own}")
+            os.environ["XDG_RUNTIME_DIR"] = own
+        return
+    if current and not os.access(current, os.X_OK):
+        log(f"XDG_RUNTIME_DIR {current} is not this user's to use; dropping it.")
+        os.environ.pop("XDG_RUNTIME_DIR", None)
 
 
 def force_utf8_output() -> None:
@@ -4487,6 +4524,7 @@ def _changed_files(
 
 def main() -> int:
     force_utf8_output()
+    prepare_environment()
     stage = (sys.argv[1] if len(sys.argv) > 1 else "all").strip().lower()
     if stage not in (*STAGES, CLEANUP, "all"):
         log(
