@@ -58,7 +58,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.39"
+VERSION = "2026-10-14.unity.40"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -2508,8 +2508,6 @@ def run_review_checks(
         owner, repo, number, pr.get("head", {}).get("sha", ""), config.github_token
     )
     kind = repo_kind.detect(staging) if staging else repo_kind.Kind(repo_kind.KIND_OTHER)
-    checks.kind = kind
-    log(f"Repository kind: {kind.describe()}.")
 
     # The Unity project directory is the PR's directory, and the CLI will not lay
     # one out where a path already exists — so for a package the project is
@@ -2518,6 +2516,17 @@ def run_review_checks(
         unity_runner.reserve_project(owner, repo, number)
     clone_dir = pr_workspace.place_clone(owner, repo, number)
     checks.clone_dir = clone_dir
+
+    # Classified again, where the clone actually lives now. On a first review it
+    # was classified in the staging directory it was cloned into, and every path
+    # the classification carries — the package root, the repository's solution —
+    # pointed there. The package root goes straight into the Unity project's
+    # manifest as a `file:` dependency, so a stale one is a package Unity cannot
+    # find, and the solution is what the .NET step builds.
+    if clone_dir and staging and clone_dir != staging:
+        kind = repo_kind.detect(clone_dir)
+    checks.kind = kind
+    log(f"Repository kind: {kind.describe()}.")
 
     # A UPM package is built and tested in this PR's own Unity project; a
     # repository's own solution is built (and tested, when it has tests) with the
@@ -3030,10 +3039,17 @@ def run_static_analysis(
         if not unity.package_projects and unity.sln_path:
             targets.append(unity.sln_path)
     if not targets:
-        if unity is not None and unity.ran:
-            # The Unity step ran but generated nothing to inspect. "No solution
-            # for this repository" would be true and useless; the reason is
-            # upstream, in the generation step.
+        if unity is not None and not unity.ran:
+            # The reason is upstream and worth naming: a package's projects only
+            # exist because the Unity step ran, so "no solution" would be true and
+            # would send the reader looking for a solution that was never the
+            # point.
+            log(
+                "The Unity step did not run this time, so the projects it generates "
+                "for the package do not exist; its own log says why. Skipping static "
+                "analysis."
+            )
+        elif unity is not None:
             log("The Unity step produced no solution to inspect; skipping static analysis.")
         else:
             log("No solution for this repository; skipping static analysis.")

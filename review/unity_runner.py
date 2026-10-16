@@ -277,7 +277,12 @@ def _write_manifest(project: str, data: Dict[str, Any]) -> None:
 
 
 def project_has_package(project: str, pkg_name: str) -> bool:
-    """Is ``pkg_name`` already a dependency of the project?"""
+    """Is ``pkg_name`` already a dependency of the project?
+
+    Only the name, which is all this is good for now that
+    :func:`ensure_package` compares the path as well — a dependency pointing
+    somewhere stale is present by name and useless in fact.
+    """
     try:
         deps = _read_manifest(project).get("dependencies") or {}
         return pkg_name in deps
@@ -471,10 +476,24 @@ def ensure_package(project: str, package_name: str, package_root: str) -> bool:
 
     The clone itself is the caller's business (:func:`pr_workspace.clone_pr_head`);
     this is only the manifest side of it.
+
+    The *path* is checked and not just the name, because the project outlives any
+    one run while the clone it points at does not stay put: on a first review the
+    clone is created in a staging directory, classified there, and moved into the
+    project afterwards. A `file:` entry written from the staging path points at a
+    directory that no longer exists, and Unity refuses to resolve the package —
+    "Project has invalid dependencies" — which is the whole build and test step
+    gone. Repairing it here also fixes a project left in that state by an earlier
+    version, without anyone having to delete it.
     """
     try:
-        if not project_has_package(project, package_name):
-            log(f"Adding {package_name} to the Unity project as a file: dependency.")
+        wanted = "file:" + package_root.replace("\\", "/")
+        current = (_read_manifest(project).get("dependencies") or {}).get(package_name)
+        if current != wanted:
+            if current:
+                log(f"Repointing {package_name} from {current} to {wanted}.")
+            else:
+                log(f"Adding {package_name} to the Unity project as a file: dependency.")
             _manifest_add(project, package_name, package_root)
     except (OSError, ValueError) as exc:
         log(f"Could not add the package to the project manifest: {exc}")
