@@ -97,7 +97,19 @@ runs:
     # exits 0, so the steps that follow do run. A *crash* stops the run, which is
     # what it should keep doing: turning that into a green job whose review
     # silently had no build results is the one outcome worth failing for.
+    # A closed pull request is not reviewed, so it is not reviewed here either:
+    # one step, named for what it does, and none of the three that would say it
+    # was built, analysed and read.
+    - name: Delete the closed pull request's working directory
+      if: github.event.action == 'closed'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        REVIEW_WORK_DIR: ${{ inputs.state-dir }}
+      run: python3 "$GITHUB_ACTION_PATH/main.py" cleanup
+
     - name: Build and test the pull request
+      if: github.event.action != 'closed'
       shell: bash
       env:
         GITHUB_TOKEN: ${{ inputs.github-token }}
@@ -121,6 +133,7 @@ runs:
         python3 "$GITHUB_ACTION_PATH/main.py" checks
 
     - name: Run the static analysis
+      if: github.event.action != 'closed'
       shell: bash
       env:
         # No model key here on purpose: this stage runs the repository's own
@@ -133,6 +146,7 @@ runs:
       run: python3 "$GITHUB_ACTION_PATH/main.py" static
 
     - name: Review and settle the threads
+      if: github.event.action != 'closed'
       shell: bash
       env:
         GITHUB_TOKEN: ${{ inputs.github-token }}

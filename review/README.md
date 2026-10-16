@@ -51,9 +51,10 @@ python main.py            # all three stages, in order, in one process
 python main.py checks     # build and test only
 python main.py static     # static analysis only, over what `checks` left behind
 python main.py review     # the model's review and the thread settling
+python main.py cleanup    # delete a closed pull request's working directory
 ```
 
-The action passes one stage per step; running `main.py` bare does all three, which is what a manual run wants. A single stage is how you re-run just that part against a pull request that is already checked out, and an unknown stage name exits `2` rather than guessing.
+The action passes one stage per step; running `main.py` bare does the three that make a review, which is what a manual run wants. A single stage is how you re-run just that part against a pull request that is already checked out, and an unknown stage name exits `2` rather than guessing. `cleanup` is not part of a review and is not in `all`: it is what a closed pull request gets instead of one.
 
 Every setting is reachable three ways: the `with:` input when calling the reusable workflow, the same input when using the composite action directly, and the environment variable when running `main.py` yourself. The table lists all three so they cannot drift apart.
 
@@ -222,6 +223,10 @@ The action runs the pipeline as three steps, one Python process each:
 | `main.py checks` | clone, classify, build, test — and write down what the rest needs |
 | `main.py static` | `jb inspectcode` over what the checks stage left behind |
 | `main.py review` | the model's review, then settle the threads and approve |
+
+**A closed pull request gets one step, not those three.** `github.event.action == 'closed'` selects `cleanup`, which deletes what the pull request left behind and nothing else, and skips the three; every other event is the other way round. Without it the run for a *close* announced "Build and test the pull request", "Run the static analysis" and "Review and settle the threads" and then did none of them — three steps named for work they were not going to do, which is the same lie the pipeline refuses elsewhere. The step names in the calling workflow are chosen the same way, by an expression, so the one step reads *Forget the closed pull request* or *Review the pull request* depending on why it is running.
+
+The stage is still the authority: a closed pull request that arrives some other way — a comment on it, a day later — is forgotten by the first stage regardless of what the workflow skipped. `cleanup` on an open pull request says so and deletes nothing.
 
 **No step sets a timeout, because a composite action's steps cannot.** `timeout-minutes` is rejected outright — "Unexpected value 'timeout-minutes'" — and the runner refuses the whole manifest, so no step runs at all. The ceiling is therefore the job's, set to 150 minutes in `code-review.yml` rather than GitHub's 360-minute default, and everything under it is bounded by the deadlines the stages put on their own subprocesses.
 

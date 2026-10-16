@@ -112,7 +112,7 @@ jobs:
           private-key: ${{ secrets.APP_PK }}
           repositories: ${{ github.event.repository.name }}, ToolsWorkflow
 
-      - name: Run AI code review
+      - name: ${{ github.event.action == 'closed' && 'Forget the closed pull request' || 'Review the pull request' }}
         uses: peroperogames/ToolsWorkflow/review@main
         with:
           github-token: ${{ steps.generate_token.outputs.token }}

@@ -58,7 +58,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.45"
+VERSION = "2026-10-14.unity.46"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3845,6 +3845,20 @@ def act_on_clean_verdict(
 # and it is the fallback if the split ever has to be undone.
 STAGES = ("checks", "static", "review")
 
+# Not a stage of a review: a closed pull request has nothing to review, and the
+# only thing left to do for it is delete what it left behind. Its own entry point
+# so the step that runs it can say so instead of announcing a build and a review.
+CLEANUP = "cleanup"
+
+
+def forget_pull_request(owner: str, repo: str, number: int) -> None:
+    """Delete everything a closed pull request owns, and say so."""
+    unity_runner.cleanup(owner, repo, number)
+    log(
+        f"Pull Request #{number} is closed; deleted its session, Unity "
+        "project and package clone."
+    )
+
 
 def _comment_event(event_name: str) -> bool:
     """Did this run start from a comment rather than from the pull request?
@@ -4388,17 +4402,26 @@ def run_stage(stage: str) -> int:
         log(f"Language: {config.language}")
 
     pr = gh.get_pull_request(owner, repo, number)
+    closed = (pr.get("state") or "open") == "closed"
+
+    # The whole of what a closed pull request needs, and nothing else: no build,
+    # no analysis, no model. Its own entry point so that a step can be named for
+    # it rather than for work that is not going to happen.
+    if stage == CLEANUP:
+        if closed:
+            forget_pull_request(owner, repo, number)
+        else:
+            log(f"Pull Request #{number} is still open; there is nothing to delete.")
+        return 0
 
     # Closed PRs need no review, and nothing about them should outlive them: the
     # PR's one directory holds its agent session, its Unity project and the
-    # package clone, and all three go together. The first stage does it, once.
-    if (pr.get("state") or "open") == "closed":
+    # package clone, and all three go together. Reaching here with a closed pull
+    # request means the event was not the close itself — a comment on a closed
+    # PR, say — so the first stage still does it, once.
+    if closed:
         if stage == STAGES[0]:
-            unity_runner.cleanup(owner, repo, number)
-            log(
-                f"Pull Request #{number} is closed; deleted its session, Unity "
-                "project and package clone."
-            )
+            forget_pull_request(owner, repo, number)
         return 0
 
     # Merges from release branches back to master/main don't need review.
@@ -4447,8 +4470,11 @@ def _changed_files(
 def main() -> int:
     force_utf8_output()
     stage = (sys.argv[1] if len(sys.argv) > 1 else "all").strip().lower()
-    if stage not in (*STAGES, "all"):
-        log(f"Unknown stage {stage!r}; expected one of: {', '.join((*STAGES, 'all'))}.")
+    if stage not in (*STAGES, CLEANUP, "all"):
+        log(
+            f"Unknown stage {stage!r}; expected one of: "
+            f"{', '.join((*STAGES, CLEANUP, 'all'))}."
+        )
         return 2
 
     for name in STAGES if stage == "all" else (stage,):
