@@ -346,6 +346,23 @@ The first is what the package's asmdefs say it is, the second what Unity generat
 
 For a repository that ships its own solution, that solution stays a target as well — see [Review pipeline](#review-pipeline).
 
+### A file no assembly compiles
+
+Unity compiles what an asmdef declares and nothing else. A `.cs` file sitting in a directory — or under a parent directory — with no asmdef is imported as an asset and compiled by no assembly at all, so the build succeeds, the tests pass, and the static analysis reports nothing: **three green results about code nothing has read.** It is also the answer to the question a reviewer asks when the analysis ran and said nothing about their file.
+
+So the changed files are checked against what the generated projects actually compile, and a file in neither is reported on the pull request, once:
+
+```
+⚠️ 以下改动文件没有被任何程序集编译，因此本次编译、单元测试和静态分析
+都没有覆盖它们——三项全绿，但关于这些文件的结论没有依据。
+
+- `Runtime/TestScript.cs`
+```
+
+The comparison is exact — the `<Compile Include>` items of the package's own generated projects against the pull request's changed `.cs` files under the package root. Files under a `~` directory (`Samples~`, `Documentation~`) are excluded, because Unity ignores those on purpose, as are files the pull request deleted and files outside the package. Nothing is claimed when the package's projects are not known: an unanalysable repository must not look like one with an uncovered file.
+
+This is the one check that could not have been written as "did the step fail". It reports a *pass* that does not mean what it looks like.
+
 ### ReSharper findings are not repeated
 
 The static-analysis step posts on its own, without going through the model, so it does not inherit the model's three defences against repeating itself (it only sees the latest push's diff, it remembers what it posted, and it reads the thread states). It has its own two:

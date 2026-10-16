@@ -58,7 +58,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.41"
+VERSION = "2026-10-14.unity.42"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -2857,6 +2857,56 @@ def report_build_result(
             gh.post_comment(owner, repo, number, body)
 
 
+def report_uncompiled_changes(
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    files: List[Dict[str, Any]],
+    config: "Config",
+    clone_dir: Optional[str],
+    kind: Optional["repo_kind.Kind"],
+    unity: "unity_runner.UnityResult",
+) -> List[str]:
+    """Say so when a changed file is not compiled by anything.
+
+    The one result the pipeline cannot otherwise tell from a clean pass: a source
+    file no assembly compiles makes the build succeed, the tests pass and the
+    static analysis report nothing, all three about code nothing has read. It is
+    also the answer to "the analysis ran and said nothing about my file".
+
+    Posted once per PR, like the other standing notes: it describes a condition,
+    not a change.
+    """
+    if not kind or not kind.is_package or not unity.package_projects:
+        return []
+    missing = unity_runner.uncompiled_package_sources(
+        files, clone_dir or "", kind.package_root, unity.package_projects
+    )
+    if not missing:
+        return []
+
+    log(
+        "Not compiled by any assembly the package declares: "
+        + ", ".join(missing)
+        + " — the build, the tests and the static analysis all miss them."
+    )
+    listing = "\n".join(f"- `{name}`" for name in missing)
+    body = (
+        "⚠️ **以下改动文件没有被任何程序集编译**，因此本次编译、单元测试和静态分析\n"
+        "都没有覆盖它们——三项全绿，但关于这些文件的结论没有依据。\n\n"
+        f"{listing}\n\n"
+        "Unity 只编译 asmdef 声明过的程序集：文件所在目录（含父级）没有 asmdef，"
+        "它就不会进入任何程序集。给该目录加一个 asmdef，或把文件移到已有程序集的目录下。"
+    )
+    if config.dry_run:
+        print(body)
+        return missing
+    if not bot_comment_exists(gh, owner, repo, number, body):
+        gh.post_comment(owner, repo, number, body)
+    return missing
+
+
 def run_unity_checks(
     gh: GitHubClient,
     owner: str,
@@ -2884,6 +2934,11 @@ def run_unity_checks(
     report_build_result(
         gh, owner, repo, number, files, config,
         pr.get("head", {}).get("sha", ""), result,
+    )
+    # After the build, not before: this is about what the assemblies that were
+    # just generated do and do not contain.
+    report_uncompiled_changes(
+        gh, owner, repo, number, files, config, clone_dir, kind, result
     )
     return result
 

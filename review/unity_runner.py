@@ -25,7 +25,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 import build_log
 import pr_workspace
@@ -746,6 +746,74 @@ def package_assemblies(package_root: str) -> List[str]:
     return sorted(names)
 
 
+def _compiled_sources(csproj: Path) -> Iterator[Path]:
+    """Every source file one generated project compiles, as absolute paths."""
+    try:
+        text = csproj.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    for match in _CS_COMPILE.finditer(text):
+        source = Path(match.group(1).replace("\\", "/"))
+        if not source.is_absolute():
+            source = csproj.parent / source
+        try:
+            yield source.resolve()
+        except OSError:
+            continue
+
+
+def compiled_sources(projects: Sequence[str]) -> Set[str]:
+    """Every source file the given generated projects compile."""
+    found: Set[str] = set()
+    for project in projects:
+        for source in _compiled_sources(Path(project)):
+            found.add(str(source))
+    return found
+
+
+def uncompiled_package_sources(
+    files: Sequence[Dict[str, Any]], clone_dir: str, package_root: str, projects: Sequence[str]
+) -> List[str]:
+    """Changed sources under the package that no assembly compiles.
+
+    A Unity package only compiles what an asmdef declares. A ``.cs`` file in a
+    directory without one — ``Runtime/`` in a package whose only asmdef is
+    ``Tests/``, say — is imported as an asset and compiled by nothing, so the
+    build succeeds, the tests pass and the static analysis finds nothing: three
+    green results about a file that was never looked at. The file names are
+    returned in the diff's own spelling, since that is what a reader can act on.
+    """
+    if not package_root or not projects:
+        return []
+    compiled = compiled_sources(projects)
+    if not compiled:
+        return []
+    try:
+        root = Path(package_root).resolve()
+        clone = Path(clone_dir).resolve() if clone_dir else root
+    except OSError:
+        return []
+
+    missing: Set[str] = set()
+    for entry in files:
+        name = str(entry.get("filename") or "")
+        parts = Path(name).parts
+        # Unity ignores a directory whose name ends in `~` — Samples~ and
+        # Documentation~ are for humans and imported as nothing at all.
+        if not name.endswith(".cs") or any(part.endswith("~") for part in parts):
+            continue
+        source = (clone / name)
+        try:
+            source = source.resolve()
+            source.relative_to(root)
+        except (ValueError, OSError):
+            continue  # not the package's file
+        # A deleted file is not a coverage problem.
+        if source.is_file() and str(source) not in compiled:
+            missing.add(name)
+    return sorted(missing)
+
+
 def package_projects(project: str, package_root: str) -> List[str]:
     """The generated C# projects that compile the package under review.
 
@@ -768,17 +836,10 @@ def package_projects(project: str, package_root: str) -> List[str]:
 
     found: List[str] = []
     for csproj in generated_projects(project):
-        try:
-            text = csproj.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        for match in _CS_COMPILE.finditer(text):
-            source = Path(match.group(1).replace("\\", "/"))
-            if not source.is_absolute():
-                source = csproj.parent / source
+        for source in _compiled_sources(csproj):
             try:
-                source.resolve().relative_to(wanted)
-            except (ValueError, OSError):
+                source.relative_to(wanted)
+            except ValueError:
                 continue
             found.append(str(csproj))
             break
