@@ -301,15 +301,21 @@ Every per-PR Unity project is pointed at the organization's package feeds, so a 
 | Name | URL | Scopes |
 | --- | --- | --- |
 | `Peropero` | `https://unitypkg.peropero.net` | `com.prpr` |
-| `OpenUPM` | `https://package.openupm.com` | `com.niftyhat`, `com.cysharp`, `org.nuget.castle`, `org.nuget.system`, `org.nuget.google`, `org.nuget.microsoft`, `org.nuget.zlinq`, `com.neuecc` |
+| `OpenUPM` | `https://package.openupm.com` | `com.niftyhat`, `com.cysharp`, `org.nuget.castle`, `org.nuget.system`, `org.nuget.google`, `org.nuget.microsoft`, `org.nuget.zlinq`, `com.neuecc`, `org.nuget.moq` |
 
-The list is `SCOPED_REGISTRIES` in `unity_runner.py`. It is written into the project's `Packages/manifest.json` and **merged, never overwritten**: a registry a previous run or the template already declared keeps its own scopes and URL, and a registry of the same name keeps every scope it had — the wanted ones are added to it. It is re-applied on every run, including the reuse path, so a project created before a registry was added is brought up to date instead of staying stale.
+The list is `SCOPED_REGISTRIES` in `unity_runner.py`. It is written into the project's `Packages/manifest.json` and re-applied on every run, including the reuse path, so a project created before a registry or a scope was added is brought up to date instead of staying stale.
+
+**The scopes are merged; the URL is not.** A registry of the same name keeps every scope it already had and gains the ones it is missing — a mirror, or an extra scope somebody added, survives. The URL is the configured one, which is what lets a feed that moves reach the projects that already exist rather than only the ones created afterwards; a repoint is logged, because it changes where a project resolves packages from.
 
 ### Running the package's own tests
 
 The package under review is also registered in the project's `testables` (next to its `file:` dependency), which is what makes Unity compile its test assemblies and run them. A package that is only a dependency has its tests **ignored, not failed** — the test run reports nothing at all, so a package with broken tests would look like a clean pass. Like the registries, the entry is written idempotently and re-applied on every run, so a project created before this existed is fixed rather than left silently untested.
 
-The project's `com.unity.test-framework` is raised to 1.3.4 if it is missing or older. The 3D template pulls an older one in through `com.unity.feature.development`, and a test assembly written against the newer TestRunner API does not compile against it. It is raised, never lowered: an explicit newer version, or a `file:`/git reference, is left alone.
+The project's `com.unity.test-framework` is raised to 1.3.4 if it is missing or older. The 3D template pulls an older one in through `com.unity.feature.development`, and a test assembly written against the newer TestRunner API does not compile — or run — against it.
+
+`org.nuget.moq` is provided the same way, at 4.21.0, for the same kind of reason and a different cause: a package's test assemblies reference `Moq.dll` — declared in the package's own asmdef under `precompiledReferences` — and the per-PR project starts from the 3D template's manifest, which has never heard of it, so the reference does not resolve and the test assembly does not compile. It comes from OpenUPM, which is why `org.nuget.moq` is in that registry's scopes.
+
+Both follow one rule, in `ensure_minimum_version`: absent → added at the minimum, older → raised, at or above → untouched, and a `file:` or git reference → untouched, because that is the repository's deliberate choice.
 
 One consequence of compiling the tests at all: a package whose tests do not compile gets **no project files generated for it**, so ReSharper cannot inspect that package in that run. The compile errors themselves are still posted on the changed lines, so the pull request is told what is wrong — but the static analysis is blind until they are fixed.
 

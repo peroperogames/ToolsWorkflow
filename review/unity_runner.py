@@ -350,6 +350,7 @@ SCOPED_REGISTRIES: List[Dict[str, Any]] = [
             "org.nuget.microsoft",
             "org.nuget.zlinq",
             "com.neuecc",
+            "org.nuget.moq",
         ],
     },
 ]
@@ -358,10 +359,15 @@ SCOPED_REGISTRIES: List[Dict[str, Any]] = [
 def ensure_scoped_registries(project: str) -> None:
     """Point the project's manifest at the organization's package feeds.
 
-    Merged, never overwritten: a registry the template already declares keeps its
-    own scopes, and a registry of the same name keeps every scope it had — the
-    wanted ones are added to it. Idempotent, so the reuse path re-applies it too
-    and a project created before this existed is brought up to date.
+    The scopes are *merged*: a registry of the same name keeps every scope it
+    already had and gains the ones it is missing, so a mirror or an extra scope
+    somebody added survives. The URL is not merged — it is the configured one,
+    which is what lets a feed that moved reach the projects that already exist
+    instead of only the ones created afterwards. A repoint is logged, because it
+    changes where a project resolves packages from.
+
+    Idempotent, so the reuse path re-applies it too and a project created before
+    a registry was added is brought up to date rather than left stale.
     """
     try:
         data = _read_manifest(project)
@@ -387,6 +393,10 @@ def ensure_scoped_registries(project: str) -> None:
             changed = True
             continue
         if entry.get("url") != wanted["url"]:
+            log(
+                f"Repointing the {wanted['name']} registry from {entry.get('url')!r} "
+                f"to {wanted['url']!r}."
+            )
             entry["url"] = wanted["url"]
             changed = True
         scopes = entry.get("scopes")
@@ -414,10 +424,21 @@ def ensure_scoped_registries(project: str) -> None:
 # The Test Framework version a package under review expects. The 3D template
 # pulls a much older one in through com.unity.feature.development (1.1.x), and a
 # test assembly written against the newer TestRunner API does not compile — or
-# run — against it. Raised, never lowered: an explicit newer version is left
-# alone, and a project that already has a working one is not touched.
+# run — against it.
 TEST_FRAMEWORK = "com.unity.test-framework"
 MIN_TEST_FRAMEWORK = "1.3.4"
+
+# Moq, for the same reason and a different one. A package's test assemblies
+# reference `Moq.dll`, which the package declares in its own asmdef's
+# `precompiledReferences` — but the per-PR project starts from the 3D template's
+# manifest and has never heard of it, so the reference does not resolve and the
+# test assembly does not compile. It comes from OpenUPM as `org.nuget.moq`, which
+# is why the scope above has to name it too.
+#
+# Both are raised, never lowered: an explicit newer version is left alone, and a
+# project that already has a working one is not touched.
+MOQ = "org.nuget.moq"
+MIN_MOQ = "4.21.0"
 
 _VERSION_RE = re.compile(r"^\d+(?:\.\d+)*$")
 
@@ -426,8 +447,14 @@ def _version_tuple(value: str) -> Tuple[int, ...]:
     return tuple(int(part) for part in value.split("."))
 
 
-def ensure_test_framework(project: str) -> None:
-    """Raise the project's Test Framework to the version packages expect.
+def ensure_minimum_version(project: str, package: str, minimum: str, why: str) -> None:
+    """Raise a dependency to ``minimum`` when it is absent or older than that.
+
+    Shared by the two dependencies the pipeline provides for a package's tests,
+    because the rule is the same one: a plain version at or above the minimum is
+    left alone, and anything that is *not* a plain version — a ``file:``, ``git:``
+    or registry reference — is the repository's deliberate choice and is not
+    touched either.
 
     Best-effort, like the other manifest edits: a manifest that cannot be read or
     written costs test coverage, not the review.
@@ -435,7 +462,7 @@ def ensure_test_framework(project: str) -> None:
     try:
         data = _read_manifest(project)
     except (OSError, ValueError) as exc:
-        log(f"Could not read the project manifest to check the Test Framework: {exc}")
+        log(f"Could not read the project manifest to check {package}: {exc}")
         return
 
     deps = data.get("dependencies")
@@ -443,32 +470,46 @@ def ensure_test_framework(project: str) -> None:
         deps = {}
         data["dependencies"] = deps
 
-    current = deps.get(TEST_FRAMEWORK)
+    current = deps.get(package)
     if isinstance(current, str) and _VERSION_RE.match(current.strip()):
-        # A plain version we can compare. Anything else (a file:, git: or registry
-        # reference) is the repository's deliberate choice — leave it alone.
-        if _version_tuple(current.strip()) >= _version_tuple(MIN_TEST_FRAMEWORK):
+        if _version_tuple(current.strip()) >= _version_tuple(minimum):
             return
     elif current is not None:
-        log(f"Leaving the project's {TEST_FRAMEWORK} reference alone: {current!r}.")
+        log(f"Leaving the project's {package} reference alone: {current!r}.")
         return
 
-    deps[TEST_FRAMEWORK] = MIN_TEST_FRAMEWORK
+    deps[package] = minimum
     try:
         _write_manifest(project, data)
     except OSError as exc:
-        log(f"Could not write the Test Framework version into the manifest: {exc}")
+        log(f"Could not write {package} into the manifest: {exc}")
         return
     if current:
-        log(f"Raised {TEST_FRAMEWORK} from {current} to {MIN_TEST_FRAMEWORK}.")
+        log(f"Raised {package} from {current} to {minimum} ({why}).")
     else:
-        log(f"Pinned {TEST_FRAMEWORK} to {MIN_TEST_FRAMEWORK}.")
+        log(f"Added {package} at {minimum} ({why}).")
+
+
+def ensure_test_framework(project: str) -> None:
+    """Give the project a Test Framework new enough for the package's tests."""
+    ensure_minimum_version(
+        project, TEST_FRAMEWORK, MIN_TEST_FRAMEWORK,
+        "test assemblies written against the newer TestRunner API need it",
+    )
+
+
+def ensure_moq(project: str) -> None:
+    """Give the project the Moq the package's test assemblies reference."""
+    ensure_minimum_version(
+        project, MOQ, MIN_MOQ, "the package's test assemblies reference Moq.dll"
+    )
 
 
 def prepare_manifest(project: str) -> None:
     """Everything the project's manifest needs before a package is added to it."""
     ensure_scoped_registries(project)
     ensure_test_framework(project)
+    ensure_moq(project)
 
 
 def ensure_package(project: str, package_name: str, package_root: str) -> bool:
