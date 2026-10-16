@@ -366,24 +366,17 @@ The first is what the package's asmdefs say it is, the second what Unity generat
 
 For a repository that ships its own solution, that solution stays a target as well — see [Review pipeline](#review-pipeline).
 
-### The findings that are not reported
+### When "is never used" is wrong
 
-ReSharper's "is never used" family — `UnusedMember.*`, `UnusedType.*`, `UnusedField.*` — is not posted, however confident it looks. It is a *redundancy* report rather than a defect (ReSharper files it under "Redundancies in Symbol Declarations"), and whether it is right depends on everything a batch analysis cannot guarantee: that the source generator which uses the member actually ran, that the plugin which understands the bindings activated, that reflection, dependency injection by convention, serialization and XAML bindings were all understood. On a real pull request it was wrong like this:
+ReSharper's "is never used" family — `UnusedMember.*`, `UnusedType.*`, `UnusedField.*` — **is** posted, and it was wrong exactly once, in a way worth keeping written down. On a real pull request:
 
 ```
 ⚠️ **ReSharper**: Method 'ImportDefinitionAsync' is never used
 ```
 
-on a method marked `[RelayCommand]`, used by the command the CommunityToolkit generator emits. The same commit, analysed on another machine with the same tool version, produced that pull request's other three findings and not this one — so it is not that ReSharper cannot see generated code (it can, and `--no-build` does not stop it); it is that the answer depends on the environment in a way nobody reading the comment can see. A wrong accusation costs more than the advice about dead code is worth.
+on a method marked `[RelayCommand]`, used by the command the CommunityToolkit generator emits. It is not that ReSharper cannot see generated code — it can, and `--no-build` does not stop it; a minimal `[RelayCommand]` project reports the method as used either way. The cause was `XDG_RUNTIME_DIR`: the runner's service process had inherited root's runtime directory, ReSharper's Roslyn host could not read its own working files (`lstat("/run/user/0/.dotnet") == EACCES`), and it stopped loading analyzers and source generators. No generator, no `ImportDefinitionCommand`, so the method that generates it looked unused. Reproduced on the runner with `grep -c ImportDefinitionAsync` = 1, and gone once the variable was corrected.
 
-The count is always logged, so a family that stopped being reported is never silent:
-
-```
-ReSharper: 3 'never used' finding(s) not reported — whether they are right depends on
-generators, plugins and conventions this analysis cannot see (see the README).
-```
-
-Everything else ReSharper reports at `WARNING` or `ERROR` is still posted. If a repository wants these, the thing to fix is the reason ReSharper could not see the use — most often the .NET SDK `jb` picked, which `resharper-dotnet-sdk` / `INSPECT_DOTNET_SDK` pins.
+So this family is trustworthy **as long as the environment is**, and the environment is the first thing to suspect if one of these is ever wrong again — that one variable has now caused two failures that each looked like something else entirely. What else can make it right in the IDE and wrong here is what no batch analysis can see: reflection, dependency injection by convention, serialization, XAML bindings. A wrong one is worth investigating rather than assuming.
 
 ### When ReSharper names the fix
 
