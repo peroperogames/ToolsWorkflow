@@ -382,6 +382,16 @@ it is used elsewhere (first at Caller.cs:1), and a suggestion would edit this li
 
 That occurrence is deliberately more permissive than the rewrite: `s.wrongMethodFormat()` — a preceding dot — is exactly the use that makes a one-line rename wrong, so the search counts it. A repository too large to walk in `RENAME_SCAN_FILES` files quietly loses its suggestions rather than costing the run. When none of this holds the comment is posted as it always was: the message already carries ReSharper's own "Suggested name is …", so the information is never withheld, only the button.
 
+### What language the tools speak
+
+Two of the three tools can be translated, and it is worth knowing which parts of the pipeline depend on the language they answer in.
+
+**`jb inspectcode` cannot be, in this package.** The global tool ships resource folders for thirteen languages, and every one of them contains only Microsoft's satellite assemblies — there is not a single `JetBrains.*.resources.dll` in any of them. Its inspection messages, including the sentence the naming suggestion is read from, are English whatever the runner's locale says. Exactly one feature leans on that, and it is guarded by the one part that cannot be translated: the sentence is only read when the finding's `TypeId` is `InconsistentNaming`. If JetBrains ever does ship a translation, the match simply stops and the finding keeps the plain comment it would have had anyway — the failure is a missing button, never a wrong edit.
+
+**`dotnet build` can be, and follows the runner's locale** (`DOTNET_CLI_UI_LANGUAGE`, or `LANG` on Linux). It makes no difference to what is parsed, because what the compile-error parser reads is `path(line,col): error CS0029` — MSBuild translates the sentence after the code and leaves the code and the severity word alone. Measured against `en`, `zh-CN` and `ja` output: the same file, line and code come out of all three, with the message in whatever language the toolchain chose. Subprocess output is decoded as UTF-8, so a translated message arrives intact rather than mangled.
+
+Nothing forces a language. A Chinese-speaking team seeing its own compiler's Chinese message on its pull request is the outcome working as intended; what would be lost is a translation of it, and the pipeline's own lines stay English regardless — `review-language` governs what the bot writes *on the pull request*, not what the tools say in the log.
+
 ### A file no assembly compiles
 
 Unity compiles what an asmdef declares and nothing else. A `.cs` file sitting in a directory — or under a parent directory — with no asmdef is imported as an asset and compiled by no assembly at all, so the build succeeds, the tests pass, and the static analysis reports nothing: **three green results about code nothing has read.** It is also the answer to the question a reviewer asks when the analysis ran and said nothing about their file.

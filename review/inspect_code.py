@@ -242,6 +242,14 @@ def parse_report(report_path: str) -> List[Dict[str, Any]]:
 #
 # So this reads a sentence and nothing more, and the caller treats it as one: it
 # only becomes a suggested edit when the rename cannot mean anything else.
+#
+# The sentence is English because it cannot be anything else: the global tool
+# ships resource folders for thirteen languages, and every one of them holds only
+# Microsoft's satellite assemblies — no JetBrains ones — so its own messages are
+# untranslated whatever the machine's locale says. The `TypeId` above is the part
+# that is guaranteed language-independent, and it is the gate: if JetBrains ever
+# does translate this text, the match stops and the finding keeps the plain
+# comment it would have had anyway.
 _SUGGESTED_NAME = re.compile(
     r"Name '(?P<current>[^']+)' does not match rule '[^']*'\.\s*"
     r"Suggested name is '(?P<suggested>[^']+)'\."
