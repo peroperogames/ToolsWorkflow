@@ -58,7 +58,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.42"
+VERSION = "2026-10-14.unity.43"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -1235,9 +1235,14 @@ def post_inline_comments(
 
 
 def index_diff_lines(patch: str) -> List[Dict[str, Any]]:
-    """Index every line of a patch as ``{"side", "line", "text"}``.
+    """Index every line of a patch as ``{"side", "line", "text", "changed"}``.
 
-    Context lines appear on both sides; ``+`` lines are RIGHT, ``-`` are LEFT.
+    Context lines appear on both sides — a comment may be anchored to one, since
+    GitHub allows it — and ``+`` lines are RIGHT, ``-`` are LEFT. ``changed`` says
+    whether the patch did something to the line on that side: wrote it (RIGHT) or
+    removed it (LEFT). That is the difference between "this line is in the diff"
+    and "this pull request is responsible for this line", which is the whole hunk
+    for the first and only the ``+`` lines for the second.
     """
     out: List[Dict[str, Any]] = []
     old_line: Optional[int] = None
@@ -1250,17 +1255,17 @@ def index_diff_lines(patch: str) -> List[Dict[str, Any]]:
                 new_line = int(match.group(2))
             continue
         if raw.startswith("+") and new_line is not None:
-            out.append({"side": "RIGHT", "line": new_line, "text": raw[1:]})
+            out.append({"side": "RIGHT", "line": new_line, "text": raw[1:], "changed": True})
             new_line += 1
         elif raw.startswith("-") and old_line is not None:
-            out.append({"side": "LEFT", "line": old_line, "text": raw[1:]})
+            out.append({"side": "LEFT", "line": old_line, "text": raw[1:], "changed": True})
             old_line += 1
         elif raw.startswith("\\"):
             continue
         elif new_line is not None and old_line is not None:
             text = raw[1:]
-            out.append({"side": "RIGHT", "line": new_line, "text": text})
-            out.append({"side": "LEFT", "line": old_line, "text": text})
+            out.append({"side": "RIGHT", "line": new_line, "text": text, "changed": False})
+            out.append({"side": "LEFT", "line": old_line, "text": text, "changed": False})
             new_line += 1
             old_line += 1
     return out
@@ -2779,14 +2784,24 @@ def execute_tool(name: str, args: Dict[str, Any], ctx: ToolContext) -> str:
 
 
 def changed_lines_by_file(files: List[Dict[str, Any]]) -> Dict[str, set]:
-    """Map each changed file to the set of new-file (RIGHT) line numbers it touched."""
+    """Map each changed file to the new-file lines the pull request wrote.
+
+    Only the ``+`` lines. The lines around them are *in* the diff, and a comment
+    can be anchored to one, but they are not this pull request's work — and the
+    static analysis reports what it finds on the lines it is given, so counting
+    context made it comment on code the pull request never touched: an eight-line
+    addition at the end of a file brought three lines of context with it, and
+    findings in the class above were posted as if they were part of the change.
+    """
     result: Dict[str, set] = {}
     for f in files:
         patch = f.get("patch")
         if not patch:
             continue
         lines = {
-            e["line"] for e in index_diff_lines(patch) if e["side"] == "RIGHT"
+            e["line"]
+            for e in index_diff_lines(patch)
+            if e["side"] == "RIGHT" and e["changed"]
         }
         if lines:
             result[f.get("filename", "")] = lines
@@ -3145,6 +3160,13 @@ def run_static_analysis(
     # Build inline comments anchored by the changed line's text (reliable), the
     # same way model findings are located. `issue["file"]` is already relative to
     # the repository, since inspect_code resolved it against the clone.
+    #
+    # The line number goes with the quote. The report gives one and it is exact;
+    # without it the anchor falls back to the *first* line in the diff carrying
+    # that text, and the same statement appearing twice — a class copied below
+    # another, a moved block — puts the comment on the wrong one and buries two
+    # findings under one line. The quote still decides the position; the number
+    # only says which of several identical candidates was meant.
     patches = {f.get("filename", ""): (f.get("patch") or "") for f in files}
     raw: List[Dict[str, Any]] = []
     seen: set = set()
@@ -3171,6 +3193,7 @@ def run_static_analysis(
         raw.append(
             {
                 "path": matched,
+                "line": issue["line"],
                 "quote": quote,
                 "side": "RIGHT",
                 "body": body,
