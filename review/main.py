@@ -58,7 +58,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.44"
+VERSION = "2026-10-14.unity.45"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3255,24 +3255,31 @@ def run_static_analysis(
     # Every place ReSharper reported the same naming finding for a name. Each is a
     # declaration of its own symbol — a method of this class, a field of that one —
     # so renaming one says nothing about the others. Anything else is a *use*.
+    #
+    # Taken from the whole inspection and not from `issues`, which holds only the
+    # findings this pull request will be told about: the twin declaration that
+    # makes a rename safe is usually on a line the pull request did not write, and
+    # reading the filtered list made every one of them look like a use.
     declarations: Dict[str, Set[Tuple[str, int]]] = {}
+    for issue in analysis.all_issues:
+        rename = issue.get("rename")
+        if not rename:
+            continue
+        try:
+            site = (str((Path(workdir) / issue["file"]).resolve()), int(issue["line"]))
+        except (OSError, TypeError, ValueError):
+            continue
+        declarations.setdefault(rename[0], set()).add(site)
+
     raw: List[Dict[str, Any]] = []
     seen: set = set()
     repeated = 0
     for issue in issues:
         path = issue["file"]
         rename = issue.get("rename")
-        if rename:
-            try:
-                site = (str((Path(workdir) / path).resolve()), int(issue["line"]))
-            except OSError:
-                site = ("", 0)
-            declarations.setdefault(rename[0], set()).add(site)
         matched = path if path in patches else next(
             (fn for fn in patches if path.endswith(fn) or fn.endswith(path)), None
         )
-        if not matched:
-            continue
         key = (matched, issue["line"], issue["message"])
         if key in seen:
             continue

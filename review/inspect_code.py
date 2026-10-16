@@ -336,9 +336,15 @@ class Analysis:
     Kept apart from the issue list so a caller can tell "inspected, found
     nothing" from "never ran" — those look identical in a bare list, and the
     second one silently cost the pull request its static analysis.
+
+    ``issues`` is what to post: the findings on the lines the pull request wrote.
+    ``all_issues`` is everything the inspection reported, including the parts of
+    the file it is not going to be asked about — which is where the caller looks
+    to find out whether a name it wants to rename is *declared* somewhere else.
     """
 
     issues: List[Dict[str, Any]] = field(default_factory=list)
+    all_issues: List[Dict[str, Any]] = field(default_factory=list)
     targets: List[str] = field(default_factory=list)
     reports: int = 0
     duplicates: int = 0
@@ -403,7 +409,13 @@ def analyze(
                 + "; changed lines are in "
                 + _sample(sorted(changed_lines))
             )
-        return Analysis(issues=kept, targets=targets, reports=reports, duplicates=duplicates)
+        return Analysis(
+            issues=kept,
+            all_issues=issues,
+            targets=targets,
+            reports=reports,
+            duplicates=duplicates,
+        )
     except Exception as exc:  # noqa: BLE001 - never break the review
         log(f"Static analysis failed, continuing without it: {exc}")
         return Analysis(targets=targets)
