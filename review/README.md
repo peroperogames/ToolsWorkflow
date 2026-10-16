@@ -332,6 +332,10 @@ The repair is applied twice on purpose: once right after generation, and again a
 
 The old project files are deleted before regenerating, for the same reason in reverse. Generation stops as soon as a solution exists — that is how a repository whose project-file method does nothing is caught — but a solution **left over from the previous run** satisfies that check on its own, so the first method was never asked to prove itself, the files were never rewritten, and the analysis ran against a model of a project that no longer matched the code: files this push added were not in it at all, and ReSharper sees no findings in a file it does not know about. Clearing `*.sln` and `*.csproj` from the project root before the first attempt is what makes the question real again. Nothing else is touched — `Library/`, `Temp/`, the manifest and the package reference all stay, so the regeneration is still incremental.
 
+**"A solution exists" means one Unity wrote, and the search for it does not enter `.ai-review`.** The clone lives in there, and a repository that ships its own solution therefore used to have that solution mistaken for Unity's output: the search succeeded, the next project-generation method was never tried, no project files were generated at all, and the static analysis was pointed at the whole solution instead of at the package's own projects — 2804 findings where the package's would have been a handful. Nothing is lost by skipping it: a repository's own solution is already a target in its own right, from the classification.
+
+Solution *folders* are not projects, either. Two folders may legally share a name — `Core` under `Editor` and under `Extensibility` — and counting them as projects made a solution look like it had collisions; since a folder's "unique" name is its own name, the repair then gave up on a solution it could have fixed, leaving the `MSB5004` duplicates in place and ReSharper with no report at all.
+
 ### How inspectcode is invoked
 
 Three things used to stop `jb inspectcode` from writing any report at all, and all three look exactly like "no findings" from the outside. None is visible unless you know to look.

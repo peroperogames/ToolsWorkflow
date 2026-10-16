@@ -638,8 +638,17 @@ def run_unity_tests(
 # `Project("{GUID}") = "Name", "path.csproj", "{GUID}"`. The path is matched
 # positionally — the first quoted string after the name — because a greedy match
 # would run to the *last* quoted string on the line, which is the trailing GUID.
+#
+# A solution *folder* looks almost the same, and is not a project: its type GUID
+# is the one below and its "path" is the folder's own name. Counting those made
+# `Core` under two different parents look like two projects with the same name —
+# which is legal and common — and since renaming a folder to itself changes
+# nothing, the repair below then gave up on a solution it could have fixed.
+_SOLUTION_FOLDER = "{2150E333-8FDC-42A3-9474-1A3956D46DE8}"
 _SLN_PROJECT = re.compile(
-    r'^Project\("\{[^}]+\}"\)\s*=\s*"(?P<name>[^"]+)"\s*,\s*"(?P<path>[^"]+)"'
+    r'^Project\("(?!'
+    + re.escape(_SOLUTION_FOLDER)
+    + r')\{[^}]+\}"\)\s*=\s*"(?P<name>[^"]+)"\s*,\s*"(?P<path>[^"]+)"'
 )
 
 
@@ -702,7 +711,7 @@ def dedupe_solution(sln: str) -> int:
         log(
             "Could not de-duplicate "
             f"{path.name}: names still collide ({', '.join(sorted(remaining))}); "
-            "leaving the solution as Unity wrote it."
+            "leaving the solution unchanged."
         )
         return 0
 
@@ -723,10 +732,19 @@ def find_solution(project: str) -> Optional[str]:
 
     Normally it sits in the project root beside the project folders. The
     recursive search is the fallback, so a solution generated somewhere else is
-    still inspected rather than silently skipped — and when there is none at
-    all, that is reported by the caller instead of looking like a clean build.
+    still inspected rather than silently skipped — and when there is none at all,
+    that is reported by the caller instead of looking like a clean build.
+
+    It does **not** descend into the PR's meta directory, because the clone lives
+    there. A repository that ships its own solution used to have that solution
+    mistaken for Unity's output: the search "succeeded", so the next
+    project-generation method was never tried, no project files were generated at
+    all, and the static analysis was pointed at the whole solution instead of at
+    the package's own projects. Nothing is lost by skipping it — that solution is
+    a target in its own right, from the classification.
     """
     root = Path(project)
+    skipped = {"Library", "Temp", "obj", "bin", pr_workspace.META_DIRNAME}
     try:
         found = sorted(root.glob("*.sln"))
         if found:
@@ -734,8 +752,7 @@ def find_solution(project: str) -> Optional[str]:
         found = sorted(
             path
             for path in root.rglob("*.sln")
-            if not {"Library", "Temp", "obj", "bin"}
-            & set(path.relative_to(root).parts[:-1])
+            if not skipped & set(path.relative_to(root).parts[:-1])
         )
         if found:
             log(f"The generated solution is not in the project root; using {found[0]}.")
