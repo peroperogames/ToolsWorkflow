@@ -44,6 +44,19 @@ IGNORED_MESSAGE_SUBSTRINGS = (
     "is not supported in this version",
 )
 
+# ReSharper's "is never used" family, which we do not report. It is a *redundancy*
+# report rather than a defect — ReSharper files it under "Redundancies in Symbol
+# Declarations" — and whether it is right depends on everything a batch analysis
+# cannot guarantee: that a source generator ran, that the plugin which understands
+# the bindings activated, that reflection, dependency injection by convention,
+# serialization and XAML bindings were all understood. It was measured wrong on a
+# real pull request: `[RelayCommand] private async Task ImportDefinitionAsync()`,
+# used by the command the CommunityToolkit generator emits, was reported as never
+# used — while the same commit analysed on another machine, with the same tool
+# version, produced that pull request's other three findings and not this one. A
+# wrong accusation costs more than the dead-code advice is worth.
+IGNORED_TYPE_PREFIXES = ("UnusedMember", "UnusedType", "UnusedField")
+
 # inspectcode builds the solution before inspecting it, through an MSBuild it
 # picks itself — and it picks the newest .NET SDK it can find. When that newest
 # SDK is a preview or a half-installed one, the build fails before any report is
@@ -302,6 +315,11 @@ def _is_noise(issue: Dict[str, Any]) -> bool:
     return any(sub in message for sub in IGNORED_MESSAGE_SUBSTRINGS)
 
 
+def _is_redundancy(issue: Dict[str, Any]) -> bool:
+    """Is this one of the "is never used" findings we choose not to report?"""
+    return str(issue.get("type") or "").startswith(IGNORED_TYPE_PREFIXES)
+
+
 def filter_to_changes(
     issues: List[Dict[str, Any]],
     changed_lines: Dict[str, Set[int]],
@@ -402,8 +420,23 @@ def analyze(
         duplicates = len(collected) - len(issues)
         if duplicates:
             log(f"ReSharper: {duplicates} duplicate finding(s) merged.")
+
+        # The "is never used" family is dropped here rather than in the filter
+        # below, because it is a decision about what this tool reports at all —
+        # and its count is logged, so a family that stopped being reported is
+        # never silent.
+        reportable = [issue for issue in issues if not _is_redundancy(issue)]
+        suppressed = len(issues) - len(reportable)
+        issues = reportable
+
         kept = filter_to_changes(issues, changed_lines)
         log(f"ReSharper: {len(issues)} issue(s) total, {len(kept)} on changed lines.")
+        if suppressed:
+            log(
+                f"ReSharper: {suppressed} 'never used' finding(s) not reported — "
+                "whether they are right depends on generators, plugins and "
+                "conventions this analysis cannot see (see the README)."
+            )
         if issues and not kept:
             # Nothing landed on a changed line. Usually that is ordinary — the
             # pull request touched a file the findings are not in — and it is

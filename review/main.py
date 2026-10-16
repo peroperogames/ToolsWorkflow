@@ -58,7 +58,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.48"
+VERSION = "2026-10-14.unity.49"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3187,6 +3187,24 @@ def run_static_analysis(
         targets.extend(unity.package_projects)
         if not unity.package_projects and unity.sln_path:
             targets.append(unity.sln_path)
+
+    # The same file can arrive twice — the repository's own solution and the one
+    # the Unity step found, which are the same solution when generation wrote
+    # nothing — and inspecting it twice costs a full second pass whose findings
+    # are then merged away, so the waste is invisible in the result.
+    unique: List[str] = []
+    seen_targets: set = set()
+    for target in targets:
+        try:
+            key = os.path.realpath(target)
+        except OSError:
+            key = target
+        if key in seen_targets:
+            log(f"Inspecting {Path(target).name} once, not twice.")
+            continue
+        seen_targets.add(key)
+        unique.append(target)
+    targets = unique
     if not targets:
         if unity is not None and not unity.ran:
             # The reason is upstream and worth naming: a package's projects only

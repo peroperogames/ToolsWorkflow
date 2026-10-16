@@ -357,6 +357,25 @@ The first is what the package's asmdefs say it is, the second what Unity generat
 
 For a repository that ships its own solution, that solution stays a target as well — see [Review pipeline](#review-pipeline).
 
+### The findings that are not reported
+
+ReSharper's "is never used" family — `UnusedMember.*`, `UnusedType.*`, `UnusedField.*` — is not posted, however confident it looks. It is a *redundancy* report rather than a defect (ReSharper files it under "Redundancies in Symbol Declarations"), and whether it is right depends on everything a batch analysis cannot guarantee: that the source generator which uses the member actually ran, that the plugin which understands the bindings activated, that reflection, dependency injection by convention, serialization and XAML bindings were all understood. On a real pull request it was wrong like this:
+
+```
+⚠️ **ReSharper**: Method 'ImportDefinitionAsync' is never used
+```
+
+on a method marked `[RelayCommand]`, used by the command the CommunityToolkit generator emits. The same commit, analysed on another machine with the same tool version, produced that pull request's other three findings and not this one — so it is not that ReSharper cannot see generated code (it can, and `--no-build` does not stop it); it is that the answer depends on the environment in a way nobody reading the comment can see. A wrong accusation costs more than the advice about dead code is worth.
+
+The count is always logged, so a family that stopped being reported is never silent:
+
+```
+ReSharper: 3 'never used' finding(s) not reported — whether they are right depends on
+generators, plugins and conventions this analysis cannot see (see the README).
+```
+
+Everything else ReSharper reports at `WARNING` or `ERROR` is still posted. If a repository wants these, the thing to fix is the reason ReSharper could not see the use — most often the .NET SDK `jb` picked, which `resharper-dotnet-sdk` / `INSPECT_DOTNET_SDK` pins.
+
 ### When ReSharper names the fix
 
 The naming inspection does not just object, it says what it wants instead — and the report carries no structured fix, only the sentence:
