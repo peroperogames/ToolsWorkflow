@@ -11,7 +11,7 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 
 # `Assets/Foo.cs(12,5): error CS0103: The name 'x' does not exist`
 # MSBuild's shape, which Unity's editor log carries through unchanged.
@@ -20,9 +20,75 @@ _FILE_ERROR = re.compile(r"([^\s(][^(]*?\.(?:cs|fs))\((\d+),\d+\):\s*error\s+([A
 # no source position, e.g. a restore that could not find a package.
 _BARE_ERROR = re.compile(r"\berror\s+([A-Z]{2,}\d+):\s*(.+)")
 
+# How much of a failure's detail the job log prints, in items. The pull request
+# comment carries the same list for the author; the log is for the operator, and
+# a thousand-line paste of the same error is not more useful than the first twenty.
+REPORT_LIMIT = 20
+
 
 def log(message: str) -> None:
     print(message, file=sys.stderr)
+
+
+def format_duration(seconds: float) -> str:
+    """A duration as the log shows it: ``8s``, ``2m 14s``, ``1h 03m``.
+
+    Rounded to the second and cut to two units, because a build of 3721 seconds
+    is usefully reported as an hour and two minutes and the remaining second is
+    noise beside it.
+    """
+    try:
+        total = max(0, int(round(float(seconds))))
+    except (TypeError, ValueError):
+        return "0s"
+    if total < 60:
+        return f"{total}s"
+    minutes, secs = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes}m {secs:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m"
+
+
+def format_compile_errors(
+    errors: Sequence[Dict[str, Any]], limit: int = REPORT_LIMIT
+) -> List[str]:
+    """One line per compile error: where it is, the code, what it says.
+
+    A build that fails says how many errors it found; this is what turns that
+    count into something the operator can act on without opening the editor log.
+    Errors with no source position (a restore that could not find a package) print
+    without one, exactly as they arrive.
+    """
+    lines: List[str] = []
+    for err in errors[:limit]:
+        where = f"{err['file']}:{err.get('line') or 0}: " if err.get("file") else ""
+        code = err.get("code") or ""
+        message = (err.get("message") or "").strip()
+        lines.append(f"{where}{code}: {message}".rstrip(": "))
+    if len(errors) > limit:
+        lines.append(f"... and {len(errors) - limit} more")
+    return lines
+
+
+def format_test_failures(
+    failures: Sequence[Dict[str, Any]], limit: int = REPORT_LIMIT
+) -> List[str]:
+    """One line per failing case: its name and the first line of its message.
+
+    The first line only: a failure message is a stack trace more often than a
+    sentence, and the whole of it is already in the report file the caller names
+    beside the list.
+    """
+    lines: List[str] = []
+    for case in failures[:limit]:
+        message = (case.get("message") or "").strip().splitlines()
+        first = message[0][:200] if message else ""
+        name = case.get("name") or "unknown test"
+        lines.append(f"{name} — {first}" if first else str(name))
+    if len(failures) > limit:
+        lines.append(f"... and {len(failures) - limit} more")
+    return lines
 
 
 def parse_compile_errors(text: str) -> List[Dict[str, Any]]:

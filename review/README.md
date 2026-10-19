@@ -343,6 +343,22 @@ When the run actually died, the exit code says so, and the status comment is pos
 
 `UNITY_TEST_TIMEOUT` is the same problem seen from the other side. One hung suite spent thirty minutes of a job before the CLI's own timeout ended it, and the only deadline that could be moved was the build's. A test run with a deadline of its own can be cut short without shortening the build, which is the difference between a lever and a re-run.
 
+### What a build and a test run print
+
+Every build and every test run says how long it took, on either outcome — `Unity: compiled in 2m 14s.`, `Unity: EditMode tests: 3 failing case(s) in 1m 02s.`, `dotnet test produced no report after 30m 00s (exit 6)`. A step that passed in four seconds and one that hung for thirty minutes are both facts about the pull request; only the second is worth acting on, and neither is visible without a number.
+
+The durations are the run's own, not the step's. The compile is timed around every generation attempt — a method that writes nothing costs a full editor launch, and that attempt is part of what "the build took" means — and each test platform is timed separately, so a suite that is getting slower shows up before it becomes a timeout.
+
+A failure prints an error report, not just a count:
+
+| What failed | What the log shows |
+| --- | --- |
+| compile | one line per error, `path:line: CODE: message` — the same shape the pull request comment uses — capped at twenty with `... and N more` |
+| tests | one line per failing case: the name and the first line of its message, then the path of the report file that holds the rest |
+| nothing parseable | a single tail of what the tool said, which is the only witness there is when the editor crashed or the timeout ended the run |
+
+The cap is a report, not a census: the pull request comment carries the list the author needs, and a thousand copies of one error in a log help no one. The last row is the one that matters most — a run killed at its deadline writes no report, so whatever it managed to print before the kill is the entire diagnosis, and it is the reason that tail is captured rather than assumed lost.
+
 ### The generated solution is repaired before use
 
 Unity writes one solution entry per generated project, and it generates both `<Name>.csproj` and `<Name>.Player.csproj` for the same assembly — labelling both with the same display name. MSBuild rejects such a solution outright (`MSB5004: The solution file has two projects named "Unity.Timeline"`), which stops `jb inspectcode` before it produces any report at all, leaving ReSharper silently doing nothing. The duplicate entries are renamed after their project files, which costs nothing and makes the solution usable.

@@ -16,6 +16,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -205,14 +206,18 @@ def analyze(clone_dir: str, solution: str, report_dir: Path) -> DotnetResult:
             return result
 
         log(f".NET: building {Path(solution).name} ...")
+        started = time.monotonic()
         rc, text = _run(
             [dotnet, "build", solution, "--nologo", "-v", "minimal"],
             clone_dir,
             DOTNET_TIMEOUT,
         )
+        took = build_log.format_duration(time.monotonic() - started)
         errors = build_log.parse_compile_errors(text)
         if errors:
-            log(f".NET build: {len(errors)} error(s).")
+            log(f".NET build failed in {took}: {len(errors)} error(s).")
+            for line in build_log.format_compile_errors(errors):
+                log(f"  {line}")
             result.ran = True
             result.compiled = False
             result.compile_errors = errors
@@ -221,11 +226,15 @@ def analyze(clone_dir: str, solution: str, report_dir: Path) -> DotnetResult:
         if rc != 0:
             # A failure we could not attribute to a source line or an error code
             # is a toolchain problem, not a verdict on the pull request.
-            log(f"dotnet build exited {rc} with no parseable error; skipping the step.")
+            log(f"dotnet build exited {rc} after {took} with no parseable error; skipping the step.")
+            said = " ".join(text.split())[-800:]
+            if said:
+                log(f"dotnet said: {said}")
             return result
 
         result.ran = True
         result.compiled = True
+        log(f".NET: compiled in {took}.")
 
         if not solution_has_tests(solution):
             log(".NET: no test project in the solution; build only.")
@@ -236,6 +245,7 @@ def analyze(clone_dir: str, solution: str, report_dir: Path) -> DotnetResult:
         trx.parent.mkdir(parents=True, exist_ok=True)
         if trx.exists():
             trx.unlink()
+        started = time.monotonic()
         rc, text = _run(
             [
                 dotnet, "test", solution,
@@ -247,23 +257,32 @@ def analyze(clone_dir: str, solution: str, report_dir: Path) -> DotnetResult:
             clone_dir,
             DOTNET_TIMEOUT,
         )
+        took = build_log.format_duration(time.monotonic() - started)
         result.tested = True
         if trx.exists():
             result.test_failures = build_log.parse_trx_failures(trx)
             result.tests_ok = not result.test_failures
             result.tests_reported = True
+            if result.test_failures:
+                log(f".NET tests: {len(result.test_failures)} failing case(s) in {took}.")
+                for line in build_log.format_test_failures(result.test_failures):
+                    log(f"  {line}")
+                log(f"  report: {trx}")
+            else:
+                log(f".NET tests finished in {took} with no failing case.")
         else:
             # No report means the SDK could not run the tests at all — that is
             # not evidence of a failing test, so it must not fail the build, and
             # it is not evidence of a passing one either.
             log(
-                f"dotnet test produced no report (exit {rc}); not counting it as a "
-                "failure, and not reporting the run as tested either."
+                f"dotnet test produced no report after {took} (exit {rc}); not "
+                "counting it as a failure, and not reporting the run as tested either."
             )
+            said = " ".join(text.split())[-800:]
+            if said:
+                log(f"dotnet said: {said}")
             if rc != 0:
                 result.tests_broke = True
-        if result.test_failures:
-            log(f".NET tests: {len(result.test_failures)} failing case(s).")
         return result
     except Exception as exc:  # noqa: BLE001 - never break the review
         log(f".NET step failed, continuing without it: {exc}")

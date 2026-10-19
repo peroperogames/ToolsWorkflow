@@ -24,6 +24,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
@@ -592,8 +593,9 @@ def run_unity(
     rc, output = -1, ""
     try:
         rc, output = subproc.run(cmd, timeout + 120)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         log(f"Unity timed out after {timeout}s.")
+        output = str(getattr(exc, "output", "") or "")
     except OSError as exc:
         log(f"Could not run the Unity CLI: {exc}")
         return -1, ""
@@ -634,8 +636,11 @@ def run_unity_tests(
     ]
     try:
         return subproc.run(cmd, timeout + 120)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
+        # What the CLI printed before it was killed is the only witness there is:
+        # the editor died mid-run, so no report was written to explain anything.
         log(f"Unity tests timed out after {timeout}s.")
+        return -1, str(getattr(exc, "output", "") or "")
     except OSError as exc:
         log(f"Could not run the Unity CLI: {exc}")
     return -1, ""
@@ -953,6 +958,7 @@ def generate_and_build(
         log(f"Cleared {removed} project file(s) from the previous run before regenerating.")
     rc, text = -1, ""
     sln = None
+    started = time.monotonic()
     for index, method in enumerate(methods, start=1):
         log(f"Unity: generating project files via {method} ...")
         rc, text = run_unity(cli, project, ["-executeMethod", method], UNITY_TIMEOUT, log_file)
@@ -965,6 +971,11 @@ def generate_and_build(
         if index < len(methods):
             log(f"  {method} wrote no project files; trying the next one.")
 
+    # The clock covers every attempt: a method that writes nothing costs a full
+    # editor launch, and the second one is part of what "how long the build took"
+    # means. Reported on every path below, whether it produced code or not.
+    took = build_log.format_duration(time.monotonic() - started)
+
     if sln:
         # Unity's solution has to be made acceptable to MSBuild before anything
         # else (ReSharper) can build it.
@@ -974,8 +985,8 @@ def generate_and_build(
         # run — and with no compile errors either, "compiled" would otherwise be
         # a pass nothing backs up.
         log(
-            f"Unity exited {rc} but produced no solution in {project}: the "
-            "project-generation step did not run. Nothing can be inspected "
+            f"Unity exited {rc} after {took} but produced no solution in {project}: "
+            "the project-generation step did not run. Nothing can be inspected "
             "statically for this pull request."
         )
         said = " ".join(text.split())[-800:]
@@ -985,9 +996,14 @@ def generate_and_build(
     errors = build_log.parse_compile_errors(text)
 
     if errors:
-        log(f"Unity compile: {len(errors)} error(s).")
+        log(f"Unity compile failed in {took}: {len(errors)} error(s).")
+        for line in build_log.format_compile_errors(errors):
+            log(f"  {line}")
+        log(f"Editor log: {log_file}")
         return True, False, errors, sln
     if rc == 0:
+        if sln:
+            log(f"Unity: compiled in {took}.")
         return True, True, errors, sln
     # Say which infrastructure reason it was, because they are fixed in different
     # places — and always report what Unity actually said, so a wrong guess here
@@ -1005,6 +1021,7 @@ def generate_and_build(
         )
     else:
         log(f"Unity exited {rc} without compile errors; skipping the Unity step.")
+    log(f"Unity: no build after {took} (exit {rc}).")
     log(f"Editor log: {log_file}")
     said = " ".join(text.split())[-800:]
     if said:
@@ -1040,12 +1057,31 @@ def run_tests(
     for platform in platforms:
         results = results_dir / f"tests-{pr_workspace.sanitize(platform)}.xml"
         log(f"Unity: running {platform} tests ...")
+        # Timed around the run itself, so the number reported is the run's and
+        # not the step's — and reported on both outcomes, which is what makes a
+        # suite that "got slow" visible before it becomes a timeout.
+        started = time.monotonic()
         rc, output = run_unity_tests(cli, project, results, platform, UNITY_TEST_TIMEOUT)
+        took = build_log.format_duration(time.monotonic() - started)
         if results.exists():
             any_ran = True
-            all_failures.extend(build_log.parse_nunit_failures(results))
+            failures = build_log.parse_nunit_failures(results)
+            all_failures.extend(failures)
+            if failures:
+                log(f"Unity: {platform} tests: {len(failures)} failing case(s) in {took}.")
+                for line in build_log.format_test_failures(failures):
+                    log(f"  {line}")
+                log(f"  report: {results}")
+            else:
+                log(f"Unity: {platform} tests finished in {took} with no failing case.")
         else:
-            log(f"Unity tests produced no report (exit {rc}): {output.strip()[-400:]}")
+            log(
+                f"Unity tests produced no report after {took} (exit {rc}); not "
+                "counting it as a failure, and not reporting the run as tested either."
+            )
+            said = output.strip()[-800:]
+            if said:
+                log(f"Unity said: {said}")
             # A clean exit with no report is "there was nothing to run"; a
             # non-zero one is the tool saying the run failed — a crash, a hang
             # killed by the timeout — and that is worth telling the pull request.
@@ -1055,13 +1091,6 @@ def run_tests(
     # tests, and that is not evidence of a failing test, so it must not fail the
     # build.
     ok = not all_failures
-    if all_failures:
-        log(f"Unity tests: {len(all_failures)} failing case(s).")
-    elif not any_ran:
-        log(
-            "Unity tests: no report was produced, so the tests did not run; not "
-            "counting it as a failure, and not reporting the run as tested either."
-        )
     return ok, all_failures, any_ran, broke
 
 
