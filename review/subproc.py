@@ -19,6 +19,14 @@ session of its own and signalling the whole process group is what ends the tree:
 SIGTERM first, so a tool that flushes on the way out gets the chance (the editor's
 log is what the caller reads afterwards), then SIGKILL for whatever is still
 standing.
+
+Two more things are this module's job because it is the only place that knows
+when a tool started and what it is saying. The tool's own output is **echoed as
+it arrives** rather than printed at the end, and every quiet minute produces a
+**heartbeat** — elapsed time, and the last line the tool or the watched log file
+said. A compile that takes twenty minutes used to be twenty minutes of silence in
+the job log, which is exactly what a hang looks like from the outside; the
+heartbeat is what makes it a slow build instead.
 """
 
 from __future__ import annotations
@@ -27,10 +35,23 @@ import os
 import signal
 import subprocess
 import sys
-from typing import Any, Dict, Optional, Sequence, Tuple
+import threading
+import time
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import build_log
 
 # How long a signalled process group gets to clean up before it is killed.
 GRACE_SECONDS = 15
+
+# How often a running tool says it is still running, once it has been quiet for
+# that long. Long enough not to bury a chatty tool's own output, short enough
+# that whoever is watching the job is never left guessing.
+HEARTBEAT_SECONDS = 60
+
+# How much of a watched file is read for the heartbeat: the end of an editor log
+# is megabytes long, and its last line is all the heartbeat wants.
+TAIL_BYTES = 4096
 
 # Windows has no SIGKILL, and no process groups to signal either.
 _KILL = getattr(signal, "SIGKILL", signal.SIGTERM)
@@ -48,6 +69,91 @@ def log(message: str) -> None:
 
 def _name(cmd: Sequence[str]) -> str:
     return os.path.basename(str(cmd[0])) if cmd else "the command"
+
+
+def _last_line(text: str, limit: int = 200) -> str:
+    """The last non-empty line of ``text``, shortened to ``limit`` characters."""
+    for line in reversed(text.splitlines()):
+        stripped = line.strip()
+        if stripped:
+            return stripped[-limit:]
+    return ""
+
+
+def _file_tail(path: str, limit: int = 300) -> str:
+    """The last thing written to ``path``, without reading the whole of it."""
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - TAIL_BYTES))
+            data = handle.read()
+    except OSError:
+        return ""
+    return _last_line(data.decode("utf-8", "replace"), limit)
+
+
+class _Stream:
+    """What a running tool has said, as it says it.
+
+    Collected for the caller that parses it, echoed as it arrives for whoever is
+    watching the job, and remembered line by line for the heartbeat that covers
+    the tool's quiet stretches.
+
+    ``echo=False`` is for a command whose output must not reach the log at all —
+    ``git`` with a token in the remote URL prints that URL when it cannot
+    connect. Such a stream still records what it read (the caller may want it)
+    and still times it, but neither the lines nor the heartbeat's "last" can
+    leak it.
+    """
+
+    def __init__(self, echo: bool = True) -> None:
+        self.lines: List[str] = []
+        self.echo = echo
+        self.last = ""
+        self.last_at = time.monotonic()
+
+    def feed(self, line: str) -> None:
+        self.lines.append(line)
+        stripped = line.strip()
+        if not stripped:
+            return
+        self.last = stripped[:200]
+        self.last_at = time.monotonic()
+        if self.echo:
+            log(line.rstrip())
+
+    def text(self) -> str:
+        return "".join(self.lines)
+
+
+def _pump(pipe: Any, stream: _Stream) -> None:
+    """Read the tool's output until the pipe closes, one line at a time."""
+    try:
+        for line in pipe:
+            stream.feed(line)
+    except (OSError, ValueError):
+        # The pipe was closed under us by the kill below. What was read is kept.
+        pass
+
+
+def _heartbeat(
+    name: str,
+    stream: _Stream,
+    watch: Optional[str],
+    started: float,
+    timeout: float,
+) -> None:
+    """Say that the tool is still working, and what it last said."""
+    elapsed = time.monotonic() - started
+    said = (_file_tail(watch) if watch else "") or (stream.last if stream.echo else "")
+    line = (
+        f"{name} is still running: {build_log.format_duration(elapsed)} of its "
+        f"{build_log.format_duration(timeout)} deadline"
+    )
+    # No full stop after a quoted line: "Compiling C# scripts...." is what two
+    # punctuation marks at the end of one sentence look like.
+    log(f"{line} — last: {said}" if said else f"{line}.")
 
 
 def _signal_group(proc: "subprocess.Popen[str]", sig: int) -> bool:
@@ -82,20 +188,13 @@ def _terminate(proc: "subprocess.Popen[str]") -> None:
         pass
 
 
-def _drain(proc: "subprocess.Popen[str]") -> str:
-    """Whatever the tool managed to write before it died, without waiting for it."""
-    try:
-        output, _ = proc.communicate(timeout=5)
-        return output or ""
-    except (subprocess.TimeoutExpired, ValueError, OSError):
-        return ""
-
-
 def run(
     cmd: Sequence[str],
     timeout: float,
     cwd: Optional[str] = None,
     env: Optional[Dict[str, str]] = None,
+    watch: Optional[str] = None,
+    echo: bool = True,
 ) -> Tuple[int, str]:
     """Run ``cmd`` under a deadline that ends the whole process tree.
 
@@ -103,11 +202,17 @@ def run(
     that reports on either stream is captured in one place — callers quote the
     *tail* of this when something fails. (Ordering between the two is the tool's
     own buffering, not this function's: a child that writes to a pipe gets a
-    block-buffered stdout and an unbuffered stderr, exactly as before.) Raises
-    ``subprocess.TimeoutExpired`` once the deadline has passed and everything has
-    been killed, and ``OSError`` when the tool cannot be started at all — the
-    same two failures ``subprocess.run`` reports, so callers handle them the same
-    way.
+    block-buffered stdout and an unbuffered stderr, exactly as before.)
+
+    ``output`` is also echoed as it arrives, so a twenty-minute compile is twenty
+    minutes of the compiler's own words rather than twenty minutes of nothing;
+    ``echo=False`` turns that off for a command whose output may carry a secret.
+    ``watch`` is a file the tool writes its progress to instead of its stdout —
+    the editor's log — whose last line goes into the heartbeat that covers the
+    quiet minutes. Raises ``subprocess.TimeoutExpired`` once the deadline has
+    passed and everything has been killed, and ``OSError`` when the tool cannot
+    be started at all — the same two failures ``subprocess.run`` reports, so
+    callers handle them the same way.
     """
     kwargs: Dict[str, Any] = {"start_new_session": True} if _POSIX else {}
     proc = subprocess.Popen(  # noqa: S603 - the commands are ours, not user input
@@ -121,16 +226,45 @@ def run(
         errors="replace",
         **kwargs,
     )
-    try:
-        output, _ = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
+    stream = _Stream(echo=echo)
+    # The reader owns the pipe: the tool keeps writing while the deadline below
+    # is being enforced, and blocking on both from one thread is how a pipe
+    # fills up and a tool waits forever for someone to read it.
+    reader = threading.Thread(target=_pump, args=(proc.stdout, stream), daemon=True)
+    reader.start()
+
+    name = _name(cmd)
+    started = time.monotonic()
+    deadline = started + timeout
+    timed_out = False
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            break
+        try:
+            proc.wait(timeout=min(remaining, HEARTBEAT_SECONDS))
+            break
+        except subprocess.TimeoutExpired:
+            # Still running: say so, unless it is already talking.
+            if time.monotonic() - stream.last_at >= HEARTBEAT_SECONDS:
+                _heartbeat(name, stream, watch, started, timeout)
+
+    if timed_out:
         log(
-            f"{_name(cmd)} did not finish within {timeout}s; ending it and "
-            "everything it started."
+            f"{name} did not finish within {timeout}s; ending it and everything "
+            "it started."
         )
         _terminate(proc)
-        partial = _drain(proc)
-        if partial:
-            exc.output = partial
-        raise
-    return proc.returncode, output or ""
+    # Bounded: the tool is gone, but a grandchild it left behind may still hold
+    # the pipe open, and that is not this function's problem to wait for.
+    reader.join(timeout=GRACE_SECONDS)
+    output = stream.text()
+
+    if timed_out:
+        # Built here rather than re-raised, so the message names the program and
+        # not the whole command line — a git URL carries the token.
+        expired = subprocess.TimeoutExpired(_name(cmd), timeout)
+        expired.output = output
+        raise expired
+    return proc.returncode, output

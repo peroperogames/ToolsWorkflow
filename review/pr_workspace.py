@@ -211,7 +211,22 @@ def log(message: str) -> None:
 
 
 def _run_git(args: list, cwd: Optional[str] = None, timeout: int = 300) -> Tuple[int, str]:
-    return subproc.run(["git", *args], timeout, cwd=cwd)
+    # Not echoed: this repository's remote URL carries the App token, and git
+    # prints the URL it could not reach. The output is still captured for the
+    # caller, and redacted wherever it is logged.
+    return subproc.run(["git", *args], timeout, cwd=cwd, echo=False)
+
+
+def _redacted(text: str, token: str) -> str:
+    """``text`` with the App token taken out, for anything that reaches the log.
+
+    Git quotes the URL it could not reach, and that URL is the authenticated one
+    — so a failed fetch would be a failed fetch *plus* a credential in the job
+    log unless the token is removed from it here.
+    """
+    if not token:
+        return text
+    return text.replace(token, "***")
 
 
 def _authed_url(owner: str, repo: str, token: str) -> str:
@@ -251,12 +266,12 @@ def clone_pr_head(
             # The sha may not be fetchable directly; fall back to a full fetch.
             code, out = _run_git(["fetch", "--all"], cwd=str(clone_dir))
         if code != 0:
-            log(f"git fetch failed, re-cloning: {out[-300:]}")
+            log(f"git fetch failed, re-cloning: {_redacted(out, token)[-300:]}")
             shutil.rmtree(clone_dir, ignore_errors=True)
         else:
             code, out = _run_git(["checkout", "--force", head_sha], cwd=str(clone_dir))
             if code != 0:
-                log(f"git checkout failed, re-cloning: {out[-300:]}")
+                log(f"git checkout failed, re-cloning: {_redacted(out, token)[-300:]}")
                 shutil.rmtree(clone_dir, ignore_errors=True)
 
     if not clone_dir.exists():
@@ -266,11 +281,11 @@ def clone_pr_head(
             ["clone", "--no-single-branch", _authed_url(owner, repo, token), str(clone_dir)]
         )
         if code != 0:
-            log(f"git clone failed: {out[-300:]}")
+            log(f"git clone failed: {_redacted(out, token)[-300:]}")
             return None
         code, out = _run_git(["checkout", "--force", head_sha], cwd=str(clone_dir))
         if code != 0:
-            log(f"git checkout {head_sha[:8]} failed: {out[-300:]}")
+            log(f"git checkout {head_sha[:8]} failed: {_redacted(out, token)[-300:]}")
             return None
     return str(clone_dir)
 

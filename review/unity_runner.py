@@ -592,7 +592,10 @@ def run_unity(
     ]
     rc, output = -1, ""
     try:
-        rc, output = subproc.run(cmd, timeout + 120)
+        # The editor writes its progress to the log file, not to the CLI's stdout,
+        # so the deadline's heartbeat reads it from there — a compile that takes
+        # twenty minutes is twenty minutes of the editor's last line.
+        rc, output = subproc.run(cmd, timeout + 120, watch=str(log_file))
     except subprocess.TimeoutExpired as exc:
         log(f"Unity timed out after {timeout}s.")
         output = str(getattr(exc, "output", "") or "")

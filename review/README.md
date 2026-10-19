@@ -355,6 +355,17 @@ Every build and every test run says how long it took, on either outcome — `Uni
 
 The durations are the run's own, not the step's. The compile is timed around every generation attempt — a method that writes nothing costs a full editor launch, and that attempt is part of what "the build took" means — and each test platform is timed separately, so a suite that is getting slower shows up before it becomes a timeout.
 
+The log is also **live while the step runs**, not only at the end. A tool's own output is echoed as it arrives, and every quiet minute produces a heartbeat naming the elapsed time and the last thing either the tool or the file it writes to said:
+
+```
+Unity: generating project files via UnityEditor.SyncVS.SyncSolution ...
+unity is still running: 3m 40s of its 30m 00s deadline — last: [Licensing::Module] Connecting to server...
+```
+
+That line is the difference between a slow build and a hung job, which from the outside are the same silence: the twenty-minute compile this pipeline used to produce printed nothing at all until it finished. The editor reports its progress to a log file rather than to the CLI's stdout, so `unity run` hands that file to the deadline as `watch` and the heartbeat reads its last line — see `subproc.run`. `HEARTBEAT_SECONDS` (60) is in that module rather than in the configuration: how often a progress line is worth printing is not something a caller should have to decide.
+
+One command is deliberately **not** echoed: `git`. Its remote URL carries the App token and git quotes the URL it could not reach, so that output is captured and never printed, and the part of it that does reach the log — the tail quoted when a fetch or clone fails — has the token replaced first.
+
 A failure prints an error report, not just a count:
 
 | What failed | What the log shows |
