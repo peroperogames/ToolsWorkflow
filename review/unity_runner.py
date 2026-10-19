@@ -606,7 +606,10 @@ def run_unity(
         # The editor writes its progress to the log file, not to the CLI's stdout,
         # so the deadline's heartbeat reads it from there — a compile that takes
         # twenty minutes is twenty minutes of the editor's last line.
-        rc, output = subproc.run(cmd, timeout + 120, watch=str(log_file), fatal=CRASH_MARKERS)
+        rc, output = subproc.run(
+            cmd, timeout + 120,
+            watch=str(log_file), fatal=CRASH_MARKERS, deadline=timeout,
+        )
     except subprocess.TimeoutExpired as exc:
         log(f"Unity timed out after {timeout}s.")
         output = str(getattr(exc, "output", "") or "")
@@ -652,7 +655,10 @@ def run_unity_tests(
         # Not echoed: the CLI forwards the editor's log to its stdout, which is
         # megabytes over a run that hangs — the heartbeat's last line is the
         # useful part of that, and the tail is quoted when the run fails.
-        return subproc.run(cmd, timeout + 120, echo=False, preview=True, fatal=CRASH_MARKERS)
+        return subproc.run(
+            cmd, timeout + 120,
+            echo=False, preview=True, fatal=CRASH_MARKERS, deadline=timeout,
+        )
     except subprocess.TimeoutExpired as exc:
         # What the CLI printed before it was killed is the only witness there is:
         # the editor died mid-run, so no report was written to explain anything.

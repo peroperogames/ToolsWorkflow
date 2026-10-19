@@ -365,7 +365,7 @@ Every build and every test run says how long it took, on either outcome — `Uni
 
 The durations are the run's own, not the step's. The compile is timed around every generation attempt — a method that writes nothing costs a full editor launch, and that attempt is part of what "the build took" means — and each test platform is timed separately, so a suite that is getting slower shows up before it becomes a timeout.
 
-The log is also **live while the step runs**, not only at the end. A tool's own output is echoed as it arrives, and every quiet minute produces a heartbeat naming the elapsed time and the last thing either the tool or the file it writes to said:
+The log is also **live while the step runs**, not only at the end. A tool's own output is echoed as it arrives, and every quiet minute produces a heartbeat — once a minute at most, however often the loop wakes to watch for a crash — naming the elapsed time and the last thing either the tool or the file it writes to said:
 
 ```
 Unity: generating project files via UnityEditor.SyncVS.SyncSolution ...

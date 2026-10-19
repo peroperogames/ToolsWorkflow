@@ -179,7 +179,13 @@ def _heartbeat(
     started: float,
     timeout: float,
 ) -> None:
-    """Say that the tool is still working, and what it last said."""
+    """Say that the tool is still working, and what it last said.
+
+    ``timeout`` is the deadline worth naming, which is not always this process's
+    own: the Unity CLI enforces its own timeout on the editor and this module
+    waits a little longer than that, so naming the longer one would report a
+    number the operator never set.
+    """
     elapsed = time.monotonic() - started
     said = (_file_tail(watch) if watch else "") or (stream.last if stream.preview else "")
     line = (
@@ -232,6 +238,7 @@ def run(
     echo: bool = True,
     preview: Optional[bool] = None,
     fatal: Sequence[str] = (),
+    deadline: Optional[float] = None,
 ) -> Tuple[int, str]:
     """Run ``cmd`` under a deadline that ends the whole process tree.
 
@@ -251,6 +258,11 @@ def run(
     ``watch`` is a file the tool writes its progress to instead of its stdout —
     the editor's log — whose last line goes into the heartbeat that covers the
     quiet minutes.
+
+    ``deadline`` is the deadline worth naming in the heartbeat when the tool has
+    one of its own — the Unity CLI enforces its timeout on the editor and this
+    process waits a little longer than that, so reporting the longer number would
+    name a deadline the operator never set.
 
     ``fatal`` is a list of phrases that mean the tool has already lost: a line
     containing one ends the run there and then, because a tool that has declared
@@ -286,16 +298,17 @@ def run(
 
     name = _name(cmd)
     started = time.monotonic()
-    deadline = started + timeout
+    expires_at = started + timeout
     # A tool that can announce its own crash is polled every second, so the
     # announcement ends the run rather than waiting out a deadline it has
     # already lost. Everything else only needs waking for the heartbeat.
     poll = 1.0 if fatal else HEARTBEAT_SECONDS
     timed_out = False
+    last_beat = started
     while True:
         if stream.fatal_hit:
             break
-        remaining = deadline - time.monotonic()
+        remaining = expires_at - time.monotonic()
         if remaining <= 0:
             timed_out = True
             break
@@ -303,9 +316,15 @@ def run(
             proc.wait(timeout=min(remaining, poll))
             break
         except subprocess.TimeoutExpired:
-            # Still running: say so, unless it is already talking.
-            if time.monotonic() - stream.last_at >= HEARTBEAT_SECONDS:
-                _heartbeat(name, stream, watch, started, timeout)
+            # Still running: say so once a minute, and only while it is quiet —
+            # a tool's own output is better progress than a heartbeat about it.
+            now = time.monotonic()
+            if (
+                now - stream.last_at >= HEARTBEAT_SECONDS
+                and now - last_beat >= HEARTBEAT_SECONDS
+            ):
+                _heartbeat(name, stream, watch, started, deadline or timeout)
+                last_beat = now
 
     if stream.fatal_hit:
         log(
