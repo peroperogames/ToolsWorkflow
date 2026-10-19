@@ -138,6 +138,14 @@ class DotnetResult:
         self.compiled = True
         self.tests_ok = True
         self.tested = False
+        # The tests were started and produced nothing — the same distinction
+        # `unity_runner.UnityResult` makes, for the same reason: a run that
+        # produced no report must not be described as having tested anything.
+        self.tests_reported = False
+        # ... and did the run itself fail? A clean exit with no report is a
+        # solution whose tests were not collected (the SDK decided there was
+        # nothing to do); a non-zero one is the tool saying it could not run them.
+        self.tests_broke = False
         self.compile_errors: List[Dict[str, Any]] = []
         self.test_failures: List[Dict[str, Any]] = []
 
@@ -154,19 +162,27 @@ class DotnetResult:
         if not self.ran:
             return ""
         if self.ok:
-            return "✅ .NET: 编译通过" + (",单元测试通过。" if self.tested else "。")
+            if self.tests_broke:
+                return "⚠️ .NET: 编译通过；单元测试没有跑完，也就没有报告，不能算通过。"
+            if self.tested and not self.tests_reported:
+                return "⚠️ .NET: 编译通过；单元测试没有产出报告，本次未真正运行。"
+            return "✅ .NET: 编译通过" + ("，单元测试通过。" if self.tested else "。")
         parts = []
         if not self.compiled:
-            parts.append(f"编译失败({len(self.compile_errors)} 个错误)")
+            parts.append(f"编译失败（{len(self.compile_errors)} 个错误）")
         if not self.tests_ok:
             parts.append(f"{len(self.test_failures)} 个单元测试失败")
-        return "🔴 .NET: " + ";".join(parts) + "。"
+        return "🔴 .NET: " + "；".join(parts) + "。"
 
     def outcome(self) -> str:
         """The same result for the job log. Empty when the step did not run."""
         if not self.ran:
             return ""
         if self.ok:
+            if self.tests_broke:
+                return ".NET: built; the test run did not finish, so it produced no report."
+            if self.tested and not self.tests_reported:
+                return ".NET: built; the test run produced no report."
             return ".NET: built" + (" and tested." if self.tested else ".")
         parts = []
         if not self.compiled:
@@ -235,10 +251,17 @@ def analyze(clone_dir: str, solution: str, report_dir: Path) -> DotnetResult:
         if trx.exists():
             result.test_failures = build_log.parse_trx_failures(trx)
             result.tests_ok = not result.test_failures
+            result.tests_reported = True
         else:
             # No report means the SDK could not run the tests at all — that is
-            # not evidence of a failing test, so it must not fail the build.
-            log(f"dotnet test produced no report (exit {rc}); not counting it as a failure.")
+            # not evidence of a failing test, so it must not fail the build, and
+            # it is not evidence of a passing one either.
+            log(
+                f"dotnet test produced no report (exit {rc}); not counting it as a "
+                "failure, and not reporting the run as tested either."
+            )
+            if rc != 0:
+                result.tests_broke = True
         if result.test_failures:
             log(f".NET tests: {len(result.test_failures)} failing case(s).")
         return result

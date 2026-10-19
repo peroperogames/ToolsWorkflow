@@ -35,6 +35,12 @@ import tool_path
 
 UNITY_TIMEOUT = int(os.environ.get("UNITY_TIMEOUT", "1800"))  # 30 min default
 
+# The test run gets its own deadline, defaulting to the build one. A suite that
+# hangs costs the whole of it — one such run spent thirty minutes of a job before
+# the CLI's timeout ended it — and capping the tests without touching the build is
+# the difference between a lever and a re-run.
+UNITY_TEST_TIMEOUT = int(os.environ.get("UNITY_TEST_TIMEOUT", str(UNITY_TIMEOUT)))
+
 # What Unity says when it cannot run for a reason that is not the code's fault.
 # These are phrases, not the word "license": Unity's logs name its licensing
 # module in runs that are perfectly healthy, so matching on that reports a
@@ -1008,8 +1014,16 @@ def generate_and_build(
 
 def run_tests(
     cli: str, project: str, results_dir: Path
-) -> Tuple[bool, List[Dict[str, Any]]]:
-    """Run the configured test platforms; return ``(ok, failures)``.
+) -> Tuple[bool, List[Dict[str, Any]], bool, bool]:
+    """Run the configured test platforms; ``(ok, failures, reported, broke)``.
+
+    ``reported`` says whether any platform actually produced a report. It is not
+    the same as ``ok``: a run that crashed or was killed by its timeout produces
+    nothing, which is not evidence of a failing test — but it is also not evidence
+    of a passing one, and saying "tested" for it is a lie the pull request would
+    go on to be approved under. ``broke`` separates the two kinds of "nothing":
+    an exit code of zero means there was nothing to run, and a non-zero one means
+    the run itself failed.
 
     PlayMode is skipped by default (a PlayMode run needs more of the editor than
     batch mode gives it); set ``UNITY_TEST_PLATFORMS`` to a comma list to
@@ -1022,24 +1036,33 @@ def run_tests(
     ]
     all_failures: List[Dict[str, Any]] = []
     any_ran = False
+    broke = False
     for platform in platforms:
         results = results_dir / f"tests-{pr_workspace.sanitize(platform)}.xml"
         log(f"Unity: running {platform} tests ...")
-        rc, output = run_unity_tests(cli, project, results, platform, UNITY_TIMEOUT)
+        rc, output = run_unity_tests(cli, project, results, platform, UNITY_TEST_TIMEOUT)
         if results.exists():
             any_ran = True
             all_failures.extend(build_log.parse_nunit_failures(results))
         else:
             log(f"Unity tests produced no report (exit {rc}): {output.strip()[-400:]}")
+            # A clean exit with no report is "there was nothing to run"; a
+            # non-zero one is the tool saying the run failed — a crash, a hang
+            # killed by the timeout — and that is worth telling the pull request.
+            if rc != 0:
+                broke = True
     # Only parsed failures count. No results file means Unity could not run the
-    # tests (or the package has none) — that is not evidence of a failing test,
-    # so it must not fail the build.
+    # tests, and that is not evidence of a failing test, so it must not fail the
+    # build.
     ok = not all_failures
     if all_failures:
         log(f"Unity tests: {len(all_failures)} failing case(s).")
     elif not any_ran:
-        log("Unity tests: no results produced; not counting it as a failure.")
-    return ok, all_failures
+        log(
+            "Unity tests: no report was produced, so the tests did not run; not "
+            "counting it as a failure, and not reporting the run as tested either."
+        )
+    return ok, all_failures, any_ran, broke
 
 
 # --------------------------------------------------------------------------- #
@@ -1069,6 +1092,13 @@ class UnityResult:
         self.ran = False
         self.compiled = True
         self.tests_ok = True
+        # Did the test run actually produce a report? Not the same question as
+        # `tests_ok`: a run that crashed, hung until its timeout or found no tests
+        # leaves `tests_ok` alone but must not be described as "tested".
+        self.tests_reported = False
+        # ... and did the run itself fail? A clean exit with no report is a package
+        # with nothing to run; a non-zero one is the tool saying it could not.
+        self.tests_broke = False
         self.compile_errors: List[Dict[str, Any]] = []
         self.test_failures: List[Dict[str, Any]] = []
         self.sln_path: Optional[str] = None
@@ -1090,13 +1120,17 @@ class UnityResult:
         if not self.ran:
             return ""
         if self.ok:
-            return "✅ Unity: 编译通过,单元测试通过。"
+            if self.tests_broke:
+                return "⚠️ Unity: 编译通过；单元测试没有跑完，也就没有报告，不能算通过。"
+            if not self.tests_reported:
+                return "⚠️ Unity: 编译通过；单元测试没有产出报告，本次未真正运行。"
+            return "✅ Unity: 编译通过，单元测试通过。"
         parts = []
         if not self.compiled:
-            parts.append(f"编译失败({len(self.compile_errors)} 个错误)")
+            parts.append(f"编译失败（{len(self.compile_errors)} 个错误）")
         if not self.tests_ok:
             parts.append(f"{len(self.test_failures)} 个单元测试失败")
-        return "🔴 Unity: " + ";".join(parts) + "。"
+        return "🔴 Unity: " + "；".join(parts) + "。"
 
     def outcome(self) -> str:
         """The same result for the job log.
@@ -1108,6 +1142,10 @@ class UnityResult:
         if not self.ran:
             return ""
         if self.ok:
+            if self.tests_broke:
+                return "Unity: compiled; the test run did not finish, so it produced no report."
+            if not self.tests_reported:
+                return "Unity: compiled; the test run produced no report."
             return "Unity: compiled and tested."
         parts = []
         if not self.compiled:
@@ -1180,9 +1218,11 @@ def analyze(
 
         if compiled:
             results_dir = pr_workspace.meta_dir(owner, repo, number)
-            tests_ok, failures = run_tests(cli, project, results_dir)
+            tests_ok, failures, reported, broke = run_tests(cli, project, results_dir)
             result.tests_ok = tests_ok
             result.test_failures = failures
+            result.tests_reported = reported
+            result.tests_broke = broke
         else:
             # No point testing code that does not compile.
             log("Skipping tests because compilation failed.")

@@ -58,7 +58,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.52"
+VERSION = "2026-10-14.unity.53"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -2860,6 +2860,13 @@ def report_build_result(
     Compile errors that fall on a changed line post as inline comments; the rest
     (and all test failures) go into one status comment. Shared by the Unity step
     and the .NET one, which report the same way.
+
+    A test run that died — crashed, hung until its timeout — does not fail the
+    build, because it is not evidence that the code is wrong. It is evidence that
+    the tests were not run, though, and nothing else on the pull request would
+    say so: the reason is in the job log, which the author never reads. Those
+    runs post the status comment too, so an unverified change is not presented
+    as a green one.
     """
     # Compile errors carry file+line: anchor them to changed lines when possible.
     patches = {f.get("filename", ""): (f.get("patch") or "") for f in files}
@@ -2891,17 +2898,17 @@ def report_build_result(
     # One status comment summarising anything not pinned to a line.
     status_lines: List[str] = [result.summary()]
     if orphan_errors:
-        status_lines.append("\n**编译错误(未能定位到改动行):**")
+        status_lines.append("\n**编译错误（未能定位到改动行）**：")
         for e in orphan_errors[:20]:
             where = f"`{e['file']}:{e['line']}` " if e.get("file") else ""
             status_lines.append(f"- {where}{e['code']}: {e['message']}")
     if result.test_failures:
-        status_lines.append("\n**单元测试失败:**")
+        status_lines.append("\n**单元测试失败**：")
         for t in result.test_failures[:20]:
             msg = (t.get("message") or "").splitlines()[0][:200] if t.get("message") else ""
             status_lines.append(f"- {t['name']}" + (f" — {msg}" if msg else ""))
 
-    if not result.ok:
+    if not result.ok or result.tests_broke:
         body = "\n".join(status_lines)
         if config.dry_run:
             print(body)

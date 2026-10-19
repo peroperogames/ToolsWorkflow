@@ -79,6 +79,7 @@ Every setting is reachable three ways: the `with:` input when calling the reusab
 | `resharper-dotnet-sdk` | `INSPECT_DOTNET_SDK` | *(auto-detected)* | Pin the .NET SDK whose MSBuild `jb inspectcode` uses (`--dotnetcoresdk`). Empty lets it pick, which means the **newest** installed SDK — and a preview or half-installed one fails the build before any report is written. |
 | `resharper-build` | `INSPECT_BUILD` | `false` | Let `jb inspectcode` build the solution before inspecting it. Off by default: the pipeline already compiled the code, and Unity's generated projects do not build cleanly under a generic MSBuild, which fails the step with no report at all. |
 | — | `UNITY_TIMEOUT` / `DOTNET_TIMEOUT` | `1800` | Seconds either build step may take before it is ended — the tool and everything it started — and reported as skipped. |
+| — | `UNITY_TEST_TIMEOUT` | `UNITY_TIMEOUT` | Seconds the Unity test run may take, separately from the build — a hanging suite then costs only its own deadline. |
 | — | `UNITY_TEST_PLATFORMS` | `EditMode` | Comma list of Unity test platforms to run. |
 
 `code-review.yml` also needs the `APP_ID`, `APP_PK` and `OPENAI_API_KEY` secrets; `main.py` additionally reads `GITHUB_REPOSITORY`, `GITHUB_EVENT_NAME` and `GITHUB_EVENT_PATH` (set by Actions) or `GITHUB_PR_NUMBER` for a manual run.
@@ -323,6 +324,24 @@ The project's `com.unity.test-framework` is raised to 1.3.4 if it is missing or 
 Both follow one rule, in `ensure_minimum_version`: absent → added at the minimum, older → raised, at or above → untouched, and a `file:` or git reference → untouched, because that is the repository's deliberate choice.
 
 One consequence of compiling the tests at all: a package whose tests do not compile gets **no project files generated for it**, so ReSharper cannot inspect that package in that run. The compile errors themselves are still posted on the changed lines, so the pull request is told what is wrong — but the static analysis is blind until they are fixed.
+
+### A test run that produced no report
+
+*Did the tests pass* and *did the tests run* are two questions, and only the first one was being asked. A run that crashes, hangs until its timeout or dies inside the editor leaves **no report at all**: nothing failed, so nothing turned red, and the step signed off as *compiled and tested* about a suite that never executed. Inside Unity that is a real failure mode, not a hypothetical — a ResourcesManager run spent half an hour in a Mono debugger dump, exited 6, wrote nothing, and was reported as tested.
+
+So each build step records three facts instead of two:
+
+| Fact | Means | Effect |
+| --- | --- | --- |
+| `tests_ok` | no failing case was read out of the report | blocks approval |
+| `tests_reported` | a report was actually written | changes what the step *says*, nothing else |
+| `tests_broke` | the run exited non-zero having written nothing | the pull request is told; approval is not blocked |
+
+A run that produced no report does **not** fail the build. A hung processor, a missing licence or a runner without the editor is not evidence that the author's code is wrong, and failing on it would block every pull request for a reason that is not about the change. It is not evidence of a passing suite either, so it is not called one: the status line becomes `⚠️ Unity: 编译通过；单元测试没有产出报告，本次未真正运行。` (and the same for `.NET`), which is also what the review model is shown — a reviewer approving under a ⚠️ does so knowingly, which is not true of one who was told the package was tested.
+
+When the run actually died, the exit code says so, and the status comment is posted to the pull request even though the step passed: the only other place that fact appears is the job log, which the author never reads.
+
+`UNITY_TEST_TIMEOUT` is the same problem seen from the other side. One hung suite spent thirty minutes of a job before the CLI's own timeout ended it, and the only deadline that could be moved was the build's. A test run with a deadline of its own can be cut short without shortening the build, which is the difference between a lever and a re-run.
 
 ### The generated solution is repaired before use
 
