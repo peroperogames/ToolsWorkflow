@@ -50,6 +50,20 @@ def format_duration(seconds: float) -> str:
     return f"{hours}h {minutes:02d}m"
 
 
+def tail_lines(text: str, count: int = 40, limit: int = 6000) -> List[str]:
+    """The last ``count`` lines that said anything, and no more than ``limit`` chars.
+
+    For a run that produced no report: the end of its output is the whole
+    diagnosis, and it is what has to reach the pull request — an editor that hung
+    said everything it was going to say in its last few lines.
+    """
+    interesting = [line.rstrip() for line in text.splitlines() if line.strip()]
+    tail = interesting[-count:]
+    while tail and sum(len(line) + 1 for line in tail) > limit:
+        tail.pop(0)
+    return tail
+
+
 def format_compile_errors(
     errors: Sequence[Dict[str, Any]], limit: int = REPORT_LIMIT
 ) -> List[str]:

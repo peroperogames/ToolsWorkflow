@@ -143,6 +143,11 @@ class DotnetResult:
         # `unity_runner.UnityResult` makes, for the same reason: a run that
         # produced no report must not be described as having tested anything.
         self.tests_reported = False
+        # What a test run that produced no report said before giving up, and where
+        # the whole of it was written — the same two facts the Unity step keeps,
+        # for the same reason: "no report" is not a diagnosis.
+        self.test_tail: List[str] = []
+        self.test_log_path: Optional[str] = None
         # ... and did the run itself fail? A clean exit with no report is a
         # solution whose tests were not collected (the SDK decided there was
         # nothing to do); a non-zero one is the tool saying it could not run them.
@@ -191,6 +196,19 @@ class DotnetResult:
         if not self.tests_ok:
             parts.append(f"{len(self.test_failures)} test failure(s)")
         return ".NET: " + ", ".join(parts) + "."
+
+
+def _save_output(path: Path, output: str, limit: int = 2_000_000) -> bool:
+    """Write what a run printed to ``path``, keeping the end of it. Best-effort."""
+    if not output.strip():
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(output[-limit:], encoding="utf-8", errors="replace")
+    except OSError as exc:
+        log(f"Could not write {path}: {exc}")
+        return False
+    return True
 
 
 def analyze(clone_dir: str, solution: str, report_dir: Path) -> DotnetResult:
@@ -281,6 +299,11 @@ def analyze(clone_dir: str, solution: str, report_dir: Path) -> DotnetResult:
             said = " ".join(text.split())[-800:]
             if said:
                 log(f"dotnet said: {said}")
+            result.test_tail = build_log.tail_lines(text)
+            log_path = report_dir / "dotnet-test.log"
+            if _save_output(log_path, text):
+                result.test_log_path = str(log_path)
+                log(f"  full output: {log_path}")
             if rc != 0:
                 result.tests_broke = True
         return result

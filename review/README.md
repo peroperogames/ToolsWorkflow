@@ -353,7 +353,13 @@ So each build step records three facts instead of two:
 | `tests_reported` | a report was actually written | changes what the step *says*, nothing else |
 | `tests_broke` | the run exited non-zero having written nothing | the pull request is told; approval is not blocked |
 
-A run that produced no report does **not** fail the build. A hung processor, a missing licence or a runner without the editor is not evidence that the author's code is wrong, and failing on it would block every pull request for a reason that is not about the change. It is not evidence of a passing suite either, so it is not called one: the status line becomes `⚠️ Unity: 编译通过；单元测试没有产出报告，本次未真正运行。` (and the same for `.NET`), which is also what the review model is shown — a reviewer approving under a ⚠️ does so knowingly, which is not true of one who was told the package was tested.
+A run that produced no report does **not** fail the build. A hung processor, a missing licence or a runner without the editor is not evidence that the author's code is wrong, and failing on it would block every pull request for a reason that is not about the change. It is, however, exactly the state whose *reason* nobody can reconstruct afterwards, so the run keeps three things about itself:
+
+- the last **40 lines it printed**, which go into the status comment in a collapsed `<details>` block — an editor that hung said everything it was going to say in its final moments, and that is the diagnosis;
+- the **whole captured output**, written to `.ai-review/tests-<platform>.log` beside the PR's other state, for whoever can read the runner;
+- both paths in the job log, next to the line that says no report was produced.
+
+`UNITY_TEST_TIMEOUT` and the tail together answer the two halves of "why": how long it was given, and what it said instead. It is not evidence of a passing suite either, so it is not called one: the status line becomes `⚠️ Unity: 编译通过；单元测试没有产出报告，本次未真正运行。` (and the same for `.NET`), which is also what the review model is shown — a reviewer approving under a ⚠️ does so knowingly, which is not true of one who was told the package was tested.
 
 When the run actually died, the exit code says so, and the status comment is posted to the pull request even though the step passed: the only other place that fact appears is the job log, which the author never reads.
 
@@ -369,7 +375,7 @@ The log is also **live while the step runs**, not only at the end. A tool's own 
 
 ```
 Unity: generating project files via UnityEditor.SyncVS.SyncSolution ...
-unity is still running: 3m 40s of its 30m 00s deadline — last: [Licensing::Module] Connecting to server...
+unity is still running: 3m 40s of its 30m 00s deadline, quiet for 3m 40s — last: [Licensing::Module] Connecting to server...
 ```
 
 That line is the difference between a slow build and a hung job, which from the outside are the same silence: the twenty-minute compile this pipeline used to produce printed nothing at all until it finished. The editor reports its progress to a log file rather than to the CLI's stdout, so `unity run` hands that file to the deadline as `watch` and the heartbeat reads its last line — see `subproc.run`. `HEARTBEAT_SECONDS` (60) is in that module rather than in the configuration: how often a progress line is worth printing is not something a caller should have to decide.
@@ -388,7 +394,7 @@ A failure prints an error report, not just a count:
 | tests | one line per failing case: the name and the first line of its message, then the path of the report file that holds the rest |
 | nothing parseable | a single tail of what the tool said, which is the only witness there is when the editor crashed or the timeout ended the run |
 
-The cap is a report, not a census: the pull request comment carries the list the author needs, and a thousand copies of one error in a log help no one. The last row is the one that matters most — a run killed at its deadline writes no report, so whatever it managed to print before the kill is the entire diagnosis, and it is the reason that tail is captured rather than assumed lost.
+The cap is a report, not a census: the pull request comment carries the list the author needs, and a thousand copies of one error in a log help no one. The *reason* a run produced no report at all is a separate case and gets its own treatment — see [A test run that produced no report](#a-test-run-that-produced-no-report), where the last forty lines go to the pull request and the whole output to a file on the runner. The last row is the one that matters most — a run killed at its deadline writes no report, so whatever it managed to print before the kill is the entire diagnosis, and it is the reason that tail is captured rather than assumed lost.
 
 ### The generated solution is repaired before use
 

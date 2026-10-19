@@ -178,6 +178,7 @@ def _heartbeat(
     watch: Optional[str],
     started: float,
     timeout: float,
+    quiet: float,
 ) -> None:
     """Say that the tool is still working, and what it last said.
 
@@ -188,9 +189,12 @@ def _heartbeat(
     """
     elapsed = time.monotonic() - started
     said = (_file_tail(watch) if watch else "") or (stream.last if stream.preview else "")
+    # "quiet for" is the number that answers the question the heartbeat exists for:
+    # a slow tool is still talking, a stuck one has not said anything for minutes.
     line = (
         f"{name} is still running: {build_log.format_duration(elapsed)} of its "
-        f"{build_log.format_duration(timeout)} deadline"
+        f"{build_log.format_duration(timeout)} deadline, "
+        f"quiet for {build_log.format_duration(quiet)}"
     )
     # No full stop after a quoted line: "Compiling C# scripts...." is what two
     # punctuation marks at the end of one sentence look like.
@@ -323,7 +327,10 @@ def run(
                 now - stream.last_at >= HEARTBEAT_SECONDS
                 and now - last_beat >= HEARTBEAT_SECONDS
             ):
-                _heartbeat(name, stream, watch, started, deadline or timeout)
+                _heartbeat(
+                    name, stream, watch, started, deadline or timeout,
+                    now - stream.last_at,
+                )
                 last_beat = now
 
     if stream.fatal_hit:

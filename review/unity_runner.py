@@ -1052,18 +1052,22 @@ def generate_and_build(
     return False, False, errors, sln
 
 
-def run_tests(
-    cli: str, project: str, results_dir: Path
-) -> Tuple[bool, List[Dict[str, Any]], bool, bool]:
-    """Run the configured test platforms; ``(ok, failures, reported, broke)``.
+def run_tests(cli: str, project: str, results_dir: Path, result: "UnityResult") -> None:
+    """Run the configured test platforms, filling in what happened on ``result``.
 
-    ``reported`` says whether any platform actually produced a report. It is not
-    the same as ``ok``: a run that crashed or was killed by its timeout produces
-    nothing, which is not evidence of a failing test — but it is also not evidence
-    of a passing one, and saying "tested" for it is a lie the pull request would
-    go on to be approved under. ``broke`` separates the two kinds of "nothing":
-    an exit code of zero means there was nothing to run, and a non-zero one means
-    the run itself failed.
+    Four facts, and they answer three different questions. ``tests_ok`` is "no
+    failing case was read"; ``tests_reported`` is "a report was written at all";
+    ``tests_broke`` is "the run exited non-zero having written nothing". A run
+    that crashed or was killed by its timeout produces nothing, which is not
+    evidence of a failing test — but it is not evidence of a passing one either,
+    and saying "tested" for it is a lie the pull request would go on to be
+    approved under.
+
+    When nothing was reported, the run's own last lines are kept: an editor that
+    hung said everything it was going to say in its final moments, and the pull
+    request has to be able to read that rather than a count of zero failures. The
+    whole captured output is written beside the reports, so it can be read in
+    full on the runner.
 
     PlayMode is skipped by default (a PlayMode run needs more of the editor than
     batch mode gives it); set ``UNITY_TEST_PLATFORMS`` to a comma list to
@@ -1074,9 +1078,6 @@ def run_tests(
         for p in os.environ.get("UNITY_TEST_PLATFORMS", "EditMode").split(",")
         if p.strip()
     ]
-    all_failures: List[Dict[str, Any]] = []
-    any_ran = False
-    broke = False
     for platform in platforms:
         results = results_dir / f"tests-{pr_workspace.sanitize(platform)}.xml"
         log(f"Unity: running {platform} tests ...")
@@ -1087,9 +1088,9 @@ def run_tests(
         rc, output = run_unity_tests(cli, project, results, platform, UNITY_TEST_TIMEOUT)
         took = build_log.format_duration(time.monotonic() - started)
         if results.exists():
-            any_ran = True
+            result.tests_reported = True
             failures = build_log.parse_nunit_failures(results)
-            all_failures.extend(failures)
+            result.test_failures.extend(failures)
             if failures:
                 log(f"Unity: {platform} tests: {len(failures)} failing case(s) in {took}.")
                 for line in build_log.format_test_failures(failures):
@@ -1105,16 +1106,40 @@ def run_tests(
             said = output.strip()[-800:]
             if said:
                 log(f"Unity said: {said}")
+            # What the run did say, kept for the pull request and for the file
+            # beside it: the end of a hang is the whole diagnosis.
+            result.test_tail = build_log.tail_lines(output)
+            log_path = results_dir / f"tests-{pr_workspace.sanitize(platform)}.log"
+            if save_output(log_path, output):
+                result.test_log_path = str(log_path)
+                log(f"  full output: {log_path}")
             # A clean exit with no report is "there was nothing to run"; a
             # non-zero one is the tool saying the run failed — a crash, a hang
             # killed by the timeout — and that is worth telling the pull request.
             if rc != 0:
-                broke = True
+                result.tests_broke = True
     # Only parsed failures count. No results file means Unity could not run the
     # tests, and that is not evidence of a failing test, so it must not fail the
     # build.
-    ok = not all_failures
-    return ok, all_failures, any_ran, broke
+    result.tests_ok = not result.test_failures
+
+
+def save_output(path: Path, output: str, limit: int = 2_000_000) -> bool:
+    """Write what a run printed to ``path``, keeping the end of it. Best-effort.
+
+    The end, not the beginning: a report that lists "the first 2 MB of a
+    thirty-minute hang" answers a question nobody asked, and the file has to be
+    readable on a runner whose disk is shared with every other pull request.
+    """
+    if not output.strip():
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(output[-limit:], encoding="utf-8", errors="replace")
+    except OSError as exc:
+        log(f"Could not write {path}: {exc}")
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -1151,6 +1176,11 @@ class UnityResult:
         # ... and did the run itself fail? A clean exit with no report is a package
         # with nothing to run; a non-zero one is the tool saying it could not.
         self.tests_broke = False
+        # What a run that produced no report said before giving up, and where the
+        # whole of it was written. A hang is diagnosed from its last lines, and
+        # "no report" on its own is not a diagnosis.
+        self.test_tail: List[str] = []
+        self.test_log_path: Optional[str] = None
         self.compile_errors: List[Dict[str, Any]] = []
         self.test_failures: List[Dict[str, Any]] = []
         self.sln_path: Optional[str] = None
@@ -1270,11 +1300,7 @@ def analyze(
 
         if compiled:
             results_dir = pr_workspace.meta_dir(owner, repo, number)
-            tests_ok, failures, reported, broke = run_tests(cli, project, results_dir)
-            result.tests_ok = tests_ok
-            result.test_failures = failures
-            result.tests_reported = reported
-            result.tests_broke = broke
+            run_tests(cli, project, results_dir, result)
         else:
             # No point testing code that does not compile.
             log("Skipping tests because compilation failed.")
