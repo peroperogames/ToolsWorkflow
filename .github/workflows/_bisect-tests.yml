@@ -1,0 +1,100 @@
+name: Bisect the package's EditMode tests
+
+# Temporary diagnostic: runs the PR's per-PR Unity project and bisects its
+# EditMode tests, one namespace and then one class at a time, so a hanging
+# suite names the fixture that hangs instead of needing twenty manual runs.
+#
+# Delete this file when the answer is in.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bisect:
+    runs-on: [build-server, unitypkg-share]
+    timeout-minutes: 120
+    steps:
+      - name: Bisect
+        shell: bash
+        run: |
+          set -u
+          PROJECT=/tmp/ai-code-review/peroperogames/ResourcesManager-PR10
+          UNITY=$(command -v unity || true)
+          [ -n "${UNITY:-}" ] || UNITY="$HOME/.local/bin/unity"
+
+          echo "unity:   $UNITY"
+          echo "project: $PROJECT"
+          if [ ! -d "$PROJECT" ]; then
+            echo "PROJECT MISSING — what is there instead:"
+            ls -la /tmp/ai-code-review/peroperogames 2>&1 | head -20
+            ls -la /tmp/ai-code-review 2>&1 | head -20
+            exit 0
+          fi
+
+          PKG="$PROJECT/.ai-review/pkg"
+          [ -d "$PKG/Tests" ] || PKG="$PROJECT/Packages/com.prpr.resources"
+          echo "package: $PKG"
+          ls "$PKG" 2>&1 | head -20
+
+          OUT=$(mktemp -d)
+          echo "outputs: $OUT"
+          SUMMARY="$OUT/summary.txt"
+          : > "$SUMMARY"
+
+          kill_strays() {
+            pkill -f 'Hub/Editor/.*/Editor/Unity' 2>/dev/null || true
+            sleep 2
+          }
+
+          run_filter() {  # $1 = label, $2 = filter, $3 = soft timeout
+            local label="$1" filter="$2" soft="${3:-180}"
+            local xml="$OUT/$label.xml" log="$OUT/$label.log"
+            local start now secs rc cases
+            start=$(date +%s)
+            timeout $((soft + 60)) "$UNITY" test "$PROJECT" --mode EditMode \
+                --output "$xml" --timeout "$soft" --filter "$filter" \
+                > "$log" 2>&1
+            rc=$?
+            now=$(date +%s); secs=$((now - start))
+            cases=0
+            if [ -f "$xml" ]; then
+              cases=$(grep -c '<test-case' "$xml" 2>/dev/null || echo 0)
+            fi
+            echo "### $label rc=$rc secs=${secs}s cases=$cases filter=$filter"
+            printf '%s\trc=%s\tsecs=%s\tcases=%s\n' "$label" "$rc" "$secs" "$cases" >> "$SUMMARY"
+            if [ ! -f "$xml" ]; then
+              echo "--- last 30 lines of $label ---"
+              tail -30 "$log" 2>/dev/null || true
+              echo "--- end $label ---"
+              kill_strays
+            fi
+            [ -f "$xml" ]
+          }
+
+          echo "=============== namespaces ==============="
+          NAMESPACES=$(grep -rhoE '^namespace [A-Za-z0-9_.]+' "$PKG/Tests" 2>/dev/null \
+            | awk '{print $2}' | sort -u)
+          echo "$NAMESPACES"
+          HUNG_NS=""
+          for ns in $NAMESPACES; do
+            label="ns_$(echo "$ns" | tr '.' '_')"
+            if ! run_filter "$label" "$ns" 240; then
+              HUNG_NS="$HUNG_NS $ns"
+            fi
+          done
+          echo "hung namespaces:${HUNG_NS:- none}"
+
+          echo "=============== classes ==============="
+          CLASSES=$(grep -rhoE 'class [A-Za-z0-9_]+' "$PKG/Tests" 2>/dev/null \
+            | awk '{print $2}' | sort -u)
+          echo "$CLASSES"
+          for cls in $CLASSES; do
+            run_filter "cls_$cls" "$cls" 150
+          done
+
+          echo "=============== summary ==============="
+          sort -t= -k3 -n "$SUMMARY" 2>/dev/null || cat "$SUMMARY"
+          echo "=============== done ==============="
