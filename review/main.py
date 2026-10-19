@@ -32,7 +32,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 
 from ai_client import AIClient, DEFAULT_BASE_URL, DEFAULT_MODEL
 from github_client import GitHubClient
@@ -58,7 +58,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.59"
+VERSION = "2026-10-14.unity.60"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -1465,6 +1465,45 @@ class Command:
     body: str = ""
 
 
+# The pipeline runs as three stages inside one job, each its own process with its
+# own timeout, so a hung build is killed by the runner rather than by the job's
+# six-hour ceiling. The order is a constraint, not a preference: `review` settles
+# the open threads and approves, and nothing may post a finding after that, or
+# the pull request would be approved with an unresolved thread on it.
+#
+# `all` runs the three in order in one process. That is what a manual run wants,
+# and it is the fallback if the split ever has to be undone.
+# Defined here, above the commands, because a command declares which of them it
+# needs.
+STAGES = ("checks", "static", "review")
+
+
+# How much of the pipeline `review(oN)` asks for. A push always runs all three of
+# them; these exist because the cheapest useful review of a small change is not
+# the same thing as the review a pull request gets on every commit.
+#
+#   o1  the review alone — the diff and the conversation, no clone, no build
+#   o2  o1 plus the clone, the build and the unit tests
+#   o3  o2 plus the static analysis — what a plain `review` and every push run
+REVIEW_LEVELS: Dict[str, FrozenSet[str]] = {
+    "o1": frozenset({"review"}),
+    "o2": frozenset({"checks", "review"}),
+    "o3": frozenset(STAGES),
+}
+DEFAULT_REVIEW_LEVEL = "o3"
+
+
+def review_level(target: str) -> str:
+    """The level a command asked for, or the default when it named none.
+
+    An unknown level is the default rather than an error: the command still means
+    "review this", and refusing to review because of a typo in a parenthesised
+    suffix helps nobody.
+    """
+    level = (target or "").strip().lower()
+    return level if level in REVIEW_LEVELS else DEFAULT_REVIEW_LEVEL
+
+
 @dataclass(frozen=True)
 class CommandSpec:
     """One command the bot answers to, and what the rest of the comment means."""
@@ -1473,12 +1512,21 @@ class CommandSpec:
     argument: str  # what the text after the command is called in logs
     summary: str
     handler: Callable[["CommandContext", Command], int]
-    # Does answering this command need the repository's build, tests and static
-    # analysis? A command is deterministic, so this is too — and it is what lets
-    # the checks stage know it has work to do before the model has been asked
-    # anything. A command that does not — rewriting the review criteria, or
-    # reviewing the diff with no build behind it — must not pay for a Unity build.
-    needs_checks: bool = False
+    # The stages this command needs. A command is deterministic, so this is too —
+    # and it is what lets the checks and static stages know they have work to do
+    # before the model has been asked anything. A command that needs neither must
+    # not pay for a Unity build; one that needs the build but not the analysis
+    # must not pay for ReSharper either.
+    stages: FrozenSet[str] = frozenset({"review"})
+    # Does a level after the command name pick those stages instead — see
+    # `REVIEW_LEVELS`? Only `review` does.
+    takes_level: bool = False
+
+    def stages_for(self, command: "Command") -> FrozenSet[str]:
+        """The stages one invocation of this command needs."""
+        if not self.takes_level:
+            return self.stages
+        return REVIEW_LEVELS[review_level(command.target)]
 
 
 @dataclass
@@ -1504,10 +1552,12 @@ def command_pattern(bot_login: str) -> "re.Pattern[str]":
     """The shape every command shares.
 
     An @-mention, then one of the command words, then an optional
-    ``(target)`` — ``prompt(this)`` / ``prompt(base)`` — then an optional colon
-    and the rest of the comment. Parentheses and colon may be full-width, so a
+    ``(target)`` — ``prompt(this)`` / ``prompt(base)``, and the levels
+    ``review(o1)`` / ``review(o2)`` / ``review(o3)`` — then an optional colon and
+    the rest of the comment. Parentheses and colon may be full-width, so a
     Chinese IME cannot silently break a command, and the word must stand alone:
-    "reviews are noisy" is not a command.
+    "reviews are noisy" is not a command. Digits are allowed in the target
+    because that is how the levels are spelled.
     """
     names = {bot_login}
     if bot_login.endswith("[bot]"):
@@ -1523,7 +1573,7 @@ def command_pattern(bot_login: str) -> "re.Pattern[str]":
     return re.compile(
         r"@(?:" + name_alternation + r")\s+"
         r"(?P<command>" + alternation + r")\b\s*"
-        r"(?:[（(]\s*(?P<target>[a-z]+)\s*[)）])?\s*[:：]?\s*(?P<argument>.*)",
+        r"(?:[（(]\s*(?P<target>[a-z0-9]+)\s*[)）])?\s*[:：]?\s*(?P<argument>.*)",
         re.IGNORECASE | re.DOTALL,
     )
 
@@ -1565,37 +1615,23 @@ def handle_prompt_command(ctx: CommandContext, command: Command) -> int:
 
 
 def handle_review_command(ctx: CommandContext, command: Command) -> int:
-    """``@bot review [note]`` — review now, without the intent classifier.
+    """``@bot review[(o1|o2|o3)] [note]`` — review now, without the classifier.
 
     A repository that only reviews on demand cannot afford the classifier
     reading its request to review as something else.
+
+    The level in parentheses says how much of the pipeline to run — see
+    `REVIEW_LEVELS`: `(o1)` reviews the diff alone, `(o2)` adds the clone, the
+    build and the tests, `(o3)` adds the static analysis. No level at all means
+    `o3`, which is what a push runs, so `review` and `review(o3)` are one command
+    spelled two ways.
     """
-    log("Review command: starting a review without the classifier.")
+    level = review_level(command.target)
+    log(f"Review command: level {level}.")
     return handle_review_request(
         ctx.ai, ctx.gh, ctx.pr, command.body, ctx.author, ctx.owner, ctx.repo,
         ctx.number, ctx.config, ctx.system_prompt, ctx.conversation,
-        ctx.bot_login, ctx.records, ctx.comment_records,
-    )
-
-
-def handle_review_only_command(ctx: CommandContext, command: Command) -> int:
-    """``@bot review-only [note]`` — the review alone: no build, no tests.
-
-    The fast question — "what does this code look like?" — for a change whose
-    build is expensive or beside the point: no clone, no Unity project, no test
-    run, no ReSharper. It reviews, and it settles the threads the code has since
-    dealt with, but it does not approve: an approval is this pipeline saying the
-    change was verified, and nothing was. `@bot review` remains the way to get a
-    verdict that counts.
-    """
-    log(
-        "Review-only command: reviewing without the build, the tests or the "
-        "static analysis."
-    )
-    return handle_review_request(
-        ctx.ai, ctx.gh, ctx.pr, command.body, ctx.author, ctx.owner, ctx.repo,
-        ctx.number, ctx.config, ctx.system_prompt, ctx.conversation,
-        ctx.bot_login, ctx.records, ctx.comment_records, with_checks=False,
+        ctx.bot_login, ctx.records, ctx.comment_records, level=level,
     )
 
 
@@ -1647,17 +1683,14 @@ COMMANDS: Tuple[CommandSpec, ...] = (
         handle_prompt_command,
     ),
     CommandSpec(
-        "review", "note", "review the pull request now", handle_review_command,
-        needs_checks=True,
-    ),
-    CommandSpec(
-        "review-only", "note",
-        "review the pull request now, without the build, the tests or the static analysis",
-        handle_review_only_command,
+        "review", "note",
+        "review the pull request now; `(o1)`, `(o2)` and `(o3)` say how much of "
+        "the pipeline to run",
+        handle_review_command, takes_level=True,
     ),
     CommandSpec(
         "rebuild", "note", "re-run the build/test/static steps only",
-        handle_rebuild_command, needs_checks=True,
+        handle_rebuild_command, stages=frozenset({"checks", "static"}),
     ),
 )
 COMMAND_BY_NAME = {spec.name: spec for spec in COMMANDS}
@@ -2151,7 +2184,7 @@ def handle_review_request(
     bot_login: str,
     session_records: List[Dict[str, Any]],
     comment_records: List[Dict[str, Any]],
-    with_checks: bool = True,
+    level: str = DEFAULT_REVIEW_LEVEL,
 ) -> int:
     """Run a full review when the user explicitly asks for one via @-mention.
 
@@ -2159,34 +2192,47 @@ def handle_review_request(
     comments posted since the last run; the request itself becomes a turn, and
     a session that has never seen the PR is bootstrapped with the full diff.
 
-    The repository's build/test gates and the static analysis run here too, so a
-    repository that only ever reviews on demand gets the same protection as one
-    that reviews on every push — without them a broken build could be approved.
+    ``level`` is what the command asked for — see `REVIEW_LEVELS`. At ``o2`` and
+    ``o3`` the repository's gates run here too, so a repository that only ever
+    reviews on demand gets the same protection as one that reviews on every
+    push: without them a broken build could be approved.
 
-    ``with_checks=False`` is the review-only command: no clone, no build, no
-    tests, no static analysis, and no approval. Nothing about the change was
-    verified, so the one thing a review must not do in that state is hand out a
-    green light — the model is told the gates did not run and is given no way to
-    approve past them.
+    At ``o1`` none of that runs, and neither does approval. Nothing about the
+    change was verified, so the one thing a review must not do in that state is
+    hand out a green light — the model is told the gates did not run and is given
+    no way to approve past them. At ``o2`` the analysis is the part missing, and
+    the model is told that instead: style and naming have no second pass there,
+    so it must not assume one will catch what it skips.
     """
+    level = review_level(level)
+    with_checks = level != "o1"
+    with_static = level == "o3"
+
     files = gh.list_files(owner, repo, number)
     if not files:
         gh.post_comment(owner, repo, number, f"@{author} 没有找到变更文件，无法评审。")
         return 0
 
-    log(f"Review requested via @-mention ({len(files)} files, ~{len(conversation)} chars context)...")
+    log(
+        f"Review requested via @-mention ({len(files)} files, "
+        f"~{len(conversation)} chars context, level {level})..."
+    )
     if with_checks:
-        gates = resolve_checks(gh, owner, repo, number, pr, files, config)
+        gates = resolve_checks(
+            gh, owner, repo, number, pr, files, config, with_static=with_static
+        )
         extra_context = gates.extra_context
+        if not with_static:
+            extra_context = _no_static_context(extra_context)
         may_approve = not gates.blocked
         block_reason = "Unity build or tests failed"
         why_not = "New findings were raised"
     else:
         log(
-            "Review-only: no clone, no build, no tests and no static analysis; "
+            f"Review level {level}: no clone, no build, no tests and no analysis; "
             "approval is off because nothing was verified."
         )
-        extra_context = REVIEW_ONLY_STATUS
+        extra_context = NO_GATES_STATUS
         may_approve = False
         block_reason = "this review ran without the build and the tests"
         why_not = "This review ran without the build and the tests"
@@ -2549,10 +2595,25 @@ class ReviewInputs:
 # read as "the build reported nothing", which is not the same fact as "the build
 # did not run" — and the prompt's ⚠️ rule is what keeps the model from approving
 # on the assumption that the tests passed.
-REVIEW_ONLY_STATUS = (
+NO_GATES_STATUS = (
     f"{stage_state.BUILD_STATUS_HEADER}\n\n"
-    "⚠️ 本次没有编译、没有跑单元测试，也没有做静态分析：这条命令只做代码评审。"
+    "⚠️ 本次没有编译、没有跑单元测试，也没有做静态分析：这条命令只做代码评审（review(o1)）。"
 )
+
+# The same thing for `review(o2)`, where the build and the tests did run and the
+# analysis did not. Worth saying for the opposite reason: the prompt tells the
+# model that style and naming are somebody else's pass, and here there is nobody.
+NO_STATIC_STATUS = (
+    "⚠️ 本次没有做静态分析（ReSharper 那一遍没有运行）：风格、命名这类机械问题"
+    "本次没有其他工具覆盖。"
+)
+
+
+def _no_static_context(context: str) -> str:
+    """``context`` plus the note that the analysis did not run."""
+    if not context:
+        return f"{stage_state.BUILD_STATUS_HEADER}\n\n{NO_STATIC_STATUS}"
+    return f"{context}\n\n{NO_STATIC_STATUS}"
 
 
 def resolve_checks(
@@ -2563,6 +2624,7 @@ def resolve_checks(
     pr: Dict[str, Any],
     files: List[Dict[str, Any]],
     config: "Config",
+    with_static: bool = True,
 ) -> ReviewInputs:
     """The gates' results for this run, running them here only if nobody did.
 
@@ -2575,6 +2637,10 @@ def resolve_checks(
     have been run before this step. They run here, in the step that also holds
     the model's key, and the log says so rather than leaving the step names to
     imply otherwise.
+
+    ``with_static`` is false for `review(o2)`, which wants the build and the
+    tests and not the analysis — and this is the path that would otherwise run
+    all three because it has no stages to lean on.
     """
     state = stage_state.load(
         _state_path(owner, repo, number), pr.get("head", {}).get("sha", "")
@@ -2590,10 +2656,13 @@ def resolve_checks(
         )
 
     log(
-        "The checks stage did not run for this one; running the build, the tests "
-        "and the static analysis here instead."
+        "The checks stage did not run for this one; running the build and the "
+        "tests here instead"
+        + (" together with the static analysis." if with_static else ".")
     )
-    checks = run_checks_and_static(gh, owner, repo, number, pr, files, config)
+    checks = run_checks_and_static(
+        gh, owner, repo, number, pr, files, config, with_static=with_static
+    )
     return ReviewInputs(
         blocked=checks.blocked,
         extra_context=checks.extra_context,
@@ -2680,6 +2749,7 @@ def run_checks_and_static(
     files: List[Dict[str, Any]],
     config: "Config",
     static_files: Optional[List[Dict[str, Any]]] = None,
+    with_static: bool = True,
 ) -> ReviewChecks:
     """Build/test the pull request and run the static analysis, in one process.
 
@@ -2688,8 +2758,14 @@ def run_checks_and_static(
     :func:`resolve_checks`, which reaches for it only when no stage did the work —
     a review asked for in prose, where recognising the request is a model call
     and so cannot have happened before the review step.
+
+    ``with_static=False`` is `review(o2)`: the clone, the build and the tests, and
+    not the analysis — this is the path that would otherwise run all three.
     """
     checks = run_review_checks(gh, owner, repo, number, pr, files, config)
+
+    if not with_static:
+        return checks
 
     # Deterministic static analysis (ReSharper + the repo's .editorconfig) runs
     # over every solution that covers the clone; its findings post as their own
@@ -3981,15 +4057,6 @@ def act_on_clean_verdict(
 # stages
 # --------------------------------------------------------------------------- #
 
-# The pipeline runs as three stages inside one job, each its own process with its
-# own timeout, so a hung build is killed by the runner rather than by the job's
-# six-hour ceiling. The order is a constraint, not a preference: `review` settles
-# the open threads and approves, and nothing may post a finding after that, or
-# the pull request would be approved with an unresolved thread on it.
-#
-# `all` runs the three in order in one process. That is what a manual run wants,
-# and it is the fallback if the split ever has to be undone.
-STAGES = ("checks", "static", "review")
 
 # Not a stage of a review: a closed pull request has nothing to review, and the
 # only thing left to do for it is delete what it left behind. Its own entry point
@@ -4023,19 +4090,26 @@ def _comment_event(event_name: str) -> bool:
 DEFAULT_BOT_LOGIN = "perotoolsbot[bot]"
 
 
-def _comment_command(payload: Dict[str, Any]) -> Optional["CommandSpec"]:
-    """The command this comment names, or None. No model call, by definition."""
+def _comment_invocation(
+    payload: Dict[str, Any],
+) -> Optional[Tuple["CommandSpec", "Command"]]:
+    """The command this comment names, with its spec. No model call, by definition."""
     body = (payload.get("comment") or {}).get("body") or ""
     command = parse_command(body, DEFAULT_BOT_LOGIN)
-    return COMMAND_BY_NAME.get(command.name) if command else None
+    if not command:
+        return None
+    spec = COMMAND_BY_NAME.get(command.name)
+    return (spec, command) if spec else None
 
 
-def _stages_have_work(event_name: str, payload: Dict[str, Any]) -> bool:
-    """Should the checks and static stages run for this event?
+def _wanted_stages(event_name: str, payload: Dict[str, Any]) -> "FrozenSet[str]":
+    """Which stages this run has work for.
 
-    A pull request event always. A comment only when it names a command that asks
-    for the repository's gates, which is decidable without the model — the person
-    who wrote the command knows what they meant.
+    A pull request event runs all three. A comment runs what the command it names
+    asks for — `review`, `review(o2)` and `review(o1)` are three different
+    amounts of work — which is decidable without the model: the person who wrote
+    the command knows what they meant. A comment that names no command still
+    needs the review stage, because that is where it is read and answered.
 
     A review asked for in *prose* cannot be known here: recognising it is the
     classifier's job, and that is a model call inside the review stage. Those
@@ -4045,9 +4119,12 @@ def _stages_have_work(event_name: str, payload: Dict[str, Any]) -> bool:
     question.
     """
     if not _comment_event(event_name):
-        return True
-    spec = _comment_command(payload)
-    return bool(spec and spec.needs_checks)
+        return frozenset(STAGES)
+    invocation = _comment_invocation(payload)
+    if invocation is None:
+        return frozenset({"review"})
+    spec, command = invocation
+    return spec.stages_for(command)
 
 
 def _may_be_incremental(event_name: str, payload: Dict[str, Any]) -> bool:
@@ -4587,11 +4664,17 @@ def run_stage(stage: str) -> int:
 
     # A comment that asks for nothing but an answer is answered in the review
     # step and has nothing to build, so these two stand down. A comment naming a
-    # command that does want the gates is a different matter: it is recognised
-    # here, without the model, and the work happens where the other runs do it.
-    if stage in ("checks", "static") and not _stages_have_work(event_name, payload):
-        log(f"Nothing for the {stage} stage to do: this run answers a comment.")
-        return 0
+    # command that does want some of the pipeline is a different matter: it is
+    # recognised here, without the model, and the work happens where the other
+    # runs do it — as much of it as the command asked for.
+    if stage in ("checks", "static"):
+        wanted = _wanted_stages(event_name, payload)
+        if stage not in wanted:
+            log(
+                f"Nothing for the {stage} stage to do: this run runs "
+                f"{', '.join(name for name in STAGES if name in wanted)}."
+            )
+            return 0
 
     if stage == "checks":
         files = _changed_files(gh, owner, repo, number)
