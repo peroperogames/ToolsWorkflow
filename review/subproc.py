@@ -53,6 +53,12 @@ HEARTBEAT_SECONDS = 60
 # is megabytes long, and its last line is all the heartbeat wants.
 TAIL_BYTES = 4096
 
+# How much of a tool's output is echoed before it stops being echoed. Enough for
+# a compile's worth of diagnostics, and bounded because some tools answer a hang
+# by dumping the editor's entire log — and GitHub truncates a step's log at a few
+# megabytes, which would push out the lines that explain the hang.
+ECHO_LIMIT = 256 * 1024
+
 # Windows has no SIGKILL, and no process groups to signal either.
 _KILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 
@@ -100,20 +106,32 @@ class _Stream:
     watching the job, and remembered line by line for the heartbeat that covers
     the tool's quiet stretches.
 
-    ``echo=False`` is for a command whose output must not reach the log at all —
-    ``git`` with a token in the remote URL prints that URL when it cannot
-    connect. Such a stream still records what it read (the caller may want it)
-    and still times it, but neither the lines nor the heartbeat's "last" can
-    leak it.
+    ``echo=False`` stops the lines reaching the log — ``git`` with a token in the
+    remote URL prints that URL when it cannot connect — but the heartbeat may
+    still quote the last line unless ``preview`` is off too, which is what a
+    command whose output may carry a secret sets. ``echo=False, preview=True``
+    is the third case: a tool that narrates megabytes (``unity test`` forwards
+    the editor's log) is worth a progress line every minute and not worth 30
+    minutes of echoed output.
+
+    Echoing stops after ``ECHO_LIMIT`` bytes for that same reason.
     """
 
-    def __init__(self, echo: bool = True, fatal: Sequence[str] = ()) -> None:
+    def __init__(
+        self,
+        echo: bool = True,
+        preview: Optional[bool] = None,
+        fatal: Sequence[str] = (),
+    ) -> None:
         self.lines: List[str] = []
         self.echo = echo
+        self.preview = echo if preview is None else preview
         self.fatal = tuple(marker.lower() for marker in fatal)
         self.fatal_hit = ""
         self.last = ""
         self.last_at = time.monotonic()
+        self.echoed = 0
+        self.truncated = False
 
     def feed(self, line: str) -> None:
         self.lines.append(line)
@@ -122,8 +140,17 @@ class _Stream:
             return
         self.last = stripped[:200]
         self.last_at = time.monotonic()
-        if self.echo:
-            log(line.rstrip())
+        if self.echo and not self.truncated:
+            self.echoed += len(line)
+            if self.echoed > ECHO_LIMIT:
+                self.truncated = True
+                log(
+                    f"… the first {ECHO_LIMIT // 1024} KB of this tool's output is "
+                    "all that is echoed; it keeps writing, and the heartbeat says "
+                    "where it has got to."
+                )
+            else:
+                log(line.rstrip())
         if self.fatal and not self.fatal_hit:
             lowered = stripped.lower()
             for marker in self.fatal:
@@ -154,7 +181,7 @@ def _heartbeat(
 ) -> None:
     """Say that the tool is still working, and what it last said."""
     elapsed = time.monotonic() - started
-    said = (_file_tail(watch) if watch else "") or (stream.last if stream.echo else "")
+    said = (_file_tail(watch) if watch else "") or (stream.last if stream.preview else "")
     line = (
         f"{name} is still running: {build_log.format_duration(elapsed)} of its "
         f"{build_log.format_duration(timeout)} deadline"
@@ -203,6 +230,7 @@ def run(
     env: Optional[Dict[str, str]] = None,
     watch: Optional[str] = None,
     echo: bool = True,
+    preview: Optional[bool] = None,
     fatal: Sequence[str] = (),
 ) -> Tuple[int, str]:
     """Run ``cmd`` under a deadline that ends the whole process tree.
@@ -215,7 +243,11 @@ def run(
 
     ``output`` is also echoed as it arrives, so a twenty-minute compile is twenty
     minutes of the compiler's own words rather than twenty minutes of nothing;
-    ``echo=False`` turns that off for a command whose output may carry a secret.
+    ``echo=False`` turns that off for a command whose output may carry a secret,
+    and ``preview=False`` keeps its last line out of the heartbeat too — which
+    ``echo=False`` also does unless ``preview=True`` is passed with it, as the
+    Unity test run does: not echoed, but still worth one line a minute. The echo
+    stops after ``ECHO_LIMIT``.
     ``watch`` is a file the tool writes its progress to instead of its stdout —
     the editor's log — whose last line goes into the heartbeat that covers the
     quiet minutes.
@@ -245,7 +277,7 @@ def run(
         errors="replace",
         **kwargs,
     )
-    stream = _Stream(echo=echo, fatal=fatal)
+    stream = _Stream(echo=echo, preview=preview, fatal=fatal)
     # The reader owns the pipe: the tool keeps writing while the deadline below
     # is being enforced, and blocking on both from one thread is how a pipe
     # fills up and a tool waits forever for someone to read it.
