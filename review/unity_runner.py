@@ -42,6 +42,17 @@ UNITY_TIMEOUT = int(os.environ.get("UNITY_TIMEOUT", "1800"))  # 30 min default
 # the difference between a lever and a re-run.
 UNITY_TEST_TIMEOUT = int(os.environ.get("UNITY_TEST_TIMEOUT", str(UNITY_TIMEOUT)))
 
+# What the editor says when the run is already lost. Both phrases come from a
+# Mono crash, not from a slow test: the runtime prints the dump and then does not
+# exit, and the CLI waits for it until its own deadline — one pull request sat
+# out its whole thirty minutes on a test host that had already died. A run that
+# announces this is ended there and then, and reported as a run that produced
+# nothing rather than as one that is still going.
+CRASH_MARKERS = (
+    "exiting early due to double fault",
+    "external debugger dump",
+)
+
 # What Unity says when it cannot run for a reason that is not the code's fault.
 # These are phrases, not the word "license": Unity's logs name its licensing
 # module in runs that are perfectly healthy, so matching on that reports a
@@ -595,7 +606,7 @@ def run_unity(
         # The editor writes its progress to the log file, not to the CLI's stdout,
         # so the deadline's heartbeat reads it from there — a compile that takes
         # twenty minutes is twenty minutes of the editor's last line.
-        rc, output = subproc.run(cmd, timeout + 120, watch=str(log_file))
+        rc, output = subproc.run(cmd, timeout + 120, watch=str(log_file), fatal=CRASH_MARKERS)
     except subprocess.TimeoutExpired as exc:
         log(f"Unity timed out after {timeout}s.")
         output = str(getattr(exc, "output", "") or "")
@@ -638,7 +649,7 @@ def run_unity_tests(
         "--non-interactive",
     ]
     try:
-        return subproc.run(cmd, timeout + 120)
+        return subproc.run(cmd, timeout + 120, fatal=CRASH_MARKERS)
     except subprocess.TimeoutExpired as exc:
         # What the CLI printed before it was killed is the only witness there is:
         # the editor died mid-run, so no report was written to explain anything.

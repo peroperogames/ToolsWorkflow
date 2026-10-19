@@ -364,6 +364,8 @@ unity is still running: 3m 40s of its 30m 00s deadline — last: [Licensing::Mod
 
 That line is the difference between a slow build and a hung job, which from the outside are the same silence: the twenty-minute compile this pipeline used to produce printed nothing at all until it finished. The editor reports its progress to a log file rather than to the CLI's stdout, so `unity run` hands that file to the deadline as `watch` and the heartbeat reads its last line — see `subproc.run`. `HEARTBEAT_SECONDS` (60) is in that module rather than in the configuration: how often a progress line is worth printing is not something a caller should have to decide.
 
+A run that announces its own death is ended there and then. The editor prints `Exiting early due to double fault` — a Mono crash — and then does not exit, so `unity test` waits out its whole deadline on a test host that is already gone: ResourcesManager #10 spent thirty minutes per review on exactly that. `CRASH_MARKERS` in `unity_runner.py` are handed to the deadline as `fatal`, and a line containing one ends the process tree at once; the run then reports as one that produced nothing, which is what it did.
+
 One command is deliberately **not** echoed: `git`. Its remote URL carries the App token and git quotes the URL it could not reach, so that output is captured and never printed, and the part of it that does reach the log — the tail quoted when a fetch or clone fails — has the token replaced first.
 
 A failure prints an error report, not just a count:

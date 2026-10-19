@@ -107,9 +107,11 @@ class _Stream:
     leak it.
     """
 
-    def __init__(self, echo: bool = True) -> None:
+    def __init__(self, echo: bool = True, fatal: Sequence[str] = ()) -> None:
         self.lines: List[str] = []
         self.echo = echo
+        self.fatal = tuple(marker.lower() for marker in fatal)
+        self.fatal_hit = ""
         self.last = ""
         self.last_at = time.monotonic()
 
@@ -122,6 +124,12 @@ class _Stream:
         self.last_at = time.monotonic()
         if self.echo:
             log(line.rstrip())
+        if self.fatal and not self.fatal_hit:
+            lowered = stripped.lower()
+            for marker in self.fatal:
+                if marker in lowered:
+                    self.fatal_hit = marker
+                    break
 
     def text(self) -> str:
         return "".join(self.lines)
@@ -195,6 +203,7 @@ def run(
     env: Optional[Dict[str, str]] = None,
     watch: Optional[str] = None,
     echo: bool = True,
+    fatal: Sequence[str] = (),
 ) -> Tuple[int, str]:
     """Run ``cmd`` under a deadline that ends the whole process tree.
 
@@ -209,10 +218,20 @@ def run(
     ``echo=False`` turns that off for a command whose output may carry a secret.
     ``watch`` is a file the tool writes its progress to instead of its stdout —
     the editor's log — whose last line goes into the heartbeat that covers the
-    quiet minutes. Raises ``subprocess.TimeoutExpired`` once the deadline has
-    passed and everything has been killed, and ``OSError`` when the tool cannot
-    be started at all — the same two failures ``subprocess.run`` reports, so
-    callers handle them the same way.
+    quiet minutes.
+
+    ``fatal`` is a list of phrases that mean the tool has already lost: a line
+    containing one ends the run there and then, because a tool that has declared
+    itself dead is not worth the rest of its deadline. The editor does exactly
+    this — a Mono double fault, then no exit until the deadline kills it, which
+    cost one pull request thirty minutes per review. The return code after that
+    kill is an ordinary non-zero one, so the caller reports it like any other
+    run that produced nothing.
+
+    Raises ``subprocess.TimeoutExpired`` once the deadline has passed and
+    everything has been killed, and ``OSError`` when the tool cannot be started
+    at all — the same two failures ``subprocess.run`` reports, so callers handle
+    them the same way.
     """
     kwargs: Dict[str, Any] = {"start_new_session": True} if _POSIX else {}
     proc = subprocess.Popen(  # noqa: S603 - the commands are ours, not user input
@@ -226,7 +245,7 @@ def run(
         errors="replace",
         **kwargs,
     )
-    stream = _Stream(echo=echo)
+    stream = _Stream(echo=echo, fatal=fatal)
     # The reader owns the pipe: the tool keeps writing while the deadline below
     # is being enforced, and blocking on both from one thread is how a pipe
     # fills up and a tool waits forever for someone to read it.
@@ -236,21 +255,33 @@ def run(
     name = _name(cmd)
     started = time.monotonic()
     deadline = started + timeout
+    # A tool that can announce its own crash is polled every second, so the
+    # announcement ends the run rather than waiting out a deadline it has
+    # already lost. Everything else only needs waking for the heartbeat.
+    poll = 1.0 if fatal else HEARTBEAT_SECONDS
     timed_out = False
     while True:
+        if stream.fatal_hit:
+            break
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             timed_out = True
             break
         try:
-            proc.wait(timeout=min(remaining, HEARTBEAT_SECONDS))
+            proc.wait(timeout=min(remaining, poll))
             break
         except subprocess.TimeoutExpired:
             # Still running: say so, unless it is already talking.
             if time.monotonic() - stream.last_at >= HEARTBEAT_SECONDS:
                 _heartbeat(name, stream, watch, started, timeout)
 
-    if timed_out:
+    if stream.fatal_hit:
+        log(
+            f"{name} reported \"{stream.fatal_hit}\"; ending it and everything it "
+            "started rather than waiting for the deadline."
+        )
+        _terminate(proc)
+    elif timed_out:
         log(
             f"{name} did not finish within {timeout}s; ending it and everything "
             "it started."
