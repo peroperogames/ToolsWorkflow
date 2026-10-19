@@ -58,7 +58,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.55"
+VERSION = "2026-10-14.unity.56"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -1476,8 +1476,8 @@ class CommandSpec:
     # Does answering this command need the repository's build, tests and static
     # analysis? A command is deterministic, so this is too — and it is what lets
     # the checks stage know it has work to do before the model has been asked
-    # anything. A command that does not (rewriting the review criteria, say) must
-    # not pay for a Unity build.
+    # anything. A command that does not — rewriting the review criteria, or
+    # reviewing the diff with no build behind it — must not pay for a Unity build.
     needs_checks: bool = False
 
 
@@ -1578,6 +1578,27 @@ def handle_review_command(ctx: CommandContext, command: Command) -> int:
     )
 
 
+def handle_review_only_command(ctx: CommandContext, command: Command) -> int:
+    """``@bot review-only [note]`` — the review alone: no build, no tests.
+
+    The fast question — "what does this code look like?" — for a change whose
+    build is expensive or beside the point: no clone, no Unity project, no test
+    run, no ReSharper. It reviews, and it settles the threads the code has since
+    dealt with, but it does not approve: an approval is this pipeline saying the
+    change was verified, and nothing was. `@bot review` remains the way to get a
+    verdict that counts.
+    """
+    log(
+        "Review-only command: reviewing without the build, the tests or the "
+        "static analysis."
+    )
+    return handle_review_request(
+        ctx.ai, ctx.gh, ctx.pr, command.body, ctx.author, ctx.owner, ctx.repo,
+        ctx.number, ctx.config, ctx.system_prompt, ctx.conversation,
+        ctx.bot_login, ctx.records, ctx.comment_records, with_checks=False,
+    )
+
+
 def handle_rebuild_command(ctx: CommandContext, command: Command) -> int:
     """``@bot rebuild [note]`` — re-run the build, test and static steps only.
 
@@ -1628,6 +1649,11 @@ COMMANDS: Tuple[CommandSpec, ...] = (
     CommandSpec(
         "review", "note", "review the pull request now", handle_review_command,
         needs_checks=True,
+    ),
+    CommandSpec(
+        "review-only", "note",
+        "review the pull request now, without the build, the tests or the static analysis",
+        handle_review_only_command,
     ),
     CommandSpec(
         "rebuild", "note", "re-run the build/test/static steps only",
@@ -1811,6 +1837,7 @@ def settle_threads_and_approve(
     conversation: str = "",
     diff_files: Optional[List[Dict[str, Any]]] = None,
     allow_approve: bool = True,
+    why_not: str = "New findings were raised",
 ) -> None:
     """Resolve the threads that are done with, then approve if none are left.
 
@@ -1818,7 +1845,9 @@ def settle_threads_and_approve(
     at the current state, so it is also the moment to retire what an earlier
     round raised and the code has since dealt with. ``diff_files`` is what the
     threads are judged against — the push's own diff when a push triggered this
-    run, the whole pull request otherwise.
+    run, the whole pull request otherwise. ``why_not`` is the reason printed when
+    approval is withheld: "the build did not run" and "the review found
+    something" are both reasons, and only one of them is about the code.
     """
     decide_resolved_threads(
         ai, gh, owner, repo, number, pr, "perotoolsbot[bot]",
@@ -1826,7 +1855,7 @@ def settle_threads_and_approve(
     )
 
     if not allow_approve:
-        log("New findings were raised; not approving.")
+        log(f"{why_not}; not approving.")
         return
 
     approve_if_clean(
@@ -2122,6 +2151,7 @@ def handle_review_request(
     bot_login: str,
     session_records: List[Dict[str, Any]],
     comment_records: List[Dict[str, Any]],
+    with_checks: bool = True,
 ) -> int:
     """Run a full review when the user explicitly asks for one via @-mention.
 
@@ -2132,6 +2162,12 @@ def handle_review_request(
     The repository's build/test gates and the static analysis run here too, so a
     repository that only ever reviews on demand gets the same protection as one
     that reviews on every push — without them a broken build could be approved.
+
+    ``with_checks=False`` is the review-only command: no clone, no build, no
+    tests, no static analysis, and no approval. Nothing about the change was
+    verified, so the one thing a review must not do in that state is hand out a
+    green light — the model is told the gates did not run and is given no way to
+    approve past them.
     """
     files = gh.list_files(owner, repo, number)
     if not files:
@@ -2139,14 +2175,28 @@ def handle_review_request(
         return 0
 
     log(f"Review requested via @-mention ({len(files)} files, ~{len(conversation)} chars context)...")
-    gates = resolve_checks(gh, owner, repo, number, pr, files, config)
+    if with_checks:
+        gates = resolve_checks(gh, owner, repo, number, pr, files, config)
+        extra_context = gates.extra_context
+        may_approve = not gates.blocked
+        block_reason = "Unity build or tests failed"
+        why_not = "New findings were raised"
+    else:
+        log(
+            "Review-only: no clone, no build, no tests and no static analysis; "
+            "approval is off because nothing was verified."
+        )
+        extra_context = REVIEW_ONLY_STATUS
+        may_approve = False
+        block_reason = "this review ran without the build and the tests"
+        why_not = "This review ran without the build and the tests"
 
     head_sha = pr.get("head", {}).get("sha", "")
     turns = list(comment_records)
     if not session.has_bootstrap(session_records):
         turns.append(
             turn_record(
-                build_diff_text(pr, files) + context_suffix(gates.extra_context),
+                build_diff_text(pr, files) + context_suffix(extra_context),
                 "open",
                 head_sha,
             )
@@ -2162,12 +2212,12 @@ def handle_review_request(
 
     ctx = run_agent_review(
         ai, gh, owner, repo, number, pr, files, system_prompt, session_records, turns,
-        config, block_approve=gates.blocked,
+        config, block_approve=not may_approve, block_reason=block_reason,
     )
     if ctx is not None:
         settle_after_review(
             ai, gh, owner, repo, number, pr, files, config, conversation,
-            not gates.blocked,
+            allow_approve=may_approve, why_not=why_not,
         )
         return 0
 
@@ -2180,7 +2230,7 @@ def handle_review_request(
         return 0
 
     inline = normalize_inline_comments(raw_comments, files)
-    event = determine_event(review_text)
+    event = review_event(review_text, may_approve)
 
     if config.dry_run:
         print(review_text)
@@ -2201,7 +2251,8 @@ def handle_review_request(
     log(f"Review posted on request ({event}).")
     settle_after_review(
         ai, gh, owner, repo, number, pr, files, config, conversation,
-        event == "APPROVE" and not gates.blocked,
+        event == "APPROVE" and may_approve,
+        why_not,
     )
     return 0
 
@@ -2217,6 +2268,7 @@ def settle_after_review(
     config: "Config",
     conversation: str,
     allow_approve: bool,
+    why_not: str = "New findings were raised",
 ) -> None:
     """Retire what an earlier round raised, once a review has finished.
 
@@ -2235,6 +2287,7 @@ def settle_after_review(
         conversation=conversation,
         diff_files=files,
         allow_approve=allow_approve,
+        why_not=why_not,
     )
 
 
@@ -2251,6 +2304,25 @@ def determine_event(review_text: str) -> str:
     if approved:
         return "APPROVE"
     return "COMMENT"
+
+
+def review_event(review_text: str, may_approve: bool) -> str:
+    """The event to post this review with, approval never posted when it may not be.
+
+    ``determine_event`` reads the model's prose for a ✅, and an ``APPROVE`` event
+    **is** an approval on GitHub no matter which step decided to send it. A run
+    that is not allowed to approve therefore posts the same body as a comment:
+    the words are the model's, and the verdict is the one this pipeline is
+    entitled to give.
+    """
+    event = determine_event(review_text)
+    if event == "APPROVE" and not may_approve:
+        log(
+            "The review reads as an approval, but this run may not approve; "
+            "posting it as a comment instead."
+        )
+        return "COMMENT"
+    return event
 
 
 # Runaway guard on the agent loops, not a working limit: a review takes as
@@ -2471,6 +2543,16 @@ class ReviewInputs:
     static_posted: int = 0
     kind: Optional["repo_kind.Kind"] = None
     from_stage: bool = False
+
+
+# What the review is told when it was asked for without the gates. Silence would
+# read as "the build reported nothing", which is not the same fact as "the build
+# did not run" — and the prompt's ⚠️ rule is what keeps the model from approving
+# on the assumption that the tests passed.
+REVIEW_ONLY_STATUS = (
+    f"{stage_state.BUILD_STATUS_HEADER}\n\n"
+    "⚠️ 本次没有编译、没有跑单元测试，也没有做静态分析：这条命令只做代码评审。"
+)
 
 
 def resolve_checks(
@@ -3635,6 +3717,7 @@ def run_agent_review(
     turns: List[Dict[str, Any]],
     config: "Config",
     block_approve: bool = False,
+    block_reason: str = "Unity build or tests failed",
 ) -> Optional[ToolContext]:
     """Let the model drive the review through tools.
 
@@ -3645,9 +3728,10 @@ def run_agent_review(
     so a job that dies mid-review keeps the work it already did.
 
     ``block_approve`` forbids approval regardless of the model's verdict — used
-    when compilation or tests failed. Returns the context when the model used
-    tools, or ``None`` when it answered in prose instead — the caller then
-    falls back to parsing that text.
+    when compilation or tests failed — and ``block_reason`` is the sentence the
+    log finishes that with. Returns the context when the model used tools, or
+    ``None`` when it answered in prose instead — the caller then falls back to
+    parsing that text.
     """
     ctx = ToolContext(
         gh=gh, owner=owner, repo=repo, number=number, pr=pr, files=files,
@@ -3743,7 +3827,7 @@ def run_agent_review(
     if not ctx.approved and ctx.verdict == "approve" and not ctx.block_approve:
         act_on_clean_verdict(gh, owner, repo, number, ctx)
     elif ctx.block_approve and ctx.verdict == "approve":
-        log("Approval blocked: Unity build or tests failed.")
+        log(f"Approval blocked: {block_reason}.")
 
     return ctx
 
@@ -4352,6 +4436,12 @@ def stage_review(
             "build/test status, and approving only on the model's verdict."
         )
     build_blocked = checks_state.blocked if checks_state else False
+    # Why approval would be withheld, for the line that says so: a failed build
+    # and a review that found something are different answers to the same
+    # question, and the log must not name the second while meaning the first.
+    no_approve_reason = (
+        "Unity build or tests failed" if build_blocked else "New findings were raised"
+    )
     extra_context = checks_state.extra_context if checks_state else ""
 
     # Preferred path: the model drives the review with tools. The session
@@ -4363,7 +4453,7 @@ def stage_review(
     )
     ctx = run_agent_review(
         ai, gh, owner, repo, number, pr, files, system_prompt, records, turns, config,
-        block_approve=build_blocked,
+        block_approve=build_blocked, block_reason=no_approve_reason,
     )
     if ctx is not None:
         # Every review retires what an earlier round raised and the code has
@@ -4374,6 +4464,7 @@ def stage_review(
             conversation=conversation,
             diff_files=push_files if push_files else files,
             allow_approve=not build_blocked,
+            why_not=no_approve_reason,
         )
         return 0
 
@@ -4388,7 +4479,7 @@ def stage_review(
     if inline:
         log(f"Found {len(inline)} inline comment(s).")
 
-    event = determine_event(review_text)
+    event = review_event(review_text, not build_blocked)
     log(f"Review event: {event}")
 
     if config.dry_run:
@@ -4424,6 +4515,7 @@ def stage_review(
         conversation=conversation,
         diff_files=push_files if push_files else files,
         allow_approve=(event == "APPROVE") and not build_blocked,
+        why_not=no_approve_reason,
     )
 
     return 0
