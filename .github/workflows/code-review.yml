@@ -87,6 +87,11 @@ on:
         required: false
         type: string
         default: ''
+      resharper-ignore-rules:
+        description: 'Comma-separated ReSharper naming rules to drop, e.g. "Unity serialized field". For a rule the analyser reports and the team''s IDE cannot show or silence.'
+        required: false
+        type: string
+        default: ''
     secrets:
       OPENAI_API_KEY:
         required: true   # OpenAI API key
@@ -133,3 +138,4 @@ jobs:
           unity-sync-method: ${{ inputs.unity-sync-method }}
           resharper-dotnet-sdk: ${{ inputs.resharper-dotnet-sdk }}
           resharper-build: ${{ inputs.resharper-build }}
+          resharper-ignore-rules: ${{ inputs.resharper-ignore-rules }}

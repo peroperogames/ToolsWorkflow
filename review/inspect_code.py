@@ -58,6 +58,23 @@ SDK_TROUBLE_MARKERS = (
 )
 
 
+# Rule names the repository has decided are wrong, separated by commas, from
+# `INSPECT_IGNORE_RULES`. A rule can exist in the analyser and not in the IDE the
+# team uses — the Unity plugin gained a "Unity serialized field" naming rule in a
+# 2026.2 patch build, so a runner with that build reports a convention that the
+# team's Rider cannot even display, and nobody can reproduce or silence it where
+# the code is written. Naming the rule is the honest fix: the finding is dropped
+# on purpose, and the log says how many were dropped, so this reads as a decision
+# and not as the analysis silently doing less.
+IGNORE_RULES_ENV = "INSPECT_IGNORE_RULES"
+
+
+def ignored_rules() -> Set[str]:
+    """The rule names to drop, lower-cased. Empty when nothing is configured."""
+    raw = os.environ.get(IGNORE_RULES_ENV, "")
+    return {part.strip().lower() for part in raw.split(",") if part.strip()}
+
+
 def _env_bool(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -226,6 +243,7 @@ def parse_report(report_path: str) -> List[Dict[str, Any]]:
                 "severity": severity,
                 "message": issue.get("Message") or "",
                 "type": type_id,
+                "rule": rule_name(issue.get("Message") or ""),
                 "rename": suggested_rename(type_id, issue.get("Message") or ""),
             }
         )
@@ -254,6 +272,17 @@ _SUGGESTED_NAME = re.compile(
     r"Name '(?P<current>[^']+)' does not match rule '[^']*'\.\s*"
     r"Suggested name is '(?P<suggested>[^']+)'\."
 )
+
+
+# `... does not match rule 'Unity serialized field'. ...` — the rule's own name,
+# as ReSharper prints it, for the ignore list.
+_RULE_NAME = re.compile(r"does not match rule '(?P<rule>[^']*)'")
+
+
+def rule_name(message: str) -> str:
+    """The naming rule a finding was raised by, or "" when it names none."""
+    match = _RULE_NAME.search(message or "")
+    return match.group("rule") if match else ""
 
 
 def suggested_rename(type_id: str, message: str) -> Optional[Tuple[str, str]]:
@@ -402,6 +431,17 @@ def analyze(
         duplicates = len(collected) - len(issues)
         if duplicates:
             log(f"ReSharper: {duplicates} duplicate finding(s) merged.")
+
+        ignored = ignored_rules()
+        if ignored:
+            kept_by_rule = [i for i in issues if (i.get("rule") or "").lower() not in ignored]
+            dropped = len(issues) - len(kept_by_rule)
+            if dropped:
+                log(
+                    f"ReSharper: {dropped} finding(s) ignored by rule name "
+                    f"({', '.join(sorted(ignored))})."
+                )
+            issues = kept_by_rule
 
         kept = filter_to_changes(issues, changed_lines)
         log(f"ReSharper: {len(issues)} issue(s) total, {len(kept)} on changed lines.")

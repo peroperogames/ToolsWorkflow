@@ -78,6 +78,7 @@ Every setting is reachable three ways: the `with:` input when calling the reusab
 | `unity-sync-method` | `UNITY_SYNC_METHOD` | `UnityEditor.SyncVS.SyncSolution` | `-executeMethod` used in batch mode to regenerate the sln/csproj. |
 | `resharper-dotnet-sdk` | `INSPECT_DOTNET_SDK` | *(auto-detected)* | Pin the .NET SDK whose MSBuild `jb inspectcode` uses (`--dotnetcoresdk`). Empty lets it pick, which means the **newest** installed SDK — and a preview or half-installed one fails the build before any report is written. |
 | `resharper-build` | `INSPECT_BUILD` | `false` | Let `jb inspectcode` build the solution before inspecting it. Off by default: the pipeline already compiled the code, and Unity's generated projects do not build cleanly under a generic MSBuild, which fails the step with no report at all. |
+| `resharper-ignore-rules` | `INSPECT_IGNORE_RULES` | *(empty)* | Comma-separated ReSharper naming rules whose findings are dropped, e.g. `Unity serialized field`. For a rule the analyser reports and the team's IDE cannot display or silence — see [The analyser and the IDE disagree](#the-analyser-and-the-ide-disagree). |
 | — | `UNITY_TIMEOUT` / `DOTNET_TIMEOUT` | `1800` | Seconds either build step may take before it is ended — the tool and everything it started — and reported as skipped. |
 | — | `UNITY_TEST_TIMEOUT` | `UNITY_TIMEOUT` | Seconds the Unity test run may take, separately from the build — a hanging suite then costs only its own deadline. |
 | — | `UNITY_TEST_PLATFORMS` | `EditMode` | Comma list of Unity test platforms to run. |
@@ -414,6 +415,20 @@ Three things used to stop `jb inspectcode` from writing any report at all, and a
 
 **It is found the way the Unity CLI is.** `jb` is a .NET tool installed per user, so it lands in `~/.dotnet/tools` — a directory that is on an interactive `PATH` and on no service account's. A runner that has `jb` and can run it by hand reported "not found on `PATH`" and silently analysed nothing. It is now resolved once per run across `PATH`, `~/.dotnet/tools`, `~/.local/bin` and `/usr/local/bin` and printed once as a fact — see [Nothing asks where a tool is](#nothing-asks-where-a-tool-is).
 
+### The analyser and the IDE disagree
+
+A naming rule can exist in the ReSharper engine that `jb inspectcode` runs and not in the ReSharper that the team's IDE ships — the two are separate builds of the same product, and a patch release can add a rule. The Unity plugin is the case that prompted this: a 2026.2 build adds **Unity serialized field**, which asks for `mHp` where the project has decided on `m_Hp`, and the team's Rider has no such rule to change, because its engine is older.
+
+That is a finding nobody can act on: it cannot be reproduced, silenced or argued with where the code is written. `resharper-ignore-rules` is how a repository says so, by name:
+
+```yaml
+with:
+  resharper-ignore-rules: 'Unity serialized field'
+```
+
+Only naming rules are affected, only the ones named, and the job log says how many findings the list dropped — a number in the log is what keeps this a decision rather than the analysis quietly doing less. The alternative is to keep the two engines in step, which is worth doing anyway: the run log names the ReSharper version it used.
+
+The useful rule of thumb: **silence a rule by name only when the tool that disagrees cannot be changed.** A rule the team's IDE can configure belongs in `.editorconfig`, where both engines read it.
 **It is told not to build.** inspectcode builds the solution before inspecting it, and Unity's generated projects are written for Unity's own compiler settings — a generic MSBuild run trips over them (obsolete-API warnings promoted to errors, output paths it cannot open), and a failed build means no report. The pipeline has already compiled the code anyway: Unity for a package, the .NET SDK for a C# project. With `--no-build`, inspectcode still evaluates MSBuild for the project model and the file set; an A/B run over the same solution produced **byte-identical findings** with and without the build, so nothing is lost. Set `resharper-build` / `INSPECT_BUILD` to put the build back if a solution's real sources only appear after one.
 
 **Its MSBuild is pinned.** inspectcode picks the **newest** .NET SDK it can find, so a half-installed preview wins and the build fails (`MSB4236`, `NETSDK1045`). `resharper-dotnet-sdk` / `INSPECT_DOTNET_SDK` passes `--dotnetcoresdk=<version>` instead. The pinned SDK must be able to build what the repository targets — an SDK cannot target a newer framework than it ships, so pinning `10.0.x` against a `net11.0` project just moves the error. The log prints this hint whenever a missing report shows SDK-resolution symptoms.

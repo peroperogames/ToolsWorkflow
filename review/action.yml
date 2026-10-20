@@ -75,6 +75,10 @@ inputs:
     description: "Set 'true' to let jb inspectcode build the solution before inspecting it. Off by default: the pipeline already compiled the code, and Unity's generated projects do not build cleanly under a generic MSBuild, which fails the step with no report at all."
     required: false
     default: ''
+  resharper-ignore-rules:
+    description: 'Comma-separated ReSharper naming rules to drop, e.g. "Unity serialized field". For a rule the analyser reports and the team''s IDE cannot show or silence.'
+    required: false
+    default: ''
 
 runs:
   using: 'composite'
@@ -137,6 +141,7 @@ runs:
         REVIEW_WORK_DIR: ${{ inputs.state-dir }}
         INSPECT_DOTNET_SDK: ${{ inputs.resharper-dotnet-sdk }}
         INSPECT_BUILD: ${{ inputs.resharper-build }}
+        INSPECT_IGNORE_RULES: ${{ inputs.resharper-ignore-rules }}
       run: python3 "$GITHUB_ACTION_PATH/main.py" static
 
     - name: Review and settle the threads
