@@ -162,6 +162,23 @@ def _sample(paths: Sequence[str], limit: int = 6) -> str:
     return shown if len(names) <= limit else f"{shown} (+{len(names) - limit} more)"
 
 
+# A repository can carry ReSharper settings of its own. `jb inspectcode` reads
+# `<solution>.DotSettings` automatically, but the solution it is pointed at is not
+# always the repository's own: for a Unity package it is the project Unity
+# generates in the PR's working directory, and a file next to the package is miles
+# away from it. Passing the file explicitly is what makes the repository's settings
+# apply either way. First one wins; the files are settings, not a search space.
+def repo_settings(workdir: str) -> Optional[str]:
+    """The repository's own ReSharper settings file, or None."""
+    try:
+        for path in sorted(Path(workdir).rglob("*.DotSettings")):
+            if path.is_file():
+                return str(path)
+    except OSError as exc:
+        log(f"Could not look for .DotSettings files in {workdir}: {exc}")
+    return None
+
+
 def run_inspectcode(target: str, workdir: str, report: Path, timeout: int = 1200) -> bool:
     """Run ``jb inspectcode`` over ``target``, writing ``report``.
 
@@ -173,6 +190,10 @@ def run_inspectcode(target: str, workdir: str, report: Path, timeout: int = 1200
     if not binary:
         return False
     cmd = [binary, "inspectcode", target, f"--output={report}", "--format=Xml", *inspect_args()]
+    settings = repo_settings(workdir)
+    if settings:
+        cmd.append(f"--settings={settings}")
+        log(f"ReSharper: using the repository's settings from {Path(settings).name}.")
 
     log(f"Running ReSharper inspectcode on {Path(target).name} ...")
     try:
