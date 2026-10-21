@@ -373,6 +373,16 @@ def filter_to_changes(
     leave only the warning they caused — noise wearing a warning's clothes.
     """
     unresolved = {i["file"] for i in issues if _is_noise(i)}
+    if unresolved:
+        # Silence here is the dangerous kind: an unresolved reference makes the
+        # analyser describe its own broken view instead of the code, and the
+        # findings that would say so are exactly the ones dropped as noise. Name
+        # the files, so a run that analysed a partial graph is visibly partial.
+        log(
+            "ReSharper: references did not resolve in "
+            + _sample(sorted(unresolved))
+            + " — diagnostics from that are ignored."
+        )
     out: List[Dict[str, Any]] = []
     suppressed = 0
     for issue in issues:
