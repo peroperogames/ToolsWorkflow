@@ -604,6 +604,20 @@ def running_display() -> Optional[str]:
     return f":{min(numbers)}" if numbers else None
 
 
+def usable_display() -> Optional[str]:
+    """The display to run graphics work on, set or merely running.
+
+    :func:`running_display` refuses to override a ``DISPLAY`` the operator set,
+    which is right when handing a value down. This asks the other question — is
+    there a display at all — because a windowed editor needs one and the two are
+    equally good answers to it.
+    """
+    current = os.environ.get("DISPLAY", "").strip()
+    if current:
+        return current
+    return running_display()
+
+
 def run_unity(
     cli: str, project: str, extra_args: List[str], timeout: int, log_file: Path
 ) -> Tuple[int, str]:
@@ -660,6 +674,133 @@ def run_unity(
     # The CLI's own output is all there is when it never reached the editor — a
     # missing license, an editor that is not installed, a permission problem.
     return rc, text + (("\n" + output) if output else "")
+
+
+def project_editor_version(project: str) -> str:
+    """The editor version the project was made with, as Unity wrote it down."""
+    path = Path(project) / "ProjectSettings" / "ProjectVersion.txt"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        key, _, value = line.partition(":")
+        if key.strip().lower() == "m_editorversion":
+            return value.strip()
+    return ""
+
+
+# `unity editors --json` is a process launch, and the answer cannot change
+# between the two platform runs of one job.
+_EDITORS_CACHE: Dict[str, Optional[str]] = {}
+
+
+def _first_json_object(text: str) -> Optional[Dict[str, Any]]:
+    """The first JSON object in ``text``, ignoring whatever the CLI printed first."""
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text or ""):
+        if char != "{":
+            continue
+        try:
+            obj, _ = decoder.raw_decode(text, index)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
+def editor_binary(cli: str, version: str) -> Optional[str]:
+    """The editor binary to drive directly, or None when the CLI cannot say.
+
+    ``unity test`` always passes ``-batchmode``, and a batch-mode editor never
+    reaches the end of a frame: a PlayMode test that waits for one hangs, and one
+    that captures the screen gets no picture (measured on 2022.3 — see
+    :func:`run_unity_tests_windowed`). Driving the same editor with a window
+    fixes both, and the binary for that comes from the CLI's own list, so the
+    version cannot drift from the project's.
+    """
+    if not version:
+        return None
+    if version in _EDITORS_CACHE:
+        return _EDITORS_CACHE[version]
+    resolved: Optional[str] = None
+    try:
+        _rc, out = subproc.run(
+            [cli, "editors", "--json", "--non-interactive"], 120, echo=False
+        )
+        data = _first_json_object(out) or {}
+        for entry in data.get("data") or []:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("version") or "") != version:
+                continue
+            location = str(entry.get("location") or "").strip()
+            if location and Path(location).exists():
+                resolved = location
+                break
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        log(f"Unity: could not list the installed editors ({exc}).")
+    _EDITORS_CACHE[version] = resolved
+    return resolved
+
+
+def run_unity_tests_windowed(
+    editor: str,
+    project: str,
+    results: Path,
+    mode: str,
+    timeout: int,
+    log_path: Path,
+) -> Tuple[int, str]:
+    """Run one test platform in an editor with a window, leaving the report behind.
+
+    Measured on 2022.3 against the same project and the same three tests: `yield
+    return null` passes either way; `yield return new WaitForEndOfFrame()` hangs
+    forever in batch mode and passes here; `ScreenCapture.CaptureScreenshotAsTexture()`
+    returns a texture here and, in batch mode, fails with "was method called before
+    the 'end of frame' state was reached". No flag turns the frame loop back on in
+    batch mode, so the mode is the fix: a window — on a virtual display, on a
+    headless machine — is what makes a rendered-frame test a test instead of a hang.
+    """
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log(f"Could not create the log directory {log_path.parent}: {exc}")
+    if results.exists():
+        results.unlink()
+    cmd = [
+        editor,
+        "-projectPath", project,
+        "-runTests",
+        "-testPlatform", mode,
+        "-testResults", str(results),
+        "-logFile", str(log_path),
+    ]
+    env = dict(os.environ)
+    display = usable_display()
+    if display:
+        env["DISPLAY"] = display
+    try:
+        rc, out = subproc.run(
+            cmd, timeout + 60,
+            env=env,
+            echo=False, preview=True, fatal=CRASH_MARKERS, deadline=timeout,
+            watch=str(log_path),
+            label=f"Unity {mode} tests (window)",
+        )
+    except subprocess.TimeoutExpired as exc:
+        log(f"Unity: the windowed {mode} run timed out after {timeout}s.")
+        return -1, str(getattr(exc, "output", "") or "")
+    except OSError as exc:
+        log(f"Unity: could not start the editor with a window: {exc}")
+        return -1, ""
+    text = ""
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        pass
+    return rc, text + (("\n" + out) if out else "")
 
 
 def run_unity_tests(
@@ -1134,6 +1275,12 @@ def run_tests(
     did on its own.
     """
     platforms = list(TEST_PLATFORMS)
+    # A window is what makes a rendered-frame test possible: `unity test` always
+    # passes `-batchmode`, and a batch-mode editor never finishes a frame. PlayMode
+    # runs in an editor with a window when one can be had; EditMode needs no frame
+    # and keeps the cheaper batch route.
+    editor = editor_binary(cli, project_editor_version(project))
+    display = usable_display()
     for platform in platforms:
         results = results_dir / f"tests-{pr_workspace.sanitize(platform)}.xml"
         log(f"Unity: running {platform} tests ...")
@@ -1141,7 +1288,26 @@ def run_tests(
         # not the step's — and reported on both outcomes, which is what makes a
         # suite that "got slow" visible before it becomes a timeout.
         started = time.monotonic()
-        rc, output = run_unity_tests(cli, project, results, platform, UNITY_TEST_TIMEOUT)
+        if editor and display and platform == "PlayMode":
+            log(
+                f"Unity: in an editor with a window on display {display} — batch "
+                "mode never reaches the end of a frame, so WaitForEndOfFrame and "
+                "screen captures cannot work there."
+            )
+            rc, output = run_unity_tests_windowed(
+                editor, project, results, platform, UNITY_TEST_TIMEOUT,
+                results_dir / f"tests-{pr_workspace.sanitize(platform)}.editor.log",
+            )
+            if not results.exists() and time.monotonic() - started < 120:
+                # No report and no time spent: the window did not come up. Batch
+                # mode is what this pipeline did before windows existed, so fall
+                # back to it rather than losing the platform.
+                log("Unity: the windowed run stopped early; retrying in batch mode.")
+                rc, output = run_unity_tests(
+                    cli, project, results, platform, UNITY_TEST_TIMEOUT
+                )
+        else:
+            rc, output = run_unity_tests(cli, project, results, platform, UNITY_TEST_TIMEOUT)
         took = build_log.format_duration(time.monotonic() - started)
         if results.exists():
             result.tests_reported = True
