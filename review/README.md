@@ -76,13 +76,12 @@ Every setting is reachable three ways: the `with:` input when calling the reusab
 | `unity-editor-version` | `UNITY_EDITOR_VERSION` | `2022.3.62f3` | Editor version each PR's project is created for. The CLI resolves that same version back out of the project when it runs it, so the two cannot drift. |
 | `unity-template` | `UNITY_TEMPLATE` | `com.unity.template.3d` | Template package each PR's project is created from. |
 | `unity-sync-method` | `UNITY_SYNC_METHOD` | `UnityEditor.SyncVS.SyncSolution` | `-executeMethod` used in batch mode to regenerate the sln/csproj. |
-| `unity-test-platforms` | `UNITY_TEST_PLATFORMS` | `EditMode` | Comma list of test platforms to run, e.g. `EditMode,PlayMode`. PlayMode is off by default because it needs more of the editor than batch mode gives it; a package whose tests are mostly PlayMode has to say so. |
 | `resharper-dotnet-sdk` | `INSPECT_DOTNET_SDK` | *(auto-detected)* | Pin the .NET SDK whose MSBuild `jb inspectcode` uses (`--dotnetcoresdk`). Empty lets it pick, which means the **newest** installed SDK — and a preview or half-installed one fails the build before any report is written. |
 | `resharper-build` | `INSPECT_BUILD` | `false` | Let `jb inspectcode` build the solution before inspecting it. Off by default: the pipeline already compiled the code, and Unity's generated projects do not build cleanly under a generic MSBuild, which fails the step with no report at all. |
 | `resharper-ignore-rules` | `INSPECT_IGNORE_RULES` | *(empty)* | Comma-separated ReSharper naming rules whose findings are dropped, e.g. `Unity serialized field`. For a rule the analyser reports and the team's IDE cannot display or silence — see [The analyser and the IDE disagree](#the-analyser-and-the-ide-disagree). |
 | — | `UNITY_TIMEOUT` / `DOTNET_TIMEOUT` | `1800` | Seconds either build step may take before it is ended — the tool and everything it started — and reported as skipped. |
 | — | `UNITY_TEST_TIMEOUT` | `UNITY_TIMEOUT` | Seconds the Unity test run may take, separately from the build — a hanging suite then costs only its own deadline. |
-| — | `UNITY_TEST_PLATFORMS` | `EditMode` | Comma list of Unity test platforms to run. |
+| — | `UNITY_TEST_PLATFORMS` | *(from the package)* | Operator override for the test platforms. Left empty — which is the normal state — the pipeline reads them from the package: EditMode always, and PlayMode too when a test assembly compiles for the player rather than the editor. That is a fact about the package's own asmdefs, so no repository states it. Set this only on a machine that cannot run PlayMode. |
 
 `code-review.yml` also needs the `APP_ID`, `APP_PK` and `OPENAI_API_KEY` secrets; `main.py` additionally reads `GITHUB_REPOSITORY`, `GITHUB_EVENT_NAME` and `GITHUB_EVENT_PATH` (set by Actions) or `GITHUB_PR_NUMBER` for a manual run.
 

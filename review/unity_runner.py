@@ -1052,7 +1052,65 @@ def generate_and_build(
     return False, False, errors, sln
 
 
-def run_tests(cli: str, project: str, results_dir: Path, result: "UnityResult") -> None:
+def has_playmode_tests(package_root: Optional[str]) -> bool:
+    """Does the package have a test assembly that is not editor-only?
+
+    Unity decides a test's mode by the assembly it lives in: an assembly that
+    compiles for the editor only runs its tests in EditMode, and one that compiles
+    for the player runs them in PlayMode. That is a fact about the package's own
+    asmdefs, so the pipeline can read it instead of asking the repository which
+    platforms it wants — and a package whose tests are mostly PlayMode would
+    otherwise have been reported "tested" with none of them run.
+    """
+    if not package_root:
+        return False
+    try:
+        manifests = sorted(Path(package_root).rglob("*.asmdef"))
+    except OSError as exc:
+        log(f"Could not look for asmdefs in {package_root}: {exc}")
+        return False
+    for manifest in manifests:
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8-sig", errors="replace"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        name = str(data.get("name") or manifest.stem)
+        references = " ".join(str(r) for r in data.get("references") or [])
+        looks_like_tests = "test" in name.lower() or "test" in manifest.parent.name.lower()
+        looks_like_tests = looks_like_tests or "testrunner" in references.lower() or "nunit" in references.lower()
+        if not looks_like_tests:
+            continue
+        platforms = data.get("includePlatforms")
+        if platforms == ["Editor"]:
+            continue
+        log(
+            f"PlayMode tests: assembly {name} compiles for the player "
+            f"({', '.join(platforms) if platforms else 'all platforms'}), so its tests "
+            "are PlayMode."
+        )
+        return True
+    return False
+
+
+def test_platforms(package_root: Optional[str]) -> List[str]:
+    """Which platforms to run, from the package itself.
+
+    A runner may override the choice with ``UNITY_TEST_PLATFORMS`` — that is an
+    operator's knob for a machine that cannot run PlayMode, not a value a
+    repository has to supply about its own code.
+    """
+    override = os.environ.get("UNITY_TEST_PLATFORMS", "").strip()
+    if override:
+        return [p.strip() for p in override.split(",") if p.strip()]
+    platforms = ["EditMode"]
+    if has_playmode_tests(package_root):
+        platforms.append("PlayMode")
+    return platforms
+
+
+def run_tests(cli: str, project: str, results_dir: Path, result: "UnityResult", package_root: Optional[str] = None) -> None:
     """Run the configured test platforms, filling in what happened on ``result``.
 
     Four facts, and they answer three different questions. ``tests_ok`` is "no
@@ -1069,15 +1127,13 @@ def run_tests(cli: str, project: str, results_dir: Path, result: "UnityResult") 
     whole captured output is written beside the reports, so it can be read in
     full on the runner.
 
-    PlayMode is skipped by default (a PlayMode run needs more of the editor than
-    batch mode gives it); set ``UNITY_TEST_PLATFORMS`` to a comma list to
-    override.
+    The platforms come from the package (see :func:`test_platforms`): EditMode
+    always, and PlayMode when a test assembly compiles for the player. Running a
+    suite in the mode it was written for is the difference between testing and
+    reporting that testing happened.
     """
-    platforms = [
-        p.strip()
-        for p in os.environ.get("UNITY_TEST_PLATFORMS", "EditMode").split(",")
-        if p.strip()
-    ]
+    platforms = test_platforms(package_root)
+    log("Test platforms: " + ", ".join(platforms) + ".")
     for platform in platforms:
         results = results_dir / f"tests-{pr_workspace.sanitize(platform)}.xml"
         log(f"Unity: running {platform} tests ...")
@@ -1300,7 +1356,7 @@ def analyze(
 
         if compiled:
             results_dir = pr_workspace.meta_dir(owner, repo, number)
-            run_tests(cli, project, results_dir, result)
+            run_tests(cli, project, results_dir, result, kind.package_root)
         else:
             # No point testing code that does not compile.
             log("Skipping tests because compilation failed.")
