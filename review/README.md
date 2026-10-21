@@ -29,7 +29,7 @@ jobs:
       APP_PK: ${{ secrets.APP_PK }}
 ```
 
-The GitHub App token is generated in `code-review.yml` via `actions/create-github-app-token` and passed to the composite action as `github-token`. Per-PR state lives in the runner's working directory (not inside the action): each pull request owns one directory named `<repo>-PR<number>` that holds both its session and its Unity project, and the whole directory is removed when the PR closes.
+The GitHub App token is generated in `code-review.yml` via `actions/create-github-app-token` and passed to the composite action as `github-token`. **It lives for one hour**, and the clock starts when the token is minted, not when the gate starts: a run that spends longer than that testing and analysing (two thirty-minute test timeouts are enough) reaches the reporting step with nothing left to authenticate with, and GitHub answers `401 Bad credentials`. That is not a comment worth retrying — the log says so in as many words — and it is a reason to make the gate finish in minutes rather than a reason to post harder. Per-PR state lives in the runner's working directory (not inside the action): each pull request owns one directory named `<repo>-PR<number>` that holds both its session and its Unity project, and the whole directory is removed when the PR closes.
 
 ## Requirements
 
@@ -398,10 +398,12 @@ The log is also **live while the step runs**, not only at the end. A tool's own 
 
 ```
 Unity: generating project files via UnityEditor.SyncVS.SyncSolution ...
-unity is still running: 3m 40s of its 30m 00s deadline, quiet for 3m 40s — last: [Licensing::Module] Connecting to server...
+Unity PlayMode tests: still running for 12m 00s of its 30m 00s deadline, no output at all since it started.
 ```
 
-That line is the difference between a slow build and a hung job, which from the outside are the same silence: the twenty-minute compile this pipeline used to produce printed nothing at all until it finished. The editor reports its progress to a log file rather than to the CLI's stdout, so `unity run` hands that file to the deadline as `watch` and the heartbeat reads its last line — see `subproc.run`. `HEARTBEAT_SECONDS` (60) is in that module rather than in the configuration: how often a progress line is worth printing is not something a caller should have to decide.
+That line is the difference between a slow build and a hung job, which from the outside are the same silence: the twenty-minute compile this pipeline used to produce printed nothing at all until it finished. The editor reports its progress to a log file rather than to the CLI's stdout, so `unity run` hands that file to the deadline as `watch` and the heartbeat reads its last line — see `subproc.run`. The run names itself (`Unity PlayMode tests`, not `unity`), because the same executable runs twice in a row and the interesting question is which of the two has been silent. A run that has never printed anything says so — **no output at all since it started** — rather than repeating the elapsed time as "quiet for", which is the same number twice and hides the fact worth noticing. `HEARTBEAT_SECONDS` (60) is in that module rather than in the configuration: how often a progress line is worth printing is not something a caller should have to decide.
+
+**What a heartbeat cannot say is which test hung.** Unity Test Framework writes its report at the end of the platform's run and prints nothing per test, so a suite that hangs produces thirty minutes of silence from a harness that is working exactly as designed. When a timed-out run printed nothing, the log says so and names the way to find out — `unity test . --mode PlayMode --filter <fixture>`, or `--shard n/m` — because narrowing it is the only thing that answers the question.
 
 Two limits keep that from becoming its own problem. **The test run is captured but not echoed**: `unity test` forwards the editor's log to its own stdout, which is megabytes over a run that hangs, so it runs with `echo=False, preview=True` — silent, except for the heartbeat quoting its last line every minute. And echoing stops after **`ECHO_LIMIT`** (256 KB) for every command, because GitHub truncates a step's log at a few megabytes and the dump a hang produces is exactly the part that must not push the rest out.
 

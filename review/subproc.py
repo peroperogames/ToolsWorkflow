@@ -186,15 +186,24 @@ def _heartbeat(
     own: the Unity CLI enforces its own timeout on the editor and this module
     waits a little longer than that, so naming the longer one would report a
     number the operator never set.
+
+    A tool that has not printed one line since it started gets that said out
+    loud: "quiet for 12 minutes" next to "running for 12 minutes" is the same
+    number twice, and the interesting fact — it has never said anything, so this
+    is a silence to investigate, not a slow build — is the one that was missing.
     """
     elapsed = time.monotonic() - started
     said = (_file_tail(watch) if watch else "") or (stream.last if stream.preview else "")
     # "quiet for" is the number that answers the question the heartbeat exists for:
     # a slow tool is still talking, a stuck one has not said anything for minutes.
+    silence = (
+        "no output at all since it started"
+        if quiet >= elapsed - 1
+        else f"quiet for {build_log.format_duration(quiet)}"
+    )
     line = (
-        f"{name} is still running: {build_log.format_duration(elapsed)} of its "
-        f"{build_log.format_duration(timeout)} deadline, "
-        f"quiet for {build_log.format_duration(quiet)}"
+        f"{name}: still running for {build_log.format_duration(elapsed)} of its "
+        f"{build_log.format_duration(timeout)} deadline, {silence}"
     )
     # No full stop after a quoted line: "Compiling C# scripts...." is what two
     # punctuation marks at the end of one sentence look like.
@@ -243,6 +252,7 @@ def run(
     preview: Optional[bool] = None,
     fatal: Sequence[str] = (),
     deadline: Optional[float] = None,
+    label: str = "",
 ) -> Tuple[int, str]:
     """Run ``cmd`` under a deadline that ends the whole process tree.
 
@@ -300,7 +310,11 @@ def run(
     reader = threading.Thread(target=_pump, args=(proc.stdout, stream), daemon=True)
     reader.start()
 
-    name = _name(cmd)
+    # What the heartbeat calls the run. The executable's name says nothing when
+    # the same one runs twice in a row — "unity: still running" does not say
+    # which of EditMode and PlayMode is the one that has been silent for twelve
+    # minutes, and that is the whole question at that point.
+    name = label or _name(cmd)
     started = time.monotonic()
     expires_at = started + timeout
     # A tool that can announce its own crash is polled every second, so the

@@ -58,7 +58,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.76"
+VERSION = "2026-10-14.unity.77"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3270,6 +3270,16 @@ def post_status_comment(
         return True
     except Exception as exc:  # noqa: BLE001 - reporting must not end the run
         log(f"Warning: could not post a status comment: {exc}")
+        if "401" in str(exc) or "Bad credentials" in str(exc):
+            # An App installation token lives one hour. A run that spent longer
+            # than that in the gate — two thirty-minute test timeouts will do it —
+            # arrives here with nothing left to authenticate with, and the answer
+            # is "why did it take an hour", not "post harder".
+            log(
+                "hint: GitHub rejected the token. An App installation token lives "
+                "for one hour, so a run that spent longer than that before "
+                "reporting has nothing left to post with."
+            )
         return False
 
 

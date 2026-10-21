@@ -703,6 +703,7 @@ def run_unity_tests(
             cmd, timeout + 120,
             env=env,
             echo=False, preview=True, fatal=CRASH_MARKERS, deadline=timeout,
+            label=f"Unity {mode} tests",
         )
     except subprocess.TimeoutExpired as exc:
         # What the CLI printed before it was killed is the only witness there is:
@@ -1167,6 +1168,17 @@ def run_tests(cli: str, project: str, results_dir: Path, result: "UnityResult") 
             # killed by the timeout — and that is worth telling the pull request.
             if rc != 0:
                 result.tests_broke = True
+                if not output.strip():
+                    # Nothing was printed at all: the suite hung before saying
+                    # anything, so the log cannot name the test that did it. Say
+                    # what can be said, and how to find out — one filter run does
+                    # in a minute what the thirty-minute deadline just failed to.
+                    log(
+                        f"  the {platform} run printed nothing, so the test that hung "
+                        "cannot be named from its output; narrow it with "
+                        f"`unity test . --mode {platform} --filter <fixture>` "
+                        "(or --shard n/m)."
+                    )
     # Only parsed failures count. No results file means Unity could not run the
     # tests, and that is not evidence of a failing test, so it must not fail the
     # build.
