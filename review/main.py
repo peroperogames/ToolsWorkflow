@@ -58,7 +58,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.64"
+VERSION = "2026-10-14.unity.65"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3321,7 +3321,7 @@ def bot_comment_exists(
 def existing_resharper_findings(
     gh: GitHubClient, owner: str, repo: str, number: int
 ) -> set:
-    """``(path, body)`` of every ReSharper finding still open on the PR.
+    """``(path, body)`` of every ReSharper finding already on the PR.
 
     The static-analysis step posts one deterministic comment per finding, so an
     identical body on the same path is the same finding raised before — and
@@ -3330,30 +3330,20 @@ def existing_resharper_findings(
     sees the latest push's diff, it remembers what it posted, and it can read
     the thread states); this is the static step's single one.
 
-    Only *unresolved* threads count. A finding whose thread was marked resolved
-    and is reported again is either a regression or a wrong resolution, and both
-    are worth saying out loud.
+    A *resolved* thread counts as raised. It did not at first, on the theory that
+    a resolved finding still in the code is either a regression or a wrong
+    resolution and both are worth saying again — but the finding that gets
+    resolved is the one that is wrong, and re-posting it on every later review
+    leaves the author with a comment they cannot silence short of changing code
+    that does not need changing. A real regression is better served by the thread
+    being reopened: that keeps one conversation per finding, which is what a
+    review thread is for.
     """
-    resolved: Dict[Any, bool] = {}
-    try:
-        for thread in gh.list_review_threads(owner, repo, number):
-            for node in (thread.get("comments") or {}).get("nodes") or []:
-                if node.get("databaseId") is not None:
-                    resolved[node["databaseId"]] = bool(thread.get("isResolved"))
-    except Exception as exc:  # noqa: BLE001 - best-effort
-        # Without the thread states we cannot tell an open finding from a settled
-        # one, so nothing is treated as already raised: a repeated comment is a
-        # smaller failure than a dropped one.
-        log(f"Warning: could not read review threads ({exc}); ReSharper findings will not be de-duplicated.")
-        return set()
-
     seen: set = set()
     try:
         for comment in gh.list_review_comments(owner, repo, number):
             body = _normalized(comment.get("body") or "")
             if RESHARPER_MARKER not in body or not is_bot_author(comment.get("user")):
-                continue
-            if resolved.get(comment.get("id"), False):
                 continue
             seen.add((comment.get("path") or "", body))
     except Exception as exc:  # noqa: BLE001 - best-effort
