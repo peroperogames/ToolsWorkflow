@@ -169,7 +169,7 @@ class DotnetResult:
             return ""
         if self.ok:
             if self.tests_broke:
-                return "⚠️ .NET: 编译通过；单元测试没有跑完，也就没有报告，不能算通过。"
+                return "⚠️ .NET: 编译通过；测试没有跑完，没有产出报告。"
             if self.tested and not self.tests_reported:
                 return "⚠️ .NET: 编译通过；单元测试没有产出报告，本次未真正运行。"
             return "✅ .NET: 编译通过" + ("，单元测试通过。" if self.tested else "。")

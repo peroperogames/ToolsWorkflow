@@ -1822,7 +1822,7 @@ class UnityResult:
             if self.tests_broke:
                 return (
                     f"⚠️ Unity: 编译通过；{self._failure_sentence_zh()}"
-                    "没有产出报告，不能算通过。" + self._platform_table()
+                    "没有产出报告。" + self._platform_table()
                 )
             if not self.tests_reported:
                 return "⚠️ Unity: 编译通过；单元测试没有产出报告，本次未真正运行。"
