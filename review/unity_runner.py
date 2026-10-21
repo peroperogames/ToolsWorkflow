@@ -1394,8 +1394,12 @@ BLAME_MAX_SECONDS = 900
 # after `Test` is what tells them apart.
 _TEST_ATTRIBUTE = re.compile(r"\[\s*(?:Unity)?Test\b")
 _TESTCASE_ATTRIBUTE = re.compile(r"\[\s*TestCase(?:Source)?\b")
+# `async Task` is a test signature too, and the one PeroLog used for the tests
+# this search kept missing: an `IEnumerator`-and-`void`-only pattern walked past
+# them, so every probe passed and the honest answer was "needs the whole suite".
 _METHOD_SIGNATURE = re.compile(
-    r"\b(?:IEnumerator|IEnumerator<[^>]+>|void)\s+([A-Za-z_]\w*)\s*\("
+    r"\b(?:IEnumerator|IEnumerator<[^>]+>|async\s+Task(?:<[^>]+>)?|Task(?:<[^>]+>)?|void)"
+    r"\s+([A-Za-z_]\w*)\s*\("
 )
 _NAMESPACE = re.compile(r"^\s*namespace\s+([\w.]+)")
 _CLASS = re.compile(r"\b(?:class|struct)\s+([A-Za-z_]\w*)")
@@ -1496,14 +1500,13 @@ def _filter_pattern(names: Sequence[str]) -> str:
     """
     parts = []
     for name in names:
-        head, _, method = name.rpartition(".")
-        parts.append(
-            re.escape(head)
-            + r"(?:<[^>]*>|`\d+\[[^\]]*\])?"
-            + r"\."
-            + re.escape(method)
-        )
-    return "^(?:" + "|".join(parts) + r")(?:\(.*\))?$"
+        _head, _, method = name.rpartition(".")
+        # The method alone, with any class before it. A test declared `virtual`
+        # in an abstract fixture is reported under each concrete one, so the
+        # class the sources name is not the class the runner reports — matching on
+        # it hid those tests from the search entirely.
+        parts.append(re.escape(method))
+    return r"^(?:.*\.)?(?:" + "|".join(parts) + r")(?:\(.*\))?$"
 
 
 def _report_case_count(report: Path) -> int:
