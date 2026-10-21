@@ -149,6 +149,11 @@ runs:
     # at is a failing run that gets re-run until it passes, so the reports and
     # the logs go up with the job: the NUnit XML, its captured output, the
     # editor's own log and ReSharper's, for fourteen days.
+    #
+    # The directory is not dot-prefixed on purpose. `upload-artifact` excludes
+    # hidden files unless `include-hidden-files` is true, so a hidden directory
+    # is searched and reported as "No files were found with the provided path"
+    # even with eight report files in it.
     - name: Upload the reports
       if: always() && github.event.action != 'closed'
       uses: actions/upload-artifact@v4
@@ -158,7 +163,7 @@ runs:
         # in the PR's directory under the system temp directory, and `$RUNNER_TEMP`
         # is a different directory on Linux — the first version of this step
         # uploaded nothing and said so only in its own log.
-        path: ${{ github.workspace }}/.ai-review-artifacts/
+        path: ${{ github.workspace }}/ai-review-artifacts/
         if-no-files-found: ignore
         retention-days: 14
 

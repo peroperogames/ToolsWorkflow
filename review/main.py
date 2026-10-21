@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.97"
+VERSION = "2026-10-14.unity.98"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3267,7 +3267,13 @@ def changed_lines_by_file(files: List[Dict[str, Any]]) -> Dict[str, set]:
 # that is the one directory the step and this process both know: the reports
 # themselves live in the PR's directory under the system temp directory, which the
 # step has no way to name (`$RUNNER_TEMP` is a different directory on Linux).
-ARTIFACTS_DIRNAME = ".ai-review-artifacts"
+#
+# Not dot-prefixed, and that is the whole point: `upload-artifact` leaves hidden
+# files out by default (`include-hidden-files` is false), so a `.ai-review-artifacts`
+# directory is walked, found empty and reported as "No files were found with the
+# provided path" — which is exactly what happened, three runs in a row, while this
+# process was copying eight files into it every time.
+ARTIFACTS_DIRNAME = "ai-review-artifacts"
 
 
 # Set once the stage knows which pull request it is; `share_artifacts` runs in a
@@ -3307,6 +3313,11 @@ def share_artifacts() -> None:
                 log(f"Warning: could not copy {path.name} for upload: {exc}")
     if copied:
         log(f"Copied {copied} report file(s) into {target} for the upload step.")
+    else:
+        # Worth saying out loud: an upload step that finds nothing is a warning in
+        # someone else's log, and this is the line that says whether the reports
+        # were missing or only the copy was.
+        log(f"No report files in {source}; the upload step has nothing to upload.")
 
 
 def _test_duration(seconds: Any) -> str:
