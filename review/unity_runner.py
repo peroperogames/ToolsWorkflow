@@ -1271,6 +1271,134 @@ def generate_and_build(
 TEST_PLATFORMS = ("EditMode", "PlayMode")
 
 
+# --------------------------------------------------------------------------- #
+# A project the package's tests can run in
+# --------------------------------------------------------------------------- #
+
+# What a package's tests may assume about the project they run in, beyond the
+# package itself. A fixture that stores its test assets through Addressables asserts
+# "There is no Addressables Settings in project" instead of running, and a project
+# laid out from a template has none — so a package that resolves Addressables gets
+# the settings created before its tests run, and one that does not is left alone.
+ADDRESSABLES_PACKAGE = "com.unity.addressables"
+ADDRESSABLE_SETTINGS = Path("Assets") / "AddressableAssetsData" / "AddressableAssetSettings.asset"
+PROVISION_SCRIPT = Path("Assets") / "Editor" / "AiReviewProvision.cs"
+PROVISION_METHOD = "AiReviewProvision.EnsureAddressableSettings"
+PROVISION_TIMEOUT = 600
+PROVISION_HEADER = "ai-review:"
+PROVISION_SOURCE = """\
+// Written by the AI code review pipeline, one method, for one reason: a project
+// laid out from a template has no Addressables settings, and the package's tests
+// assert on their absence instead of running. Creating them is what a developer's
+// own project already has, not a change to the package.
+using UnityEditor;
+using UnityEditor.AddressableAssets;
+using UnityEditor.AddressableAssets.Settings;
+
+public static class AiReviewProvision
+{
+    public static void EnsureAddressableSettings()
+    {
+        // With `true`, Addressables creates the default settings asset (and its
+        // default groups) when the project has none; with settings already there
+        // it returns them, which is why this is safe to run on every build.
+        AddressableAssetSettings settings = AddressableAssetSettingsDefaultObject.GetSettings(true);
+        if (settings == null)
+        {
+            UnityEngine.Debug.LogError("%(header)s could not create Addressables settings.");
+            EditorApplication.Exit(1);
+            return;
+        }
+        AssetDatabase.SaveAssets();
+        AssetDatabase.Refresh();
+        UnityEngine.Debug.Log(
+            "%(header)s Addressables settings at " + AssetDatabase.GetAssetPath(settings)
+            + ", default group: "
+            + (settings.DefaultGroup != null ? settings.DefaultGroup.Name : "none"));
+    }
+}
+""" % {"header": PROVISION_HEADER}
+
+
+def _resolves_addressables(project: str) -> bool:
+    """Does this project's package set include Addressables, however it got there.
+
+    ``packages-lock.json`` is what the resolver wrote; the package cache is what it
+    resolved to. Either answers, because a project that is between the two states
+    still needs the settings the day it finishes resolving.
+    """
+    lock = Path(project) / "Packages" / "packages-lock.json"
+    try:
+        data = json.loads(lock.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        data = {}
+    dependencies = data.get("dependencies") if isinstance(data, dict) else None
+    if isinstance(dependencies, dict) and ADDRESSABLES_PACKAGE in dependencies:
+        return True
+    cache = Path(project) / "Library" / "PackageCache"
+    try:
+        return any(
+            entry.name.startswith(ADDRESSABLES_PACKAGE + "@") for entry in cache.iterdir()
+        )
+    except OSError:
+        return False
+
+
+def ensure_project_settings(cli: str, project: str, log_file: Path) -> None:
+    """Give the project what the package's tests may assume it has. Never raises.
+
+    Today that is one thing — Addressables settings — and it is created by the
+    editor itself rather than by a yaml file this pipeline would have to keep in
+    step with four versions of the package. The script is written into the
+    project's own ``Assets/Editor`` and removed again when the project stops
+    resolving Addressables, because a reference to a package that is gone is a
+    compile error in every later run.
+    """
+    try:
+        script = Path(project) / PROVISION_SCRIPT
+        if not _resolves_addressables(project):
+            if script.exists():
+                for path in (script, script.with_name(script.name + ".meta")):
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+                log("Unity: removed the Addressables provisioning script; the project no longer resolves it.")
+            return
+        if (Path(project) / ADDRESSABLE_SETTINGS).is_file():
+            return
+        try:
+            script.parent.mkdir(parents=True, exist_ok=True)
+            script.write_text(PROVISION_SOURCE, encoding="utf-8")
+        except OSError as exc:
+            log(f"Unity: could not write {script}: {exc}")
+            return
+        log("Unity: the project has no Addressables settings; creating them before the tests run.")
+        provision_log = log_file.with_name("provision.log")
+        rc, text = run_unity(
+            cli, project, ["-executeMethod", PROVISION_METHOD], PROVISION_TIMEOUT, provision_log
+        )
+        created = (Path(project) / ADDRESSABLE_SETTINGS).is_file()
+        said = [
+            line.strip()
+            for line in text.splitlines()
+            if PROVISION_HEADER in line
+        ]
+        for line in said[-3:]:
+            log(f"  {line}")
+        if created:
+            log(f"Unity: Addressables settings created ({ADDRESSABLE_SETTINGS.as_posix()}).")
+        else:
+            # Not fatal: the package may not need them, and a run that cannot
+            # create them is the same run as before this existed.
+            log(
+                f"Unity: could not create Addressables settings (exit {rc}); the "
+                "tests run without them."
+            )
+    except Exception as exc:  # noqa: BLE001 - a missing setting is not a broken review
+        log(f"Unity: project provisioning failed, continuing without it: {exc}")
+
+
 def run_tests(
     cli: str,
     project: str,
@@ -2125,6 +2253,7 @@ def analyze(
 
         if compiled:
             results_dir = pr_workspace.meta_dir(owner, repo, number)
+            ensure_project_settings(cli, project, log_file)
             run_tests(cli, project, results_dir, result, kind.package_root)
         else:
             # No point testing code that does not compile.
