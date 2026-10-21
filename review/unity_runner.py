@@ -1590,6 +1590,18 @@ def blame_hung_test(
         log(f"Unity: no test named {candidate} exists on the runner; nothing named.")
         return None, False
     if finished:
+        if not smallest:
+            # Every probe ran: no half of the list hangs, and neither does the
+            # single method the search settled on. What hangs needs tests from
+            # *both* halves (one leaves state the other trips over), which a
+            # halving search cannot see — so no name is better than a name that
+            # passes on its own.
+            log(
+                f"Unity: {candidate} finishes on its own and every probed subset did "
+                "too — the hang needs the whole suite, so no single test can be "
+                "named. Narrow it by hand: run the suite minus a half at a time."
+            )
+            return None, False
         if len(smallest) > 1:
             # The last group that hung is a half, not the answer: shrink it by
             # dropping one member at a time, keeping the group only while it still
