@@ -52,7 +52,17 @@ UNITY_TEST_TIMEOUT = int(os.environ.get("UNITY_TEST_TIMEOUT", "600"))
 CRASH_MARKERS = (
     "exiting early due to double fault",
     "external debugger dump",
+    # A mono native crash: the editor prints this and then either exits or stops
+    # responding, and the deadline would otherwise be spent waiting for a process
+    # that has already died.
+    "native crash reporting",
+    "caught fatal signal",
 )
+# A Unity test that carries NUnit's `[Repeat]` is not supported by the Test
+# Runner: the command it wraps calls `Execute`, which the Unity runner only
+# implements as `ExecuteEnumerable`, so it throws and can take the editor down
+# with it (measured on 2022.3 + UTF 1.3.4: NotImplementedException, then SIGSEGV).
+REPEAT_FAILURE = "use executeenumerable"
 
 # What Unity says when it cannot run for a reason that is not the code's fault.
 # These are phrases, not the word "license": Unity's logs name its licensing
@@ -1327,6 +1337,13 @@ def run_tests(
                 log(f"Unity said: {said}")
             # What the run did say, kept for the pull request and for the file
             # beside it: the end of a hang is the whole diagnosis.
+            if REPEAT_FAILURE in output.lower():
+                log(
+                    "  the editor failed with \"NotImplementedException: Use "
+                    "ExecuteEnumerable\": a test carries NUnit's [Repeat], which the "
+                    "Unity Test Runner does not support — the repeat has to be a loop "
+                    "inside the test instead."
+                )
             result.test_tail = build_log.tail_lines(output)
             log_path = results_dir / f"tests-{pr_workspace.sanitize(platform)}.log"
             if save_output(log_path, output):
