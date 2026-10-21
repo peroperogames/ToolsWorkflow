@@ -58,7 +58,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.75"
+VERSION = "2026-10-14.unity.76"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3253,6 +3253,26 @@ def changed_lines_by_file(files: List[Dict[str, Any]]) -> Dict[str, set]:
     return result
 
 
+def post_status_comment(
+    gh: GitHubClient, owner: str, repo: str, number: int, body: str
+) -> bool:
+    """Post a status or notification comment, never raising.
+
+    A comment reports work that has already happened. GitHub answers with a 5xx
+    or a secondary rate limit now and then, and that used to end the whole stage
+    with a traceback — after the build, the tests and the analysis had all run
+    and all their findings had been computed. The job log says the comment failed
+    and the run finishes saying what it found; the alternative is losing the
+    result of half an hour of work to a transient error in the last step.
+    """
+    try:
+        gh.post_comment(owner, repo, number, body)
+        return True
+    except Exception as exc:  # noqa: BLE001 - reporting must not end the run
+        log(f"Warning: could not post a status comment: {exc}")
+        return False
+
+
 def report_build_result(
     gh: GitHubClient,
     owner: str,
@@ -3333,7 +3353,7 @@ def report_build_result(
         if config.dry_run:
             print(body)
         else:
-            gh.post_comment(owner, repo, number, body)
+            post_status_comment(gh, owner, repo, number, body)
 
 
 def renamed_line(line: str, rename: Tuple[str, str]) -> Optional[str]:
@@ -3461,7 +3481,7 @@ def report_uncompiled_changes(
         print(body)
         return missing
     if not bot_comment_exists(gh, owner, repo, number, body):
-        gh.post_comment(owner, repo, number, body)
+        post_status_comment(gh, owner, repo, number, body)
     return missing
 
 
@@ -3750,7 +3770,7 @@ def run_static_analysis(
         if config.dry_run:
             print(note)
         elif not bot_comment_exists(gh, owner, repo, number, note):
-            gh.post_comment(owner, repo, number, note)
+            post_status_comment(gh, owner, repo, number, note)
         return 0
 
     issues = analysis.issues
