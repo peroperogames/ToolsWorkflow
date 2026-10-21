@@ -59,7 +59,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.91"
+VERSION = "2026-10-14.unity.92"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3380,21 +3380,11 @@ def report_build_result(
         for e in orphan_errors[:20]:
             where = f"`{e['file']}:{e['line']}` " if e.get("file") else ""
             status_lines.append(f"- {where}{e['code']}: {e['message']}")
-    # What ran, as numbers: how many cases, how many failed, how long it took.
-    # "11 failed" is not the same fact as "11 of 129 failed in 2m 42s", and the
-    # second one is what tells a reviewer whether the suite is healthy.
+    # The per-platform table is part of the result's summary (see
+    # UnityResult._platform_table), so it is already the first line here — and it
+    # also reaches the rebuild comment and the review prompt, which read the same
+    # string.
     runs = getattr(result, "platform_runs", []) or []
-    if runs:
-        status_lines.append("\n**测试结果**：")
-        status_lines.append("| 平台 | 用例 | 通过 | 失败 | 跳过 | 耗时 |")
-        status_lines.append("| --- | --- | --- | --- | --- | --- |")
-        for run in runs:
-            summary = run.get("summary") or {}
-            status_lines.append(
-                f"| {run.get('platform', '?')} | {summary.get('total', 0)} "
-                f"| {summary.get('passed', 0)} | {summary.get('failed', 0)} "
-                f"| {summary.get('skipped', 0)} | {_test_duration(summary.get('duration'))} |"
-            )
     if result.test_failures:
         status_lines.append(f"\n**失败用例（{len(result.test_failures)}）**：")
         # Grouped by fixture: eleven failures in one class are one problem, and a

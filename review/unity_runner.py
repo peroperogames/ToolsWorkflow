@@ -1807,17 +1807,50 @@ class UnityResult:
                     )
                 return (
                     f"⚠️ Unity: 编译通过；单元测试没有跑完{hung}，"
-                    "也就没有报告，不能算通过。"
+                    "也就没有报告，不能算通过。" + self._platform_table()
                 )
             if not self.tests_reported:
                 return "⚠️ Unity: 编译通过；单元测试没有产出报告，本次未真正运行。"
-            return "✅ Unity: 编译通过，单元测试通过。"
+            return "✅ Unity: 编译通过，单元测试通过。" + self._platform_table()
         parts = []
         if not self.compiled:
             parts.append(f"编译失败（{len(self.compile_errors)} 个错误）")
         if not self.tests_ok:
             parts.append(f"{len(self.test_failures)} 个单元测试失败")
-        return "🔴 Unity: " + "；".join(parts) + "。"
+        return "🔴 Unity: " + "；".join(parts) + "。" + self._platform_table()
+
+    def _platform_table(self) -> str:
+        """The per-platform totals as a markdown table, or "" when nothing ran.
+
+        It lives in the summary rather than beside it because the summary is what
+        every reader gets — the rebuild comment, the review prompt's build status,
+        the failure comment — and a table that only appears on failure is a table
+        nobody sees the day the suite is green and slow.
+        """
+        if not self.platform_runs:
+            return ""
+        lines = [
+            "",
+            "",
+            "| 平台 | 用例 | 通过 | 失败 | 跳过 | 耗时 |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+
+        def duration(seconds: Any) -> str:
+            try:
+                value = float(seconds)
+            except (TypeError, ValueError):
+                return "—"
+            return f"{value:.1f}s" if value < 60 else f"{int(value) // 60}m {int(value) % 60}s"
+
+        for run in self.platform_runs:
+            summary = run.get("summary") or {}
+            lines.append(
+                f"| {run.get('platform', '?')} | {summary.get('total', 0)} "
+                f"| {summary.get('passed', 0)} | {summary.get('failed', 0)} "
+                f"| {summary.get('skipped', 0)} | {duration(summary.get('duration'))} |"
+            )
+        return "\n".join(lines)
 
     def outcome(self) -> str:
         """The same result for the job log.
