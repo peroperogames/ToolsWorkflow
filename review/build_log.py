@@ -100,6 +100,106 @@ def tail_lines(text: str, count: int = 40, limit: int = 6000) -> List[str]:
     return tail
 
 
+# An exception's own line, which is the only line in the editor log that says what
+# went wrong rather than where it went wrong: `NullReferenceException: Object …`.
+_EXCEPTION_LINE = re.compile(
+    r"^(?P<type>[A-Za-z_][\w.+]*(?:Exception))\s*:\s*(?P<message>.*)$"
+)
+# `  at PeroTools2.UIQueen.Tests.TestResourceEditHelper.AddAssets (System.String[]) …`
+_FRAME_LINE = re.compile(r"^\s+at (?P<frame>\S.*)$")
+# The runner's own verdict, at the end of a run: `Test run completed. Exiting with
+# code 3 (RunError). Multiple unexpected errors happened while running tests.`
+_VERDICT_LINE = re.compile(r"^Test run completed\.\s*Exiting with code\s*-?\d+.*$")
+# Frames that say "it went through the engine and the test runner", which every
+# run's stack says, and which never answer anything.
+_ENGINE_FRAME_PREFIXES = ("UnityEngine.", "UnityEditor.")
+
+
+def _frame_name(frame: str) -> str:
+    """A stack frame as a name worth reading: the caller, not the assertion helper.
+
+    ``PeroTools2.UIQueen.Tests.UICancelDispatcherTests.UnityEngine.TestTools
+    .IPrebuildSetup.Setup (System.String[])`` is what the compiler writes for an
+    explicitly implemented interface method; the engine namespaces come out of it,
+    and the leading namespaces go too, so that what is left names the fixture and
+    the method that asked: ``UICancelDispatcherTests.IPrebuildSetup.Setup``.
+    """
+    name = frame.split(" (", 1)[0].strip().replace(".UnityEngine.TestTools.", ".")
+    while ".UnityEngine." in name or ".UnityEditor." in name:
+        name = name.replace(".UnityEngine.", ".").replace(".UnityEditor.", ".")
+    if name.startswith(_ENGINE_FRAME_PREFIXES):
+        return ""
+    # `MDSampleInit+<>c.<Init>b__1_0` is the lambda inside Init, and saying so is
+    # twice as readable as the compiler's own spelling of it.
+    if "+<>c" in name:
+        outer = name.split("+<>c", 1)[0]
+        method = re.search(r"<([^>]+)>", name)
+        if method:
+            name = f"{outer}.{method.group(1)}"
+    parts = name.split(".")
+    if len(parts) > 3:
+        name = ".".join(parts[-3:])
+    return name
+
+
+def parse_editor_diagnosis(path: Path, limit: int = 3) -> Dict[str, Any]:
+    """What an editor log says about a test run that produced no report.
+
+    A run that exits before writing its NUnit file leaves nothing behind but this
+    log, and the reason is in it — once per fixture, so the same assertion appears
+    a dozen times and the count is what separates one broken fixture from all of
+    them. Grouped by message, with the outermost frame that is not engine
+    plumbing (the fixture, not ``Assert.Fail``), and the runner's own verdict where
+    it wrote one.
+
+    Returns ``{"exceptions": [{"message", "frame", "count"}], "total", "kinds",
+    "verdict"}`` — empty when the file is missing or says nothing.
+    """
+    result: Dict[str, Any] = {"exceptions": [], "total": 0, "kinds": 0, "verdict": ""}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return result
+    counts: Dict[str, int] = {}
+    frames: Dict[str, str] = {}
+    order: List[str] = []
+    current = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if _VERDICT_LINE.match(stripped):
+            result["verdict"] = stripped
+            continue
+        exception = _EXCEPTION_LINE.match(stripped)
+        if exception:
+            message = f"{exception.group('type')}: {exception.group('message')}"
+            message = " ".join(message.rstrip(":").split())
+            current = message
+            counts[message] = counts.get(message, 0) + 1
+            if message not in frames:
+                frames[message] = ""
+                order.append(message)
+            continue
+        frame = _FRAME_LINE.match(line)
+        # Only the first time a message is thrown is its stack interesting: the
+        # repetitions are the other fixtures, and the count already says how many.
+        if frame and current and counts.get(current, 0) == 1:
+            name = _frame_name(frame.group("frame"))
+            # Last one wins: the innermost frame is the assertion helper, the
+            # outermost is the fixture that asked for it. Engine frames come back
+            # empty, so they never overwrite it.
+            if name:
+                frames[current] = name
+    result["total"] = sum(counts.values())
+    result["kinds"] = len(counts)
+    result["exceptions"] = [
+        {"message": message, "frame": frames.get(message, ""), "count": counts[message]}
+        for message in order[:limit]
+    ]
+    return result
+
+
 def format_compile_errors(
     errors: Sequence[Dict[str, Any]], limit: int = REPORT_LIMIT
 ) -> List[str]:

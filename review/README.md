@@ -395,6 +395,18 @@ A run that produced no report does **not** fail the build. A hung processor, a m
 
 When the run actually died, the exit code says so, and the status comment is posted to the pull request even though the step passed: the only other place that fact appears is the job log, which the author never reads. A deadline and an exit code are different facts, so the sentence keeps them apart — `⚠️ .NET: 编译通过；.NET 测试运行失败（dotnet test 退出码 3），没有产出报告。` and `⚠️ .NET: 编译通过；.NET 测试超时（30 分钟还没跑完，被停掉了），没有产出报告。` — because "测试没有跑完" does not say whether the run is still going, was stopped at a deadline, or exited on its own, and those call for different next steps. The clean-exit case says `（dotnet test 退出码 0）` too, for the same reason.
 
+**The editor log is read, not only uploaded.** A run that dies before writing its NUnit file leaves one line of output — `Unity exited with code 3 before reporting results` — and a 300 KB editor log, and the reason is in the log: the same exception, thrown once per fixture while the runner was setting each of them up. `build_log.parse_editor_diagnosis` groups the exceptions by message, counts them, keeps the outermost frame that is not engine plumbing (the fixture, not `Assert.Fail`) and quotes the runner's own verdict. UIQueen PR #3 is the case that made it worth writing: 23 exceptions in 2 kinds,
+
+```
+**PlayMode 没有产出报告，编辑器日志里 23 次异常、2 类**：
+- `AssertionException: There is no Addressables Settings in project, please create it!` ×16 — `MDSampleInit.Init`
+- `NullReferenceException: Object reference not set to an instance of an object` ×7 — `DefaultPanelInserterTests.IPrebuildSetup.Setup`
+
+测试运行器自己的结论：`Test run completed. Exiting with code 3 (RunError). Multiple unexpected errors happened while running tests.`
+```
+
+The count is what makes it diagnosable rather than merely loud: sixteen of one assertion means every fixture that needs Addressables fails, not that one test is flaky. It goes into `summary()`, so the pull request comment, the job log and the review prompt all see it — the model approving a change is told why the suite did not run.
+
 **A run that printed nothing is bisected down to the test method.** Unity Test Framework writes its report at the end of the platform's run and says nothing per test, so the output of a hung suite cannot name the test — but running *less* of the suite can. The candidates are the test **methods** read out of the package's sources (namespace, class and method; a flat list, no namespace walk and no class-level unit — the answer is one method), and each round runs half of them with a `--filter` built from their full names. A report means that half finished and the hang is in the other half; no report means it is in this one. What is left is a single method, run on its own:
 
 ```

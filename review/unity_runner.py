@@ -1370,6 +1370,22 @@ def run_tests(
             if save_output(log_path, output):
                 result.test_log_path = str(log_path)
                 log(f"  full output: {log_path}")
+            # The run's own words are one line — "Unity exited with code 3 before
+            # reporting results" — and the editor log beside it is where the reason
+            # actually is: the exception each fixture threw while the runner was
+            # setting it up, which is why there is no NUnit file to read.
+            diagnosis = build_log.parse_editor_diagnosis(
+                results_dir / f"tests-{pr_workspace.sanitize(platform)}.editor.log"
+            )
+            if diagnosis.get("exceptions"):
+                first = diagnosis["exceptions"][0]
+                where = f" — {first['frame']}" if first.get("frame") else ""
+                log(
+                    f"  the editor log names {diagnosis['total']} exception(s) in "
+                    f"{diagnosis['kinds']} kind(s); the first: {first['message']}{where}"
+                )
+                if diagnosis.get("verdict"):
+                    log(f"  the runner's verdict: {diagnosis['verdict']}")
             # A clean exit with no report is "there was nothing to run"; a
             # non-zero one is the tool saying the run failed — a crash, a hang
             # killed by the timeout — and that is worth telling the pull request.
@@ -1381,6 +1397,7 @@ def run_tests(
                         "exit": rc,
                         "timed_out": rc < 0,
                         "timeout": UNITY_TEST_TIMEOUT,
+                        "diagnosis": diagnosis,
                     }
                 )
                 if rc == 3:
@@ -1822,7 +1839,7 @@ class UnityResult:
             if self.tests_broke:
                 return (
                     f"⚠️ Unity: 编译通过；{self._failure_sentence_zh()}"
-                    "没有产出报告。" + self._platform_table()
+                    "没有产出报告。" + self._platform_table() + self._diagnosis_block()
                 )
             if not self.tests_reported:
                 return "⚠️ Unity: 编译通过；单元测试没有产出报告，本次未真正运行。"
@@ -1882,6 +1899,38 @@ class UnityResult:
                 else f", no single test hangs (smallest reproducing set: {self.hung_test})"
             )
         return text + ", so it"
+
+    def _diagnosis_block(self) -> str:
+        """What the editor log said, for a run that had nothing else to say.
+
+        A run that dies before writing its NUnit file leaves one line of output
+        ("Unity exited with code 3 before reporting results") and a 300 KB editor
+        log, and the log is where the reason is: the same assertion, thrown once
+        per fixture while the runner was setting it up. The count is what tells one
+        broken fixture from every fixture being broken.
+        """
+        lines: List[str] = []
+        for failure in self.platform_failures:
+            diagnosis = failure.get("diagnosis") or {}
+            exceptions = diagnosis.get("exceptions") or []
+            if not exceptions:
+                continue
+            platform = failure.get("platform") or "测试"
+            lines.append("")
+            lines.append("")
+            lines.append(
+                f"**{platform} 没有产出报告，编辑器日志里 {diagnosis.get('total', 0)} "
+                f"次异常、{diagnosis.get('kinds', 0)} 类**："
+            )
+            for item in exceptions:
+                frame = item.get("frame") or ""
+                where = f" — `{frame}`" if frame else ""
+                lines.append(f"- `{item.get('message')}` ×{item.get('count')}{where}")
+            verdict = diagnosis.get("verdict") or ""
+            if verdict:
+                lines.append("")
+                lines.append(f"测试运行器自己的结论：`{verdict}`")
+        return "\n".join(lines)
 
     def _platform_table(self) -> str:
         """The per-platform totals as a markdown table, or "" when nothing ran.
