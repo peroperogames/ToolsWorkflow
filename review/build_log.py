@@ -50,14 +50,50 @@ def format_duration(seconds: float) -> str:
     return f"{hours}h {minutes:02d}m"
 
 
+# What a Unity editor prints on its way out: a memory report per allocator, then
+# a utp memory-leak record. Useful when the crash is in the allocator and noise
+# every other time — in a log tail of forty lines it is the whole tail, and the
+# message that explains the failure is above it.
+_NOISE_PREFIXES = (
+    "##utp:",
+    "[ALLOC_",
+    "Initial Block Size",
+    "Used Block",
+    "Overflow Count",
+    "Peak ",
+    "Requested Block Size",
+    "Peak Large",
+    "Peak Block",
+    "Peak main",
+    "Peak usage",
+    "Peak Allocated",
+    "Large Block size",
+)
+
+
+def _is_shutdown_noise(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return True
+    if stripped == "}":
+        return True
+    return stripped.startswith(_NOISE_PREFIXES)
+
+
 def tail_lines(text: str, count: int = 40, limit: int = 6000) -> List[str]:
     """The last ``count`` lines that said anything, and no more than ``limit`` chars.
 
     For a run that produced no report: the end of its output is the whole
     diagnosis, and it is what has to reach the pull request — an editor that hung
-    said everything it was going to say in its last few lines.
+    said everything it was going to say in its last few lines. The memory report
+    it writes while shutting down is not one of those things, and on a run that
+    died it is the only thing left if it is not filtered out.
     """
-    interesting = [line.rstrip() for line in text.splitlines() if line.strip()]
+    interesting = [
+        line.rstrip()
+        for line in text.splitlines()
+        if line.strip() and not _is_shutdown_noise(line)
+    ]
     tail = interesting[-count:]
     while tail and sum(len(line) + 1 for line in tail) > limit:
         tail.pop(0)
