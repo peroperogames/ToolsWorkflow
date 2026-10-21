@@ -77,6 +77,11 @@ on:
         required: false
         type: string
         default: ''
+      unity-test-platforms:
+        description: 'Comma list of Unity test platforms to run, e.g. "EditMode,PlayMode". PlayMode is off by default: it needs more of the editor than batch mode gives it.'
+        required: false
+        type: string
+        default: 'EditMode'
       resharper-dotnet-sdk:
         description: 'Pin the .NET SDK whose MSBuild jb inspectcode uses (e.g. 10.0.300). Empty auto-detects, which picks the newest installed SDK and fails when that one cannot build the solution.'
         required: false
@@ -136,6 +141,7 @@ jobs:
           unity-editor-version: ${{ inputs.unity-editor-version }}
           unity-template: ${{ inputs.unity-template }}
           unity-sync-method: ${{ inputs.unity-sync-method }}
+          unity-test-platforms: ${{ inputs.unity-test-platforms }}
           resharper-dotnet-sdk: ${{ inputs.resharper-dotnet-sdk }}
           resharper-build: ${{ inputs.resharper-build }}
           resharper-ignore-rules: ${{ inputs.resharper-ignore-rules }}

@@ -63,6 +63,10 @@ inputs:
     description: 'Template package the per-PR Unity project is created from.'
     required: false
     default: 'com.unity.template.3d'
+  unity-test-platforms:
+    description: 'Comma list of Unity test platforms to run, e.g. "EditMode,PlayMode". PlayMode needs more of the editor than batch mode gives it, so it is off by default.'
+    required: false
+    default: 'EditMode'
   unity-sync-method:
     description: 'Optional -executeMethod used to regenerate project files (default: UnityEditor.SyncVS.SyncSolution).'
     required: false
@@ -128,6 +132,7 @@ runs:
         UNITY_EDITOR_VERSION: ${{ inputs.unity-editor-version }}
         UNITY_TEMPLATE: ${{ inputs.unity-template }}
         UNITY_SYNC_METHOD: ${{ inputs.unity-sync-method }}
+        UNITY_TEST_PLATFORMS: ${{ inputs.unity-test-platforms }}
       run: python3 "$GITHUB_ACTION_PATH/main.py" checks
 
     - name: Run the static analysis
