@@ -58,7 +58,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.77"
+VERSION = "2026-10-14.unity.78"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3345,6 +3345,13 @@ def report_build_result(
         for t in result.test_failures[:20]:
             msg = (t.get("message") or "").splitlines()[0][:200] if t.get("message") else ""
             status_lines.append(f"- {t['name']}" + (f" — {msg}" if msg else ""))
+    hung = getattr(result, "hung_test", "")
+    if hung:
+        # The run printed nothing, so the bisection in unity_runner is what put a
+        # name to it — and that name is the only thing an author can act on.
+        status_lines.append(
+            "\n**测试卡在**：`" + hung + "`（单独运行也没有产出报告，其余用例因此没有跑）"
+        )
     if not result.tests_reported and result.test_tail:
         # The run produced no report: what it last said is the only diagnosis
         # there is, and the author is not going to read the job log for it.

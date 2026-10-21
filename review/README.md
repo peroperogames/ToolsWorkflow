@@ -386,6 +386,19 @@ A run that produced no report does **not** fail the build. A hung processor, a m
 
 When the run actually died, the exit code says so, and the status comment is posted to the pull request even though the step passed: the only other place that fact appears is the job log, which the author never reads.
 
+**A run that printed nothing is bisected down to the test method.** Unity Test Framework writes its report at the end of the platform's run and says nothing per test, so the output of a hung suite cannot name the test — but running *less* of the suite can. The candidates are the test **methods** read out of the package's sources (namespace, class and method; a flat list, no namespace walk and no class-level unit — the answer is one method), and each round runs half of them with a `--filter` built from their full names. A report means that half finished and the hang is in the other half; no report means it is in this one. What is left is a single method, run on its own:
+
+```
+Unity: 129 test method(s) to search for the PlayMode hang.
+Unity: blame round 1: 64 of 129 candidate(s) ...
+Unity: blame round 6: 1 of 2 candidate(s) ...
+Unity: the PlayMode run hangs in PeroTools2.UIQueen.Tests.UGUIExtensions.MaskableRenderersTests.ObjectInMaskTest — it produced no report within 10s on its own.
+```
+
+The name goes into the status comment (`**测试卡在**：…`) and into the summary line, so the pull request says which test, not just that something did not finish. The limits are in `unity_runner.py`: `BLAME_CASE_SECONDS` (10) for the single case, one second per candidate for a group plus `BLAME_SETUP_SECONDS` for the editor start, and `BLAME_MAX_SECONDS` (900) for the search as a whole — it runs only after a run that already burned its deadline, and it must not become a second one.
+
+Two things it cannot do. The filter is a regular expression over the full test name, so the pattern allows the suffixes the report adds and the sources do not (a generic fixture's `<RectMask2D>`, a `[TestCase]` argument list). And a method that **finishes on its own** while the rest of the suite is what hangs is reported as where the search stopped, with the log saying so — the hang then needs company, and the answer is not one method but a pair.
+
 `UNITY_TEST_TIMEOUT` is the same problem seen from the other side. One hung suite spent thirty minutes of a job before the CLI's own timeout ended it, and the only deadline that could be moved was the build's. A test run with a deadline of its own can be cut short without shortening the build, which is the difference between a lever and a re-run.
 
 ### What a build and a test run print
