@@ -195,6 +195,17 @@ class AIClient:
             if not content and not calls:
                 content = message.get("reasoning_content") or ""
 
+            # Why the answer ended matters to the caller: `length` means the model
+            # was cut off by its own output limit, which looks like a malformed
+            # answer to anything that parses `content` — a JSON object that stops
+            # mid-string is "invalid" only from the outside.
+            finish = message.get("finish_reason") or choices[0].get("finish_reason") or ""
+            if finish and finish != "stop":
+                print(
+                    f"  Finish reason: {finish} — the answer was cut off.",
+                    file=sys.stderr,
+                )
+
             usage = data.get("usage")
             if usage:
                 self._log_usage(usage)
@@ -202,6 +213,7 @@ class AIClient:
             return {
                 "content": content.strip(),
                 "tool_calls": message.get("tool_calls") or [],
+                "finish_reason": finish,
             }
 
         raise RuntimeError(f"Failed to call OpenAI API after retries: {last_error}")

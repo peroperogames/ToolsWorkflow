@@ -58,7 +58,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.73"
+VERSION = "2026-10-14.unity.74"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -2029,6 +2029,94 @@ def decide_resolved_threads(
     return resolved
 
 
+def _code_change_context(
+    file_contents: List[Dict[str, str]],
+    instruction: str,
+    max_tokens_per_chunk: int,
+) -> Tuple[str, List[str]]:
+    """The files to show the model, and the ones that did not fit.
+
+    A code change is asked for by name — "fix the N+1 in `src/foo.py`" — and the
+    pull request can carry forty files, including a test file with three
+    thousand lines. Sending all of it spends the context on code the instruction
+    never mentions, and it makes a cut-off answer *more* likely, not less: the
+    model has to reply with complete file contents, so a bigger input buys a
+    bigger output. Files the instruction names come first, then the rest in the
+    order they arrived, until the budget is spent.
+    """
+    budget = max_tokens_per_chunk * CHARS_PER_TOKEN
+    named: List[Dict[str, str]] = []
+    rest: List[Dict[str, str]] = []
+    for fc in file_contents:
+        path = fc.get("path") or ""
+        name = Path(path).name
+        if name and name in instruction or (path and path in instruction):
+            named.append(fc)
+        else:
+            rest.append(fc)
+
+    chosen: List[Dict[str, str]] = []
+    omitted: List[str] = []
+    used = 0
+    for fc in named + rest:
+        size = len(fc.get("content") or "") + len(fc.get("path") or "") + 32
+        if chosen and used + size > budget:
+            omitted.append(fc.get("path") or "?")
+            continue
+        chosen.append(fc)
+        used += size
+
+    text = "\n\n".join(
+        f"### {fc['path']}\n```\n{fc.get('content') or ''}\n```" for fc in chosen
+    )
+    return text, omitted
+
+
+def _code_change_messages(
+    conversation: str, files_text: str, instruction: str, retry: bool = False
+) -> List[Dict[str, str]]:
+    """The request for a code change, worded for the first attempt or a retry."""
+    if retry:
+        tail = (
+            "The previous answer did not arrive as valid JSON — it was cut off "
+            "before the object ended. Answer again with a smaller object: only "
+            "the files that must change, and only those changed lines' worth of "
+            "content where the original allows it. Return ONLY the JSON."
+        )
+    else:
+        tail = "Generate the code changes as JSON."
+    return [
+        {"role": "system", "content": CODE_CHANGE_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"## Conversation Context\n\n{conversation}\n\n"
+                f"## Current Files\n\n{files_text}\n\n"
+                f"## Instruction\n\n{instruction}\n\n{tail}"
+            ),
+        },
+    ]
+
+
+def _code_change_failure(
+    author: str, cut: bool, total: int, omitted: List[str]
+) -> str:
+    """What to tell the author when no usable change came back."""
+    reason = (
+        "模型的输出在生成到一半时被长度上限截断了"
+        if cut
+        else "模型返回的不是有效 JSON"
+    )
+    detail = f"这次上下文里有 {total} 个文件"
+    if omitted:
+        detail += f"，其中 {len(omitted)} 个因体积被省略"
+    return (
+        f"@{author} 代码生成失败：{reason}（{detail}）。\n\n"
+        "把指令缩小到具体文件会好很多，例如：`@perotoolsbot 把 "
+        "Runtime/UIView.cs 里 RemoveSyncActiveGameObject 的 null 分支改成抛异常`。"
+    )
+
+
 def handle_code_change(
     ai: AIClient,
     gh: GitHubClient,
@@ -2040,6 +2128,7 @@ def handle_code_change(
     number: int,
     conversation: str,
     bot_login: str,
+    max_tokens_per_chunk: int = DEFAULT_MAX_TOKENS_PER_CHUNK,
 ) -> int:
     """Generate code changes and submit a PR to the current repository."""
     instruction = _strip_mention(body, bot_login)
@@ -2066,32 +2155,49 @@ def handle_code_change(
         return 0
 
     log("Generating code changes...")
-    files_text = "\n\n".join(
-        f"### {fc['path']}\n```\n{fc['content']}\n```"
-        for fc in file_contents
+    files_text, omitted = _code_change_context(
+        file_contents, instruction, max_tokens_per_chunk
     )
-    messages = [
-        {"role": "system", "content": CODE_CHANGE_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                f"## Conversation Context\n\n{conversation}\n\n"
-                f"## Current Files\n\n{files_text}\n\n"
-                f"## Instruction\n\n{instruction}\n\n"
-                "Generate the code changes as JSON."
-            ),
-        },
-    ]
-    result = ai.chat(messages, temperature=0.3)
+    if omitted:
+        log(
+            f"Context trimmed to fit: {len(omitted)} of {len(file_contents)} file(s) "
+            "left out."
+        )
+
+    reply = ai.chat_message(
+        _code_change_messages(conversation, files_text, instruction), temperature=0.3
+    )
+    result = (reply.get("content") or "").strip()
     if not result:
         gh.post_comment(owner, repo, number, f"@{author} 代码生成失败，AI 返回了空内容。")
         return 0
 
+    # `length` is the model saying it ran out of output budget mid-answer, which
+    # is what a JSON object stopping inside a string looks like from here.
+    cut = (reply.get("finish_reason") or "") == "length"
+    data: Optional[Dict[str, Any]] = None
     try:
-        data = _parse_json_response(result)
+        parsed = _parse_json_response(result)
+        data = parsed if isinstance(parsed, dict) else None
     except (ValueError, KeyError) as exc:
         log(f"Failed to parse code-change JSON: {exc}")
-        gh.post_comment(owner, repo, number, f"@{author} 代码生成失败，AI 返回了无效格式: {exc}")
+    if data is None:
+        if cut:
+            log("The answer was cut off before the JSON ended; asking again, smaller.")
+        reply = ai.chat_message(
+            _code_change_messages(conversation, files_text, instruction, retry=True),
+            temperature=0.3,
+        )
+        try:
+            parsed = _parse_json_response((reply.get("content") or "").strip())
+            data = parsed if isinstance(parsed, dict) else None
+        except (ValueError, KeyError) as exc:
+            log(f"Failed to parse code-change JSON on the second attempt: {exc}")
+    if data is None:
+        gh.post_comment(
+            owner, repo, number,
+            _code_change_failure(author, cut, len(file_contents), omitted),
+        )
         return 0
 
     commit_msg = (data.get("message") or "ai: apply code changes").strip()
@@ -2119,7 +2225,13 @@ def handle_code_change(
         )
         pr_url = pr_result.get("html_url", "")
         log(f"Code-change PR created: {pr_url}")
-        gh.post_comment(owner, repo, number, f"@{author} 已提交 PR: {pr_url}")
+        note = (
+            f"\n\n（模型这次只看到 {len(file_contents) - len(omitted)}/{len(file_contents)} "
+            "个文件，其余因为体积被省略；需要那些文件一起改就把指令再指明一下。）"
+            if omitted
+            else ""
+        )
+        gh.post_comment(owner, repo, number, f"@{author} 已提交 PR: {pr_url}{note}")
     except Exception as exc:
         log(f"Error creating code-change PR: {exc}")
         gh.post_comment(owner, repo, number, f"@{author} 提交 PR 失败: {exc}")
@@ -4439,7 +4551,8 @@ def stage_review(
         intent = classify_intent(ai, body)
         if intent == "code_change":
             return handle_code_change(
-                ai, gh, pr, body, author, owner, repo, number, conversation, bot_login
+                ai, gh, pr, body, author, owner, repo, number, conversation, bot_login,
+                config.max_tokens_per_chunk,
             )
         if intent == "review":
             return handle_review_request(
