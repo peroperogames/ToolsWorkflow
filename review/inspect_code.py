@@ -352,16 +352,34 @@ def _is_noise(issue: Dict[str, Any]) -> bool:
     return any(sub in message for sub in IGNORED_MESSAGE_SUBSTRINGS)
 
 
+def _is_compiler_warning(issue: Dict[str, Any]) -> bool:
+    """A diagnostic the C# compiler itself would have produced."""
+    return "CSharpWarnings" in (issue.get("type") or "")
+
+
 def filter_to_changes(
     issues: List[Dict[str, Any]],
     changed_lines: Dict[str, Set[int]],
 ) -> List[Dict[str, Any]]:
-    """Keep only reportable-severity issues on lines the PR changed."""
+    """Keep only reportable-severity issues on lines the PR changed.
+
+    Compiler *warnings* are dropped from any file where the report also carried a
+    resolve error. A compilation that did not resolve produces diagnostics about
+    that failure rather than about the code — the measured shape: with the base
+    assembly missing, a `protected override` cannot bind, so it reads as a *new*
+    member and ReSharper reports CS0628 ("declaring new protected method ... in a
+    sealed class") on every override in the class. The resolve errors themselves
+    are dropped here as build-environment noise (see ``_is_noise``), which used to
+    leave only the warning they caused — noise wearing a warning's clothes.
+    """
+    unresolved = {i["file"] for i in issues if _is_noise(i)}
     out: List[Dict[str, Any]] = []
     for issue in issues:
         if issue["severity"] not in REPORTED_SEVERITIES:
             continue
         if _is_noise(issue):
+            continue
+        if issue["file"] in unresolved and _is_compiler_warning(issue):
             continue
         lines = changed_lines.get(issue["file"])
         if not lines or issue["line"] not in lines:
