@@ -442,7 +442,10 @@ Warnings-as-errors is switched off in both modes, so that turning the build back
 
 A UPM package is inspected **through Unity's own solution, filtered to the package's own projects**. Unity writes one `.csproj` per assembly into the project root, and a package's asmdefs get their own; those are what the analysis should be about, and `--project=<name>` is what keeps the report to them. Everything else in the solution is loaded but not reported on, so the analysis is still about the reviewed code and nothing else — a handful of findings where the whole solution yields forty-eight thousand, nearly all of them in Unity's own packages — while every reference from one of the package's assemblies to another still resolves.
 
-That filter is not a convenience, it is the fix for a class of false finding. Pointed at a lone `.csproj`, inspectcode resolves the projects it references from their **build outputs**, and Unity never writes those: it compiles with its own pipeline, so the output paths in the generated projects stay empty. With `--no-build` there is nothing to resolve against, every type from another assembly of the package goes missing — and a `protected override` whose base type is missing reads as a *new* protected member, which is CS0628, "declaring new protected method … in a sealed class", on every override in the class. Measured on a two-project reproduction of exactly that shape:
+That filter is not a convenience, it is the fix for a class of false finding, and which class depends on how Unity names the package's *other* assemblies in the generated project. There are two ways, and only one of them survives a lone target:
+
+- **`<Reference>` with a `HintPath` into `Library\ScriptAssemblies\`** — the DLL Unity wrote when it compiled the assembly. A lone csproj resolves this whenever that file exists, and it does, because the step that runs the tests compiled the package. Measured: with the DLL in place, the project alone reports the same findings as the solution; with the DLL deleted, neither resolves.
+- **`<ProjectReference>`** — resolved from the referenced project's **build output**, and Unity never writes into those paths: it compiles with its own pipeline, so the output paths in the generated projects stay empty. With `--no-build` there is nothing to resolve against, every type from another assembly of the package goes missing — and a `protected override` whose base type is missing reads as a *new* protected member, which is CS0628, "declaring new protected method … in a sealed class", on every override in the class. Measured on a two-project reproduction of exactly that shape:
 
 | pointed at | built first? | CS0628 |
 | --- | --- | --- |
@@ -450,7 +453,7 @@ That filter is not a convenience, it is the fix for a class of false finding. Po
 | `Tests.csproj` alone | yes | not reported |
 | the solution containing both projects | no | not reported |
 
-So the warning was about the analysis, not the code, and no `.editorconfig` could reach it. Pointed at the solution, the referenced project is loaded as source and the reference resolves whether or not anything was built; `--project` is what keeps the findings on the package. The log says which projects were selected:
+So the warning was about the analysis, not the code, and no `.editorconfig` could reach it. Pointed at the solution, the referenced project is loaded as source and the reference resolves whether or not anything was built; `--project` is what keeps the findings on the package. This also holds for the first shape (a solution loads the project that the DLL belongs to), so the solution target is right for both — which is why it is the target. The log says which projects were selected:
 
 ```
 ReSharper: Demo.slnx is inspected for Demo, Demo.Tests only; the rest of the solution is loaded so their references resolve.
