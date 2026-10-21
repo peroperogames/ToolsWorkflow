@@ -569,6 +569,41 @@ def ensure_package(project: str, package_name: str, package_root: str) -> bool:
 # Unity batch-mode invocations
 # --------------------------------------------------------------------------- #
 
+# Where an X server puts its socket on a Linux machine: one file per display.
+X11_SOCKET_DIR = "/tmp/.X11-unix"
+
+
+def running_display() -> Optional[str]:
+    """The X display already running on this machine, or None.
+
+    Unity's test run creates a graphics device when it can, and anything built on
+    UI Toolkit — a ``UIDocument``, a panel, an editor window — cannot initialise
+    without one, which arrives as ``No graphic device is available to initialize
+    the view`` and fails the test. ``unity test`` does not pass ``-nographics``,
+    so the only thing missing on a headless Linux machine is a display; Xvfb is
+    commonly already there (a CI machine needs it for anything graphical), and
+    its socket file is what says so.
+
+    A ``DISPLAY`` that is already set is never overridden: the operator put it
+    there, and a guess that disagrees with it is worse than no guess. Off POSIX
+    there is nothing to look for.
+    """
+    if os.name == "nt" or os.environ.get("DISPLAY"):
+        return None
+    try:
+        sockets = sorted(Path(X11_SOCKET_DIR).glob("X*"))
+    except OSError as exc:
+        log(f"Could not look for a running X display: {exc}")
+        return None
+    numbers = []
+    for socket in sockets:
+        try:
+            numbers.append(int(socket.name[1:]))
+        except ValueError:
+            continue  # not a display socket
+    return f":{min(numbers)}" if numbers else None
+
+
 def run_unity(
     cli: str, project: str, extra_args: List[str], timeout: int, log_file: Path
 ) -> Tuple[int, str]:
@@ -641,9 +676,10 @@ def run_unity_tests(
     (measured: ``unity test . -- -force-glcore`` becomes ``-batchmode -runTests
     -projectPath … -testResults … -testPlatform EditMode -force-glcore``). The
     pipeline still passes none: a test that needs a graphics device needs a
-    display on the machine, which no flag can conjure — see "Tests that need a
-    graphics device" in the README. What the pipeline does check is that a report
-    came out, so a run that never happened is a failed run rather than a clean one.
+    display on the machine, not a flag, and an X server that is already running
+    is handed to the run by :func:`running_display`. What the pipeline does check
+    is that a report came out, so a run that never happened is a failed run
+    rather than a clean one.
     """
     if results.exists():
         results.unlink()
@@ -654,12 +690,18 @@ def run_unity_tests(
         "--timeout", str(timeout),
         "--non-interactive",
     ]
+    env = dict(os.environ)
+    display = running_display()
+    if display:
+        env["DISPLAY"] = display
+        log(f"Unity: the tests run on the display {display} that is already running.")
     try:
         # Not echoed: the CLI forwards the editor's log to its stdout, which is
         # megabytes over a run that hangs — the heartbeat's last line is the
         # useful part of that, and the tail is quoted when the run fails.
         return subproc.run(
             cmd, timeout + 120,
+            env=env,
             echo=False, preview=True, fatal=CRASH_MARKERS, deadline=timeout,
         )
     except subprocess.TimeoutExpired as exc:

@@ -354,10 +354,10 @@ SetUp : Unhandled log message: '[Error] No graphic device is available to initia
 
 Unity Test Framework fails a test on an *unexpected* error log, so a package whose Editor tests touch UI reports a failure with nothing to do with the pull request. That happened on UIQueen #2: every EditMode run failed on it, and the same machine passed **23 of 23** once a display existed — no `-force-glcore`, no other flag, on 2022.3 with llvmpipe.
 
-The fix belongs to the runner, because the pipeline cannot supply a display from inside the job:
+The fix belongs to the runner: the pipeline can hand the editor a display that is already running, but it cannot supply one.
 
-- **Mesa's driver, not just its loader.** `libgl1-mesa-dri` (with `libglx-mesa0`) is what provides `swrast_dri.so`; `libgl1-mesa-glx` on a current distribution is only a transitional package. Without a driver no device can be created even with a display, and `LIBGL_ALWAYS_SOFTWARE=1` makes Unity use llvmpipe rather than looking for a GPU.
-- **A display that is running and visible to the runner service.** Installing Xvfb does nothing by itself: `Xvfb :99 -screen 0 1920x1080x24 +extension GLX` has to be running — as a systemd unit, since a background job started by hand dies with the step — and `DISPLAY=:99` has to be in the environment the runner passes down: `Environment=DISPLAY=:99` on the runner's own unit, or `env:` at job level in the calling workflow.
+- **Mesa's driver, not just its loader.** `libgl1-mesa-dri` (with `libglx-mesa0`) is what provides `swrast_dri.so`; `libgl1-mesa-glx` on a current distribution is only a transitional package. Without a driver no device can be created even with a display. On a machine whose GPU driver exists but refuses to work, `LIBGL_ALWAYS_SOFTWARE=1` forces llvmpipe.
+- **A display that is actually running.** Installing Xvfb does nothing by itself: `Xvfb :99 -screen 0 1920x1080x24 +extension GLX` has to be running — as a systemd unit, since a background job started by hand dies with the step. `DISPLAY` does **not** have to be wired through the workflow: the test step looks for a running X server's socket in `/tmp/.X11-unix` and hands the editor the lowest display it finds, saying so in the log (`Unity: the tests run on the display :99 that is already running.`). A `DISPLAY` that is already set is never overridden — that is the operator's decision, and a guess that disagrees with it is worse than none.
 - **A way to see which of the two is missing.** `glxinfo -B` from `mesa-utils` answers it: `OpenGL renderer string: llvmpipe (…)` means the device works, `unable to open display` means Xvfb or `DISPLAY`, and a GLX error with no renderer means the driver.
 
 ### A test run that produced no report
