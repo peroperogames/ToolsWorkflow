@@ -374,17 +374,26 @@ def filter_to_changes(
     """
     unresolved = {i["file"] for i in issues if _is_noise(i)}
     out: List[Dict[str, Any]] = []
+    suppressed = 0
     for issue in issues:
         if issue["severity"] not in REPORTED_SEVERITIES:
             continue
         if _is_noise(issue):
             continue
         if issue["file"] in unresolved and _is_compiler_warning(issue):
+            suppressed += 1
             continue
         lines = changed_lines.get(issue["file"])
         if not lines or issue["line"] not in lines:
             continue
         out.append(issue)
+    if suppressed:
+        # Say it out loud: the alternative is an analysis that quietly reports
+        # less, which is the failure this pipeline is built to avoid.
+        log(
+            f"ReSharper: {suppressed} compiler warning(s) dropped — their file did "
+            "not resolve, so the warning describes the failed resolution."
+        )
     return out
 
 
