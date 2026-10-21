@@ -58,7 +58,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.81"
+VERSION = "2026-10-14.unity.82"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3348,10 +3348,19 @@ def report_build_result(
     hung = getattr(result, "hung_test", "")
     if hung:
         # The run printed nothing, so the bisection in unity_runner is what put a
-        # name to it — and that name is the only thing an author can act on.
-        status_lines.append(
-            "\n**测试卡在**：`" + hung + "`（单独运行也没有产出报告，其余用例因此没有跑）"
-        )
+        # name to it — and that name is the only thing an author can act on. When
+        # no single method reproduces the hang, the field holds the smallest group
+        # that did, and calling that "卡在 X" would be a different lie.
+        if getattr(result, "hung_alone", True):
+            status_lines.append(
+                "\n**测试卡在**：`" + hung + "`（单独运行也没有产出报告，其余用例因此没有跑）"
+            )
+        else:
+            status_lines.append(
+                "\n**测试卡住，但没有单个用例能复现**：最小的组合是 `"
+                + hung
+                + "`（单独跑各自都过，一起跑就挂；其余用例因此没有跑）"
+            )
     if not result.tests_reported and result.test_tail:
         # The run produced no report: what it last said is the only diagnosis
         # there is, and the author is not going to read the job log for it.

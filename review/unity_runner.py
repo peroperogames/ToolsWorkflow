@@ -1342,9 +1342,11 @@ def run_tests(
                     # test. The only way to find it is to run less of the suite:
                     # the bisection below starts from the package's test methods
                     # and confirms its last candidate on its own.
-                    result.hung_test = blame_hung_test(
+                    hung, alone = blame_hung_test(
                         cli, project, results_dir, platform, package_root
                     )
+                    result.hung_test = hung or ""
+                    result.hung_alone = alone
                     if not result.hung_test:
                         log(
                             f"  the {platform} run printed nothing and the hung test "
@@ -1370,11 +1372,11 @@ BLAME_CASE_SECONDS = 10
 # its deadline, and it must not become a second one.
 BLAME_MAX_SECONDS = 900
 
-# `[Test]`, `[UnityTest]`, and `[TestCase(...)]` mark a method as a test. The
-# attribute is on its own line above the signature in every test file we have
-# seen; the parser below relies on that and on nothing else.
+# `[Test]`, `[UnityTest]`, `[TestCase(...)]` and `[TestCaseSource(...)]` mark a
+# method as a test. `[TestFixture]` must not, and does not: the word boundary
+# after `Test` is what tells them apart.
 _TEST_ATTRIBUTE = re.compile(r"\[\s*(?:Unity)?Test\b")
-_TESTCASE_ATTRIBUTE = re.compile(r"\[\s*TestCase\b")
+_TESTCASE_ATTRIBUTE = re.compile(r"\[\s*TestCase(?:Source)?\b")
 _METHOD_SIGNATURE = re.compile(
     r"\b(?:IEnumerator|IEnumerator<[^>]+>|void)\s+([A-Za-z_]\w*)\s*\("
 )
@@ -1390,11 +1392,16 @@ def test_methods(package_root: str) -> List[str]:
     is what the reader already knows. Nothing here is run or compiled: the names
     are read out of the sources to give the bisection something to cut in half.
 
-    A method is named ``Namespace.Class.Method``. The parser is deliberately
-    simple — an attribute line, then the next method signature — and it only has
-    to be good enough that filtering by every name it found selects the tests the
-    suite would have run. A method it misses costs one round of bisection, not a
-    wrong answer: the run that proves the culprit is a filter on that name alone.
+    A method is named ``Namespace.Class.Method``, and the class is whatever
+    encloses the method *at that point*: nested classes are tracked by their
+    braces and popped when they close. Keeping the last class name seen instead
+    was wrong in exactly the case that came up — `UrlUploadTests` declares a
+    nested `UploadCases`, and every test after it was reported under the nested
+    name, which the runner then matched with nothing. An empty report looked like
+    a test that finished, and the bisection followed it to the wrong conclusion.
+
+    A name this misses costs one round of the search; a name it invents costs the
+    answer, which is why an empty report is treated as no information at all.
     """
     if not package_root:
         return []
@@ -1411,38 +1418,52 @@ def test_methods(package_root: str) -> List[str]:
         except OSError:
             continue
         namespace = ""
-        klass = ""
+        depth = 0
+        # (brace depth the class body opened at, its name) — innermost last.
+        scopes: List[Tuple[int, str]] = []
+        closing_class: Optional[str] = None
+        pending_test = False
 
         def remember(method: str) -> None:
+            klass = scopes[-1][1] if scopes else ""
             full = ".".join(part for part in (namespace, klass, method) if part)
             if full and full not in found:
                 found.append(full)
 
-        pending = False
         for line in text.splitlines():
             match = _NAMESPACE.match(line)
             if match:
                 namespace = match.group(1)
             match = _CLASS.search(line)
             if match:
-                klass = match.group(1)
+                closing_class = match.group(1)
             attribute = _TEST_ATTRIBUTE.search(line) or _TESTCASE_ATTRIBUTE.search(line)
             if attribute:
                 # The attribute usually sits on the line above its method, but
                 # `[Test] public void X()` is legal and easy to write, so the rest
                 # of this line is checked before waiting for the next one.
                 signature = _METHOD_SIGNATURE.search(line[attribute.end():])
-                pending = signature is None
+                pending_test = signature is None
                 if signature:
                     remember(signature.group(1))
-                continue
-            if not pending:
-                continue
-            signature = _METHOD_SIGNATURE.search(line)
-            if not signature:
-                continue
-            pending = False
-            remember(signature.group(1))
+            elif pending_test:
+                signature = _METHOD_SIGNATURE.search(line)
+                if signature:
+                    pending_test = False
+                    remember(signature.group(1))
+            # Braces, one at a time: a class body opens at the first `{` after its
+            # declaration and closes at the `}` that takes the depth back below
+            # that point.
+            for char in line:
+                if char == "{":
+                    depth += 1
+                    if closing_class:
+                        scopes.append((depth, closing_class))
+                        closing_class = None
+                elif char == "}":
+                    while scopes and scopes[-1][0] >= depth:
+                        scopes.pop()
+                    depth -= 1
     return found
 
 
@@ -1468,24 +1489,43 @@ def _filter_pattern(names: Sequence[str]) -> str:
     return "^(?:" + "|".join(parts) + r")(?:\(.*\))?$"
 
 
+def _report_case_count(report: Path) -> int:
+    """How many test cases a report holds — 0 when it holds none or is unreadable.
+
+    A report with no cases in it is the answer to a filter that matched nothing,
+    which is not the same thing as a run that finished. Confusing the two is what
+    made an earlier version name a test that does not exist: the empty report
+    looked like success and the search followed it.
+    """
+    try:
+        text = report.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0
+    return text.count("<test-case")
+
+
 def blame_hung_test(
     cli: str,
     project: str,
     results_dir: Path,
     platform: str,
     package_root: str,
-) -> Optional[str]:
+) -> Tuple[Optional[str], bool]:
     """Bisect a run that produced no report down to the test method that hung.
 
     The suite said nothing at all, so the only way to name the culprit is to run
     less of it. Each round runs half of the remaining candidates with a filter on
-    their names; a report means that half finished — so the other half holds the
-    test that does not — and no report means this half does. A single method left
-    is confirmed on its own with BLAME_CASE_SECONDS, which is the run that turns a
-    guess into the answer.
+    their names; a report with cases in it means that half finished — so the other
+    half holds the test that does not — and no report means this half does. A
+    single method left is confirmed on its own with BLAME_CASE_SECONDS, which is
+    the run that turns a guess into the answer.
 
-    Returns the method's full name, or None when no list was available or the
-    budget ran out. Best-effort throughout: this runs inside a failure path.
+    Returns ``(name, hangs_alone)``. ``name`` is the method's full name, or —
+    when every single method finishes on its own — the smallest group that did
+    hang, as ``"A + B"``, with ``hangs_alone`` False. ``None`` when no list was
+    available, the budget ran out, or a filter matched nothing at all (which
+    means the names and the runner disagree, and a name would be a guess).
+    Best-effort throughout: this runs inside a failure path.
     """
     names = test_methods(package_root)
     if not names:
@@ -1493,17 +1533,31 @@ def blame_hung_test(
             f"Unity: no test methods could be read from the package's sources, so "
             f"the {platform} run that hung cannot be attributed."
         )
-        return None
+        return None, False
 
     started = time.monotonic()
     report = results_dir / f"tests-{pr_workspace.sanitize(platform)}.blame.xml"
+
+    def run(pattern: str, cap: int) -> Optional[bool]:
+        """True when the run finished with cases, False when it hung, None when
+        the filter matched nothing (no information either way)."""
+        if report.exists():
+            report.unlink()
+        _rc, _output = _run_filtered(cli, project, report, platform, cap, pattern)
+        if not report.exists():
+            return False
+        if _report_case_count(report) == 0:
+            return None
+        return True
+
     lo, hi = 0, len(names)
     rounds = 0
+    smallest: List[str] = []
     log(f"Unity: {len(names)} test method(s) to search for the {platform} hang.")
     while hi - lo > 1:
         if time.monotonic() - started > BLAME_MAX_SECONDS:
             log("Unity: the search took its budget; the hung test stays unnamed.")
-            return None
+            return None, False
         mid = (lo + hi) // 2
         group = names[lo:mid]
         # A group is expected to be quick — the whole suite is seconds, roughly a
@@ -1511,38 +1565,67 @@ def blame_hung_test(
         # on top of the setup, never less than one case gets. A hanging group
         # spends the whole allowance; that is what makes the wrong half obvious.
         cap = BLAME_SETUP_SECONDS + max(BLAME_CASE_SECONDS, len(group))
-        if report.exists():
-            report.unlink()
         rounds += 1
         log(f"Unity: blame round {rounds}: {len(group)} of {hi - lo} candidate(s) ...")
-        rc, _output = _run_filtered(cli, project, report, platform, cap, _filter_pattern(group))
-        if report.exists():
-            # This half finished, so the hang is in the other one.
-            lo = mid
+        finished = run(_filter_pattern(group), cap)
+        if finished is None:
+            log(
+                "Unity: a filter matched no test at all — the names read from the "
+                "sources are not the ones the runner reports, so the search stops "
+                "rather than guess."
+            )
+            return None, False
+        if finished:
+            lo = mid  # this half finished; the hang is in the other one
             continue
         hi = mid
+        smallest = group
 
     candidate = names[lo]
-    cap = BLAME_SETUP_SECONDS + BLAME_CASE_SECONDS
-    if report.exists():
-        report.unlink()
-    _run_filtered(
-        cli, project, report, platform, cap, _filter_pattern([candidate])
+    finished = run(
+        _filter_pattern([candidate]),
+        BLAME_SETUP_SECONDS + BLAME_CASE_SECONDS,
     )
-    if report.exists():
-        # The bisection pointed at a method that then finished on its own: the
-        # hang needs company (a shared fixture, an earlier test's leftovers) and
-        # this method's name is the closest thing to an answer the search has.
+    if finished is None:
+        log(f"Unity: no test named {candidate} exists on the runner; nothing named.")
+        return None, False
+    if finished:
+        if len(smallest) > 1:
+            # The last group that hung is a half, not the answer: shrink it by
+            # dropping one member at a time, keeping the group only while it still
+            # hangs without that member. Bounded by the same budget as the search,
+            # and skipped when the group is too big to afford.
+            group = list(smallest)
+            if len(group) <= 12:
+                for name in list(group):
+                    if len(group) <= 1:
+                        break
+                    if time.monotonic() - started > BLAME_MAX_SECONDS:
+                        log("Unity: the search took its budget; the group stays as it was.")
+                        break
+                    without = [n for n in group if n != name]
+                    cap = BLAME_SETUP_SECONDS + max(BLAME_CASE_SECONDS, len(without))
+                    still = run(_filter_pattern(without), cap)
+                    if still is False:  # hangs without it too — it is not needed
+                        group = without
+                    elif still is None:
+                        break
+            names_text = " + ".join(group)
+            log(
+                f"Unity: no single test hangs on its own; the smallest group that "
+                f"did was {names_text} — the hang needs them together."
+            )
+            return names_text, False
         log(
-            f"Unity: {candidate} finishes on its own; the hang needs the rest of "
-            "the suite, so the narrowing stopped one step early."
+            f"Unity: {candidate} finishes on its own and no smaller group hung; "
+            "the hang needs the rest of the suite."
         )
-        return candidate
+        return candidate, False
     log(
         f"Unity: the {platform} run hangs in {candidate} — it produced no report "
         f"within {BLAME_CASE_SECONDS}s on its own."
     )
-    return candidate
+    return candidate, True
 
 
 def _run_filtered(
@@ -1631,8 +1714,11 @@ class UnityResult:
         self.test_tail: List[str] = []
         self.test_log_path: Optional[str] = None
         # The test method a reportless run was bisected down to, when one could
-        # be found — the answer the heartbeat could never give.
+        # be found — the answer the heartbeat could never give. `hung_alone` says
+        # whether that method hangs on its own or only with the rest of the suite,
+        # in which case the name holds the smallest group that reproduced it.
         self.hung_test: str = ""
+        self.hung_alone: bool = True
         self.compile_errors: List[Dict[str, Any]] = []
         self.test_failures: List[Dict[str, Any]] = []
         self.sln_path: Optional[str] = None
@@ -1655,7 +1741,13 @@ class UnityResult:
             return ""
         if self.ok:
             if self.tests_broke:
-                hung = f"（卡在 `{self.hung_test}`）" if self.hung_test else ""
+                hung = ""
+                if self.hung_test:
+                    hung = (
+                        f"（卡在 `{self.hung_test}`）"
+                        if self.hung_alone
+                        else f"（单独跑都过，最小的复现组合是 `{self.hung_test}`）"
+                    )
                 return (
                     f"⚠️ Unity: 编译通过；单元测试没有跑完{hung}，"
                     "也就没有报告，不能算通过。"
@@ -1681,7 +1773,13 @@ class UnityResult:
             return ""
         if self.ok:
             if self.tests_broke:
-                where = f" (hung in {self.hung_test})" if self.hung_test else ""
+                where = ""
+                if self.hung_test:
+                    where = (
+                        f" (hung in {self.hung_test})"
+                        if self.hung_alone
+                        else f" (no single test hangs; smallest reproducing set: {self.hung_test})"
+                    )
                 return (
                     "Unity: compiled; the test run did not finish, so it produced "
                     f"no report{where}."
