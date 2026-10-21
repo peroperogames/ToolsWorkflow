@@ -637,10 +637,13 @@ def run_unity_tests(
     a pass with no tests. ``unity test`` exists for exactly this and writes the
     report itself.
 
-    Unlike ``unity run``, this command takes no arguments after ``--``: passing
-    any — even ``-nographics`` — leaves it exiting 0 with no report at all, which
-    would read as "no tests, no failures". So it is invoked exactly as it is and
-    the missing report is treated as a failed run rather than a clean one.
+    It does not pass ``-nographics``, and it does forward arguments after ``--``
+    (measured: ``unity test . -- -force-glcore`` becomes ``-batchmode -runTests
+    -projectPath … -testResults … -testPlatform EditMode -force-glcore``). The
+    pipeline still passes none: a test that needs a graphics device needs a
+    display on the machine, which no flag can conjure — see "Tests that need a
+    graphics device" in the README. What the pipeline does check is that a report
+    came out, so a run that never happened is a failed run rather than a clean one.
     """
     if results.exists():
         results.unlink()

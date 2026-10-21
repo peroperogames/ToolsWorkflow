@@ -304,7 +304,7 @@ There is no editor path to configure, and none to fall out of step with the proj
 
 Two things that do not work, and why:
 
-- **`-quit` cannot be forwarded to `unity run`.** The CLI owns `-batchmode`, `-nographics`, `-quit`, `-projectPath` and `-logFile`, and rejects any of them after `--`. Only the arguments meant for the Editor itself go there.
+- **The Editor flags the CLI owns cannot be forwarded to `unity run`.** `-batchmode`, `-quit`, `-projectPath` and `-logFile` are added by the CLI and rejected after `--`. `-nographics` is not one of them — `unity run` does not add it, which is why the pipeline forwards it: without it the editor dies with `Error opening default X display` before it compiles anything. `unity test` forwards arguments after `--` as well (measured: `unity test . -- -force-glcore` reaches the editor as `-batchmode -runTests … -testPlatform EditMode -force-glcore`), but the pipeline passes none — a test that needs a graphics device needs a display, not a flag.
 - **`unity run -runTests` produces no report.** The CLI always passes `-quit`, and the editor quits before the test run has written anything — which reads as "no tests, no failures" and is exactly the silent pass this pipeline avoids elsewhere. `unity test` exists for this and writes the NUnit report itself; a failing run exits non-zero *and* leaves the report, and the failures are read from it.
 
 The CLI must be executable by the user the runner runs as, and so must the editor that the CLI resolves (a Hub under `/root` is not visible to a runner running as anyone else). Where the CLI itself lives is found rather than configured — see [Nothing asks where a tool is](#nothing-asks-where-a-tool-is).
@@ -342,6 +342,23 @@ The project's `com.unity.test-framework` is raised to 1.3.4 if it is missing or 
 Both follow one rule, in `ensure_minimum_version`: absent → added at the minimum, older → raised, at or above → untouched, and a `file:` or git reference → untouched, because that is the repository's deliberate choice.
 
 One consequence of compiling the tests at all: a package whose tests do not compile gets **no project files generated for it**, so ReSharper cannot inspect that package in that run. The compile errors themselves are still posted on the changed lines, so the pull request is told what is wrong — but the static analysis is blind until they are fixed.
+
+### Tests that need a graphics device
+
+Unity creates a real graphics device in batch mode; only `-nographics` takes it away, and `unity test` does not pass it. So a test that builds a UI Toolkit panel — a `UIDocument`, an editor window, anything with a `PanelSettings` — runs on CI exactly as it does locally, **provided the machine has a display to give Unity**. A Linux runner usually does not, and the failure arrives as one line among the test output:
+
+```
+[Error] No graphic device is available to initialize the view.
+SetUp : Unhandled log message: '[Error] No graphic device is available to initialize the view.'
+```
+
+Unity Test Framework fails a test on an *unexpected* error log, so a package whose Editor tests touch UI reports a failure with nothing to do with the pull request. That happened on UIQueen #2: every EditMode run failed on it, and the same machine passed **23 of 23** once a display existed — no `-force-glcore`, no other flag, on 2022.3 with llvmpipe.
+
+The fix belongs to the runner, because the pipeline cannot supply a display from inside the job:
+
+- **Mesa's driver, not just its loader.** `libgl1-mesa-dri` (with `libglx-mesa0`) is what provides `swrast_dri.so`; `libgl1-mesa-glx` on a current distribution is only a transitional package. Without a driver no device can be created even with a display, and `LIBGL_ALWAYS_SOFTWARE=1` makes Unity use llvmpipe rather than looking for a GPU.
+- **A display that is running and visible to the runner service.** Installing Xvfb does nothing by itself: `Xvfb :99 -screen 0 1920x1080x24 +extension GLX` has to be running — as a systemd unit, since a background job started by hand dies with the step — and `DISPLAY=:99` has to be in the environment the runner passes down: `Environment=DISPLAY=:99` on the runner's own unit, or `env:` at job level in the calling workflow.
+- **A way to see which of the two is missing.** `glxinfo -B` from `mesa-utils` answers it: `OpenGL renderer string: llvmpipe (…)` means the device works, `unable to open display` means Xvfb or `DISPLAY`, and a GLX error with no renderer means the driver.
 
 ### A test run that produced no report
 
