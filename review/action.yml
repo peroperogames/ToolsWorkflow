@@ -144,6 +144,25 @@ runs:
         INSPECT_IGNORE_RULES: ${{ inputs.resharper-ignore-rules }}
       run: python3 "$GITHUB_ACTION_PATH/main.py" static
 
+    # The reports are written inside the PR's directory on the runner, which
+    # nobody can read afterwards. A failing run whose evidence cannot be looked
+    # at is a failing run that gets re-run until it passes, so the reports and
+    # the logs go up with the job: the NUnit XML, its captured output, the
+    # editor's own log and ReSharper's, for fourteen days.
+    - name: Upload the reports
+      if: always() && github.event.action != 'closed'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ai-review-reports-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          ${{ inputs.state-dir || format('{0}/ai-code-review', runner.temp) }}/**/.ai-review/tests-*.xml
+          ${{ inputs.state-dir || format('{0}/ai-code-review', runner.temp) }}/**/.ai-review/tests-*.log
+          ${{ inputs.state-dir || format('{0}/ai-code-review', runner.temp) }}/**/.ai-review/tests-*.editor.log
+          ${{ inputs.state-dir || format('{0}/ai-code-review', runner.temp) }}/**/.ai-review/resharper-*.xml
+          ${{ inputs.state-dir || format('{0}/ai-code-review', runner.temp) }}/**/.ai-review/editor.log
+        if-no-files-found: ignore
+        retention-days: 14
+
     - name: Review and settle the threads
       if: github.event.action != 'closed'
       shell: bash
