@@ -454,8 +454,16 @@ def ensure_scoped_registries(project: str) -> None:
 # pulls a much older one in through com.unity.feature.development (1.1.x), and a
 # test assembly written against the newer TestRunner API does not compile — or
 # run — against it.
+#
+# 1.4.6 rather than 1.3.4 because 1.3.4 hangs on a `[Repeat]` over an
+# `async Task` test: NUnit's repeat command calls the Unity command's synchronous
+# `Execute`, which the runner only implements as `ExecuteEnumerable`, so it throws
+# and the editor never finishes the suite (measured here on 2022.3.62f3: 1.3.4
+# hangs with "NotImplementedException: Use ExecuteEnumerable", 1.4.6 passes the
+# same test in 48s). Both require Unity 2019.4 or newer, so raising it cannot
+# strand an older project.
 TEST_FRAMEWORK = "com.unity.test-framework"
-MIN_TEST_FRAMEWORK = "1.3.4"
+MIN_TEST_FRAMEWORK = "1.4.6"
 
 # Moq, for the same reason and a different one. A package's test assemblies
 # reference `Moq.dll`, which the package declares in its own asmdef's
@@ -523,7 +531,8 @@ def ensure_test_framework(project: str) -> None:
     """Give the project a Test Framework new enough for the package's tests."""
     ensure_minimum_version(
         project, TEST_FRAMEWORK, MIN_TEST_FRAMEWORK,
-        "test assemblies written against the newer TestRunner API need it",
+        "test assemblies written against the newer TestRunner API need it, and "
+        "1.3.4 hangs a [Repeat] over an async Task test",
     )
 
 
