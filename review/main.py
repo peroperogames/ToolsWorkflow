@@ -37,6 +37,7 @@ from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 from ai_client import AIClient, DEFAULT_BASE_URL, DEFAULT_MODEL
 from github_client import GitHubClient
 
+import build_log
 import inspect_code
 import dotnet_runner
 import pr_workspace
@@ -58,7 +59,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.88"
+VERSION = "2026-10-14.unity.89"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3261,6 +3262,20 @@ def changed_lines_by_file(files: List[Dict[str, Any]]) -> Dict[str, set]:
     return result
 
 
+def run_artifacts_url() -> str:
+    """Where this run's uploaded reports live, or "" outside GitHub Actions.
+
+    The comment is posted before the artifact step runs, so the link points at the
+    run rather than at one artifact id — the page lists what was uploaded when the
+    job finishes, which is a minute after the comment appears.
+    """
+    repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    run = os.environ.get("GITHUB_RUN_ID", "").strip()
+    if not repo or not run:
+        return ""
+    return f"https://github.com/{repo}/actions/runs/{run}#artifacts"
+
+
 def post_status_comment(
     gh: GitHubClient, owner: str, repo: str, number: int, body: str
 ) -> bool:
@@ -3353,6 +3368,19 @@ def report_build_result(
         for t in result.test_failures[:20]:
             msg = (t.get("message") or "").splitlines()[0][:200] if t.get("message") else ""
             status_lines.append(f"- {t['name']}" + (f" — {msg}" if msg else ""))
+        # The list says which tests; this says what they said. A comment is where
+        # the failing run is read, and "AssertionException" alone leaves the
+        # author to run the suite again to see the frames that matter.
+        details = build_log.format_failure_details(result.test_failures)
+        if details:
+            status_lines.append(
+                "\n<details><summary>失败用例的消息与堆栈</summary>\n\n"
+                + "\n".join(details)
+                + "\n</details>"
+            )
+        artifacts = run_artifacts_url()
+        if artifacts:
+            status_lines.append(f"\n完整报告（XML 与日志）：{artifacts}")
     hung = getattr(result, "hung_test", "")
     if hung:
         # The run printed nothing, so the bisection in unity_runner is what put a

@@ -85,6 +85,39 @@ def format_compile_errors(
     return lines
 
 
+def format_failure_details(
+    failures: Sequence[Dict[str, Any]],
+    per_case: int = 1500,
+    total: int = 45000,
+) -> List[str]:
+    """The failures with their messages and stack traces, for a comment.
+
+    A pull request comment is the only place a reader of the failing run actually
+    looks, and "AssertionException" on its own says nothing; the frames that say
+    which line was on the wrong side of the assertion are what the author needs.
+    Bounded twice — per case and in total — because GitHub rejects a comment over
+    65536 characters, and a report that cannot be posted is worse than a short
+    one. The whole XML is offered beside it as an artifact link.
+    """
+    blocks: List[str] = []
+    used = 0
+    for case in failures:
+        name = case.get("name") or "unknown test"
+        message = (case.get("message") or "").strip()[:per_case]
+        stack = (case.get("stack") or "").strip()[:per_case]
+        block = f"**{name}**\n"
+        if message:
+            block += f"```\n{message}\n```\n"
+        if stack:
+            block += f"```\n{stack}\n```\n"
+        if used + len(block) > total:
+            blocks.append(f"… 其余 {len(failures) - len(blocks)} 个失败用例见附带的报告文件。")
+            break
+        blocks.append(block)
+        used += len(block)
+    return blocks
+
+
 def format_test_failures(
     failures: Sequence[Dict[str, Any]], limit: int = REPORT_LIMIT
 ) -> List[str]:
@@ -149,12 +182,16 @@ def parse_nunit_failures(path: Path) -> List[Dict[str, Any]]:
             continue
         name = case.get("fullname") or case.get("name") or "unknown test"
         message = ""
+        stack = ""
         failure = case.find("failure")
         if failure is not None:
             msg_el = failure.find("message")
             if msg_el is not None and msg_el.text:
                 message = msg_el.text.strip()
-        out.append({"name": name, "message": message})
+            stack_el = failure.find("stack-trace")
+            if stack_el is not None and stack_el.text:
+                stack = stack_el.text.strip()
+        out.append({"name": name, "message": message, "stack": stack})
     return out
 
 
@@ -171,7 +208,7 @@ def parse_trx_failures(path: Path) -> List[Dict[str, Any]]:
         log(f"Could not parse the test report: {exc}")
         return out
 
-    messages: Dict[str, str] = {}
+    found: Dict[str, Dict[str, str]] = {}
     for element in tree.getroot().iter():
         if not element.tag.endswith("UnitTestResult"):
             continue
@@ -179,12 +216,13 @@ def parse_trx_failures(path: Path) -> List[Dict[str, Any]]:
             continue
         name = element.get("testName") or "unknown test"
         message = ""
+        stack = ""
         for child in element.iter():
-            if child.tag.endswith("Message") and child.text:
+            if child.tag.endswith("Message") and child.text and not message:
                 message = child.text.strip()
-                break
-        messages[name] = message
+            elif child.tag.endswith("StackTrace") and child.text and not stack:
+                stack = child.text.strip()
+        found[name] = {"name": name, "message": message, "stack": stack}
 
-    for name, message in messages.items():
-        out.append({"name": name, "message": message})
+    out.extend(found.values())
     return out
