@@ -28,6 +28,7 @@ import difflib
 import json
 import os
 import re
+import shutil
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -59,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.93"
+VERSION = "2026-10-14.unity.94"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3262,6 +3263,46 @@ def changed_lines_by_file(files: List[Dict[str, Any]]) -> Dict[str, set]:
     return result
 
 
+# Where the workflow's upload step finds the reports. Inside the checkout, because
+# that is the one directory the step and this process both know: the reports
+# themselves live in the PR's directory under the system temp directory, which the
+# step has no way to name (`$RUNNER_TEMP` is a different directory on Linux).
+ARTIFACTS_DIRNAME = ".ai-review-artifacts"
+
+
+def share_artifacts(owner: str, repo: str, number: int) -> None:
+    """Copy this run's reports where the workflow can upload them.
+
+    Best-effort and small: XML and text files that a person would otherwise have
+    to ask for access to the runner to read. A failing run whose evidence cannot
+    be looked at is a failing run that gets re-run until it passes.
+    """
+    workspace = os.environ.get("GITHUB_WORKSPACE", "").strip()
+    if not workspace:
+        return
+    source = pr_workspace.meta_dir(owner, repo, number)
+    if not source.is_dir():
+        return
+    target = Path(workspace) / ARTIFACTS_DIRNAME
+    copied = 0
+    for pattern in (
+        "tests-*.xml",
+        "tests-*.log",
+        "resharper-*.xml",
+        "editor.log",
+        "checks-*.json",
+    ):
+        for path in sorted(source.glob(pattern)):
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, target / path.name)
+                copied += 1
+            except OSError as exc:
+                log(f"Warning: could not copy {path.name} for upload: {exc}")
+    if copied:
+        log(f"Copied {copied} report file(s) into {target} for the upload step.")
+
+
 def _test_duration(seconds: Any) -> str:
     """A report's duration as something a table cell can hold."""
     try:
@@ -5163,14 +5204,18 @@ def run_stage(stage: str) -> int:
         if not files:
             log("No changed files found; nothing to check.")
             return 0
-        return stage_checks(gh, owner, repo, number, pr, files, config)
+        code = stage_checks(gh, owner, repo, number, pr, files, config)
+        share_artifacts(owner, repo, number)
+        return code
 
     if stage == "static":
-        return stage_static(
+        code = stage_static(
             gh, owner, repo, number, pr,
             _changed_files(gh, owner, repo, number), config,
             event_name, payload,
         )
+        share_artifacts(owner, repo, number)
+        return code
 
     return stage_review(gh, owner, repo, number, pr, config, event_name, payload)
 

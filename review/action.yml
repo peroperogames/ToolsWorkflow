@@ -154,12 +154,11 @@ runs:
       uses: actions/upload-artifact@v4
       with:
         name: ai-review-reports-${{ github.run_id }}-${{ github.run_attempt }}
-        path: |
-          ${{ inputs.state-dir || format('{0}/ai-code-review', runner.temp) }}/**/.ai-review/tests-*.xml
-          ${{ inputs.state-dir || format('{0}/ai-code-review', runner.temp) }}/**/.ai-review/tests-*.log
-          ${{ inputs.state-dir || format('{0}/ai-code-review', runner.temp) }}/**/.ai-review/tests-*.editor.log
-          ${{ inputs.state-dir || format('{0}/ai-code-review', runner.temp) }}/**/.ai-review/resharper-*.xml
-          ${{ inputs.state-dir || format('{0}/ai-code-review', runner.temp) }}/**/.ai-review/editor.log
+        # Copied into the checkout by the stage that wrote them: the reports live
+        # in the PR's directory under the system temp directory, and `$RUNNER_TEMP`
+        # is a different directory on Linux — the first version of this step
+        # uploaded nothing and said so only in its own log.
+        path: ${{ github.workspace }}/.ai-review-artifacts/
         if-no-files-found: ignore
         retention-days: 14
 
