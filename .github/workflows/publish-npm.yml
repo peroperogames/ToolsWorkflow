@@ -42,11 +42,13 @@ jobs:
     env:
       EXPECTED_PACKAGE_PREFIX: ${{ inputs.expected-package-prefix || 'com.prpr' }}
       NPM_URL: ${{ secrets.NPM_URL }}
-      # The runner's own writable scratch space. This used to be /devops, which
-      # is at the filesystem root: the job runs as the runner's user, not root,
-      # so `mkdir -p /devops` fails with "Permission denied" and the publish
-      # stops before anything is cloned.
-      DEVOPS_DIR: ${{ runner.temp }}/devops
+      # The ci_cd checkout goes under the runner's own writable scratch space —
+      # `$RUNNER_TEMP`, which every step gets as an environment variable. It used
+      # to be /devops, at the filesystem root: the job runs as the runner's user,
+      # not root, so `mkdir -p /devops` is a permission error and the publish
+      # stops before anything is cloned. (The `runner` context cannot be used
+      # here — job-level `env` does not allow it — which is why this is a plain
+      # shell variable in the steps below.)
 
     steps:
       - name: Generate token via GitHub App
@@ -65,20 +67,20 @@ jobs:
 
       - name: Clone ci_cd repository
         run: |
-          mkdir -p "$DEVOPS_DIR"
-          git clone https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/peroperogames/ToolsWorkflow.git "$DEVOPS_DIR/ToolsWorkflow"
+          mkdir -p "$RUNNER_TEMP/devops"
+          git clone https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/peroperogames/ToolsWorkflow.git "$RUNNER_TEMP/devops/ToolsWorkflow"
 
       - name: Change folder name
         env:
           CI_PROJECT_DIR: ${{ github.workspace }}/${{ inputs.working-directory }}
         run: |
-          bash "$DEVOPS_DIR/ToolsWorkflow/publish/changefoldername.sh"
+          bash "$RUNNER_TEMP/devops/ToolsWorkflow/publish/changefoldername.sh"
 
       - name: Package preprocess
         env:
           CI_COMMIT_TAG: ${{ github.ref_name }}
         run: |
-          bash "$DEVOPS_DIR/ToolsWorkflow/publish/package_preprocess.sh"
+          bash "$RUNNER_TEMP/devops/ToolsWorkflow/publish/package_preprocess.sh"
 
       - name: Configure Git
         run: |
@@ -153,8 +155,8 @@ jobs:
         run: |
           RELEASE_NOTES=$(gh release view "$TAG" --json body --jq .body)
           README_URL="https://github.com/${{ github.repository }}/blob/${{ github.sha }}/README.md"
-          bash "$DEVOPS_DIR/ToolsWorkflow/publish/feishu_webhook.sh" "$FEISHU_WEBHOOK" "$FEISHU_SECRET" "$PROJECT_NAME" "$TAG" "$RELEASE_NOTES" "$README_URL"
+          bash "$RUNNER_TEMP/devops/ToolsWorkflow/publish/feishu_webhook.sh" "$FEISHU_WEBHOOK" "$FEISHU_SECRET" "$PROJECT_NAME" "$TAG" "$RELEASE_NOTES" "$README_URL"
 
       - name: Clean up the ci_cd checkout
         if: always() && github.actor != 'perotoolsbot[bot]'
-        run: rm -rf "$DEVOPS_DIR"
+        run: rm -rf "$RUNNER_TEMP/devops"
