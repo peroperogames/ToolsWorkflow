@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import base64
+import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+
+
+def log(message: str) -> None:
+    print(message, file=sys.stderr)
 
 # Review-thread resolution is GraphQL-only — the REST API cannot do it.
 REVIEW_THREADS_QUERY = """
@@ -326,6 +331,46 @@ class GitHubClient:
             f"/repos/{owner}/{repo}/issues/{number}/comments",
             json={"body": body},
         )
+
+    def create_check_run(
+        self,
+        owner: str,
+        repo: str,
+        head_sha: str,
+        name: str,
+        conclusion: str,
+        title: str,
+        summary: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Publish a check run for this commit, or None when it is not allowed.
+
+        The red cross (or green tick) on the pull request comes from here. It
+        needs the App to hold ``checks: write``; without it GitHub answers 403 and
+        the review carries on — the check run is a summary of work already
+        reported in the comment, never the only place the result appears.
+        """
+        if not head_sha:
+            return None
+        payload = {
+            "name": name,
+            "head_sha": head_sha,
+            "status": "completed",
+            "conclusion": conclusion,
+            "output": {"title": title[:255], "summary": summary[:60000]},
+        }
+        try:
+            return self._request(
+                "POST", f"/repos/{owner}/{repo}/check-runs", json=payload
+            )
+        except RuntimeError as exc:
+            if "403" in str(exc) or "404" in str(exc):
+                log(
+                    "GitHub refused the check run — the App needs the 'Checks: write' "
+                    "permission for it; the comment still carries the result."
+                )
+            else:
+                log(f"Could not publish the check run: {exc}")
+            return None
 
     def add_labels(self, owner: str, repo: str, number: int, labels: List[str]) -> Any:
         """Add labels to a pull request."""

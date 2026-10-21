@@ -1337,6 +1337,10 @@ def run_tests(
                 )
             failures = build_log.parse_nunit_failures(results)
             result.test_failures.extend(failures)
+            if result.platform_runs and result.platform_runs[-1]["platform"] == platform:
+                result.platform_runs[-1]["skipped_cases"] = build_log.parse_nunit_skipped(
+                    results
+                )
             if failures:
                 log(f"Unity: {platform} tests: {len(failures)} failing case(s) in {took}.")
                 for line in build_log.format_test_failures(failures):

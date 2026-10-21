@@ -59,7 +59,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.90"
+VERSION = "2026-10-14.unity.91"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3331,6 +3331,7 @@ def report_build_result(
     config: "Config",
     head_sha: str,
     result: Any,
+    label: str = "Unity",
 ) -> None:
     """Post what a build/test step found.
 
@@ -3396,16 +3397,37 @@ def report_build_result(
             )
     if result.test_failures:
         status_lines.append(f"\n**失败用例（{len(result.test_failures)}）**：")
-        status_lines.append("| 类 | 用例 | 消息 |")
-        status_lines.append("| --- | --- | --- |")
-        for t in result.test_failures[:30]:
-            fixture, method = build_log.split_test_name(t.get("name") or "")
-            first = (t.get("message") or "").splitlines()[0][:160] if t.get("message") else ""
+        # Grouped by fixture: eleven failures in one class are one problem, and a
+        # single flat table of thirty rows is read as thirty.
+        by_fixture: Dict[str, List[Dict[str, Any]]] = {}
+        for failure in result.test_failures:
+            fixture, method = build_log.split_test_name(failure.get("name") or "")
+            by_fixture.setdefault(fixture or "—", []).append(failure)
+        for fixture, cases in list(by_fixture.items())[:10]:
+            status_lines.append("")
             status_lines.append(
-                f"| {_table_cell(fixture) or '—'} | {_table_cell(method)} | {_table_cell(first)} |"
+                f"<details open><summary>{_table_cell(fixture)} — {len(cases)} 个失败</summary>"
             )
-        if len(result.test_failures) > 30:
-            status_lines.append(f"| … | 其余 {len(result.test_failures) - 30} 个 | |")
+            status_lines.append("")
+            status_lines.append("| 用例 | 耗时 | 消息 |")
+            status_lines.append("| --- | --- | --- |")
+            for failure in cases[:25]:
+                _fixture, method = build_log.split_test_name(failure.get("name") or "")
+                first = (
+                    (failure.get("message") or "").splitlines()[0][:160]
+                    if failure.get("message")
+                    else ""
+                )
+                status_lines.append(
+                    f"| {_table_cell(method)} | {_test_duration(failure.get('duration'))} "
+                    f"| {_table_cell(first)} |"
+                )
+            if len(cases) > 25:
+                status_lines.append(f"| 其余 {len(cases) - 25} 个 | | |")
+            status_lines.append("")
+            status_lines.append("</details>")
+        if len(by_fixture) > 10:
+            status_lines.append(f"\n… 另有 {len(by_fixture) - 10} 个类未列出，完整清单见报告。")
         # The list says which tests; this says what they said. A comment is where
         # the failing run is read, and "AssertionException" alone leaves the
         # author to run the suite again to see the frames that matter.
@@ -3416,6 +3438,20 @@ def report_build_result(
                 + "\n".join(details)
                 + "\n</details>"
             )
+    skipped: List[str] = []
+    for run in runs:
+        for name in run.get("skipped_cases") or []:
+            if name not in skipped:
+                skipped.append(name)
+    if skipped:
+        status_lines.append(f"\n<details><summary>跳过的用例（{len(skipped)}）</summary>\n")
+        for name in skipped[:50]:
+            status_lines.append(f"- `{name}`")
+        if len(skipped) > 50:
+            status_lines.append(f"- … 其余 {len(skipped) - 50} 个")
+        status_lines.append("\n</details>")
+
+    if result.test_failures:
         artifacts = run_artifacts_url()
         if artifacts:
             status_lines.append(f"\n完整报告（XML 与日志）：{artifacts}")
@@ -3454,6 +3490,22 @@ def report_build_result(
             print(body)
         else:
             post_status_comment(gh, owner, repo, number, body)
+
+    # The tick or cross on the pull request, which is the one bit of this that is
+    # visible without opening a comment. A run that produced no report is
+    # "neutral", not "success": nothing was verified.
+    if config.dry_run or not head_sha:
+        return
+    conclusion = "failure" if not result.ok else "success"
+    if result.ok and not result.tests_reported:
+        conclusion = "neutral"
+    gh.create_check_run(
+        owner, repo, head_sha,
+        f"AI Review / {label} tests",
+        conclusion,
+        result.outcome() or f"{label}: no result",
+        "\n".join(status_lines),
+    )
 
 
 def renamed_line(line: str, rename: Tuple[str, str]) -> Optional[str]:
@@ -3653,6 +3705,7 @@ def run_dotnet_checks(
     report_build_result(
         gh, owner, repo, number, files, config,
         pr.get("head", {}).get("sha", ""), result,
+        label=".NET",
     )
     return result
 

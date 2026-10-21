@@ -234,7 +234,36 @@ def parse_nunit_failures(path: Path) -> List[Dict[str, Any]]:
             stack_el = failure.find("stack-trace")
             if stack_el is not None and stack_el.text:
                 stack = stack_el.text.strip()
-        out.append({"name": name, "message": message, "stack": stack})
+        duration = case.get("duration")
+        try:
+            seconds = float(duration) if duration is not None else 0.0
+        except ValueError:
+            seconds = 0.0
+        out.append(
+            {"name": name, "message": message, "stack": stack, "duration": seconds}
+        )
+    return out
+
+
+def parse_nunit_skipped(path: Path) -> List[str]:
+    """The cases a report says did not run, by full name.
+
+    A count alone cannot be acted on: "3 skipped" is fine or it is a test suite
+    that quietly stopped covering something, and only the names tell them apart.
+    """
+    out: List[str] = []
+    try:
+        tree = ET.parse(path)
+    except (ET.ParseError, OSError) as exc:
+        log(f"Could not parse the test report for skipped cases: {exc}")
+        return out
+    for case in tree.getroot().iter("test-case"):
+        result = (case.get("result") or "").lower()
+        if result not in ("skipped", "ignored", "inconclusive"):
+            continue
+        name = case.get("fullname") or case.get("name")
+        if name and name not in out:
+            out.append(name)
     return out
 
 
