@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.99"
+VERSION = "2026-10-14.unity.100"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3341,13 +3341,52 @@ def run_artifacts_url() -> str:
 
     The comment is posted before the artifact step runs, so the link points at the
     run rather than at one artifact id — the page lists what was uploaded when the
-    job finishes, which is a minute after the comment appears.
+    job finishes, which is a minute after the comment appears. `stage_artifact_link`
+    replaces it with the artifact's own download URL once the upload has one.
     """
     repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
     run = os.environ.get("GITHUB_RUN_ID", "").strip()
     if not repo or not run:
         return ""
     return f"https://github.com/{repo}/actions/runs/{run}#artifacts"
+
+
+def stage_artifact_link(
+    gh: GitHubClient, owner: str, repo: str, number: int
+) -> int:
+    """Point this run's comments at the uploaded artifact, not at the run page.
+
+    The upload step knows the artifact's URL and this one does not, so the URL
+    arrives in the environment and the comment written by the checks stage is
+    edited in place. Only comments that name *this* run's artefact page are
+    touched, which is what keeps earlier runs' comments out of it.
+    """
+    artifact = os.environ.get("REVIEW_ARTIFACT_URL", "").strip()
+    page = run_artifacts_url()
+    if not artifact:
+        log(
+            "No artifact URL to add to the comment: nothing was uploaded for this "
+            "run, or the upload step did not run."
+        )
+        return 0
+    if not page:
+        log("Not in GitHub Actions; there is no comment pointing at a run page.")
+        return 0
+    replaced = 0
+    for comment in gh.list_comments(owner, repo, number):
+        body = comment.get("body") or ""
+        if page not in body:
+            continue
+        updated = gh.update_comment(
+            owner, repo, comment.get("id"), body.replace(page, artifact)
+        )
+        if updated:
+            replaced += 1
+    if replaced:
+        log(f"Pointed {replaced} comment(s) at the uploaded reports: {artifact}")
+    else:
+        log(f"No comment of this run mentions {page}; nothing to point at them.")
+    return 0
 
 
 def post_status_comment(
@@ -3499,11 +3538,15 @@ def report_build_result(
             status_lines.append(f"- … 其余 {len(skipped) - 50} 个")
         status_lines.append("\n</details>")
 
-    if result.test_failures:
+    hung = getattr(result, "hung_test", "")
+    # The reports are worth a link whenever there is something in them to read: a
+    # failing case, or — exactly when the comment has nothing else to offer — a run
+    # that wrote no report at all. A run stopped at its deadline and a run that
+    # crashed both leave their evidence only in these files.
+    if result.test_failures or result.tests_broke or hung:
         artifacts = run_artifacts_url()
         if artifacts:
             status_lines.append(f"\n完整报告（XML 与日志）：{artifacts}")
-    hung = getattr(result, "hung_test", "")
     if hung:
         # The run printed nothing, so the bisection in unity_runner is what put a
         # name to it — and that name is the only thing an author can act on. When
@@ -4590,6 +4633,12 @@ def act_on_clean_verdict(
 # so the step that runs it can say so instead of announcing a build and a review.
 CLEANUP = "cleanup"
 
+# Also not a stage of a review: the reports have just been uploaded, and this run's
+# comment still points at the run's artefact *page*. The upload step knows the
+# artifact's own URL only once it has uploaded it, so it hands that URL here and the
+# comment is edited in place — one comment, and the link in it downloads.
+ARTIFACT_LINK = "artifact-link"
+
 
 def forget_pull_request(owner: str, repo: str, number: int) -> None:
     """Delete everything a closed pull request owns, and say so."""
@@ -5220,6 +5269,12 @@ def run_stage(stage: str) -> int:
             )
             return 0
 
+    # The reports are already uploaded by the time this one runs, and the comment
+    # naming them was written before that: the one thing left is to give it the
+    # artifact's own URL.
+    if stage == ARTIFACT_LINK:
+        return stage_artifact_link(gh, owner, repo, number)
+
     if stage == "checks":
         files = _changed_files(gh, owner, repo, number)
         if not files:
@@ -5252,10 +5307,10 @@ def main() -> int:
     force_utf8_output()
     prepare_environment()
     stage = (sys.argv[1] if len(sys.argv) > 1 else "all").strip().lower()
-    if stage not in (*STAGES, CLEANUP, "all"):
+    if stage not in (*STAGES, CLEANUP, ARTIFACT_LINK, "all"):
         log(
             f"Unknown stage {stage!r}; expected one of: "
-            f"{', '.join((*STAGES, CLEANUP, 'all'))}."
+            f"{', '.join((*STAGES, CLEANUP, ARTIFACT_LINK, 'all'))}."
         )
         return 2
 
@@ -5268,8 +5323,10 @@ def main() -> int:
     finally:
         # Runs whether the stage finished, returned early or raised: the reports
         # it managed to write are the evidence, and they are worth the upload
-        # exactly when something went wrong.
-        share_artifacts()
+        # exactly when something went wrong. Not for the stage that runs *after*
+        # the upload, where copying them again would only re-print the count.
+        if stage != ARTIFACT_LINK:
+            share_artifacts()
 
 
 if __name__ == "__main__":

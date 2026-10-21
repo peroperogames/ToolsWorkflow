@@ -332,6 +332,28 @@ class GitHubClient:
             json={"body": body},
         )
 
+    def update_comment(
+        self, owner: str, repo: str, comment_id: Any, body: str
+    ) -> Optional[Dict[str, Any]]:
+        """Edit one issue comment, or None when it cannot be edited.
+
+        Used to put the artifact's own download URL into a comment that was
+        posted before the upload happened. Every failure is a warning: the
+        comment exists and already points somewhere useful, so a refused edit
+        must not fail the run that has just finished the work it describes.
+        """
+        if not comment_id:
+            return None
+        try:
+            return self._request(
+                "PATCH",
+                f"/repos/{owner}/{repo}/issues/comments/{comment_id}",
+                json={"body": body},
+            )
+        except Exception as exc:  # noqa: BLE001 - a stale link is not fatal
+            log(f"Warning: could not edit comment {comment_id}: {exc}")
+            return None
+
     def create_check_run(
         self,
         owner: str,

@@ -155,6 +155,7 @@ runs:
     # is searched and reported as "No files were found with the provided path"
     # even with eight report files in it.
     - name: Upload the reports
+      id: upload-reports
       if: always() && github.event.action != 'closed'
       uses: actions/upload-artifact@v4
       with:
@@ -166,6 +167,19 @@ runs:
         path: ${{ github.workspace }}/ai-review-artifacts/
         if-no-files-found: ignore
         retention-days: 14
+
+    # The comment was posted by the checks stage, before the artifacts existed, so
+    # its link points at the run's artifact page. Now the upload knows the
+    # artifact's own URL, and this step puts it there — the same comment, edited,
+    # with a link that downloads instead of a page that lists.
+    - name: Point the comment at the uploaded reports
+      if: always() && github.event.action != 'closed'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        REVIEW_WORK_DIR: ${{ inputs.state-dir }}
+        REVIEW_ARTIFACT_URL: ${{ steps.upload-reports.outputs.artifact-url }}
+      run: python3 "$GITHUB_ACTION_PATH/main.py" artifact-link
 
     - name: Review and settle the threads
       if: github.event.action != 'closed'
