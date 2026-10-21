@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.98"
+VERSION = "2026-10-14.unity.99"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3521,8 +3521,10 @@ def report_build_result(
             )
     if not result.tests_reported and result.test_tail:
         # The run produced no report: what it last said is the only diagnosis
-        # there is, and the author is not going to read the job log for it.
-        status_lines.append("\n**测试没有跑完，最后的输出**：")
+        # there is, and the author is not going to read the job log for it. The
+        # heading does not claim the run went unfinished — most of the time it
+        # exited, with a code the summary line already gave.
+        status_lines.append("\n**没有产出报告，测试最后的输出**：")
         status_lines.append(
             "<details><summary>展开最后 "
             f"{len(result.test_tail)} 行</summary>\n\n```\n"

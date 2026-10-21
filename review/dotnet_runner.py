@@ -120,15 +120,30 @@ def solution_has_tests(solution: str) -> bool:
     return False
 
 
-def _run(cmd: List[str], cwd: str, timeout: int) -> Tuple[int, str]:
+def _run(cmd: List[str], cwd: str, timeout: int) -> Tuple[int, str, bool]:
+    """Run one tool and say how it ended.
+
+    The exit code and the deadline are returned separately because they are
+    different facts about a run — one exited on its own, the other was still
+    running when it was stopped — and a person deciding whether to re-run the
+    job needs to be told which of the two happened.
+    """
     try:
-        return subproc.run(cmd, timeout, cwd=cwd)
+        rc, text = subproc.run(cmd, timeout, cwd=cwd)
+        return rc, text, False
     except subprocess.TimeoutExpired:
         log(f"{cmd[1]} timed out after {timeout}s.")
-        return -1, ""
+        return -1, "", True
     except OSError as exc:
         log(f"Could not run {cmd[0]}: {exc}")
-        return -1, ""
+        return -1, "", False
+
+
+def _how_it_ended(timed_out: bool, rc: int) -> str:
+    """A run's ending as a clause: a deadline or an exit code, never both."""
+    if timed_out:
+        return f"was still running at its {DOTNET_TIMEOUT}s deadline"
+    return f"exited {rc}"
 
 
 class DotnetResult:
@@ -152,6 +167,13 @@ class DotnetResult:
         # solution whose tests were not collected (the SDK decided there was
         # nothing to do); a non-zero one is the tool saying it could not run them.
         self.tests_broke = False
+        # How the test run itself ended — exit code, and whether it was stopped at
+        # the deadline — recorded the way `unity_runner.UnityResult.platform_failures`
+        # records it. "No report" on its own cannot tell a timeout from a tool that
+        # exited with an error, and those are the two things a reader asks about.
+        self.test_run: Dict[str, Any] = {}
+        # ... and the build's own deadline, which has no error list to report.
+        self.build_timed_out = False
         self.compile_errors: List[Dict[str, Any]] = []
         self.test_failures: List[Dict[str, Any]] = []
 
@@ -169,16 +191,65 @@ class DotnetResult:
             return ""
         if self.ok:
             if self.tests_broke:
-                return "⚠️ .NET: 编译通过；测试没有跑完，没有产出报告。"
+                return f"⚠️ .NET: 编译通过；{self._failure_sentence_zh()}，没有产出报告。"
             if self.tested and not self.tests_reported:
-                return "⚠️ .NET: 编译通过；单元测试没有产出报告，本次未真正运行。"
+                return (
+                    "⚠️ .NET: 编译通过；单元测试没有产出报告"
+                    f"（dotnet test 退出码 {self._exit_code()}），本次未真正运行。"
+                )
             return "✅ .NET: 编译通过" + ("，单元测试通过。" if self.tested else "。")
         parts = []
         if not self.compiled:
-            parts.append(f"编译失败（{len(self.compile_errors)} 个错误）")
+            parts.append(self._compile_sentence_zh())
         if not self.tests_ok:
             parts.append(f"{len(self.test_failures)} 个单元测试失败")
         return "🔴 .NET: " + "；".join(parts) + "。"
+
+    def _exit_code(self) -> Any:
+        """The test run's exit code, or ``"未知"`` if the run has no record."""
+        code = self.test_run.get("exit")
+        return "未知" if code is None else code
+
+    def _compile_sentence_zh(self) -> str:
+        """Why the build is not a passing one, in the review's language.
+
+        A build stopped at the deadline has no error list to count: it failed to
+        finish, which is what the sentence has to say rather than "0 个错误".
+        """
+        if self.build_timed_out:
+            return "编译超时"
+        return f"编译失败（{len(self.compile_errors)} 个错误）"
+
+    def _failure_sentence_zh(self) -> str:
+        """How the test run ended, in the review's language.
+
+        Its own sentence rather than "测试没有跑完", which does not say whether the
+        run is still going, was killed at a deadline, or exited on its own — and a
+        reader deciding whether to wait or to re-run needs exactly that.
+        """
+        if self.test_run.get("timed_out"):
+            return f".NET 测试超时（{self._timeout_limit()}还没跑完，被停掉了）"
+        return f".NET 测试运行失败（dotnet test 退出码 {self._exit_code()}）"
+
+    def _failure_sentence_en(self) -> str:
+        """The same sentence for the job log, which is written in English."""
+        if self.test_run.get("timed_out"):
+            return (
+                f"the test run was still running after {self._timeout_limit_en()} "
+                "and was stopped"
+            )
+        return f"the test run exited {self.test_run.get('exit', 'with an unknown status')}"
+
+    def _timeout_limit(self) -> str:
+        """The test deadline as a person would say it."""
+        seconds = int(self.test_run.get("timeout") or DOTNET_TIMEOUT)
+        minutes = seconds // 60
+        return f"{minutes} 分钟" if minutes else f"{seconds} 秒"
+
+    def _timeout_limit_en(self) -> str:
+        seconds = int(self.test_run.get("timeout") or DOTNET_TIMEOUT)
+        minutes = seconds // 60
+        return f"{minutes} minutes" if minutes else f"{seconds} seconds"
 
     def outcome(self) -> str:
         """The same result for the job log. Empty when the step did not run."""
@@ -186,13 +257,22 @@ class DotnetResult:
             return ""
         if self.ok:
             if self.tests_broke:
-                return ".NET: built; the test run did not finish, so it produced no report."
+                return f".NET: built; {self._failure_sentence_en()}, so it produced no report."
             if self.tested and not self.tests_reported:
-                return ".NET: built; the test run produced no report."
+                return (
+                    ".NET: built; the test run produced no report "
+                    f"(dotnet test exited {self._exit_code()})."
+                )
             return ".NET: built" + (" and tested." if self.tested else ".")
         parts = []
         if not self.compiled:
-            parts.append(f"{len(self.compile_errors)} compile error(s)")
+            if self.build_timed_out:
+                parts.append(
+                    f"the build was still running after {DOTNET_TIMEOUT // 60} minutes "
+                    "and was stopped"
+                )
+            else:
+                parts.append(f"{len(self.compile_errors)} compile error(s)")
         if not self.tests_ok:
             parts.append(f"{len(self.test_failures)} test failure(s)")
         return ".NET: " + ", ".join(parts) + "."
@@ -225,7 +305,7 @@ def analyze(clone_dir: str, solution: str, report_dir: Path) -> DotnetResult:
 
         log(f".NET: building {Path(solution).name} ...")
         started = time.monotonic()
-        rc, text = _run(
+        rc, text, timed_out = _run(
             [dotnet, "build", solution, "--nologo", "-v", "minimal"],
             clone_dir,
             DOTNET_TIMEOUT,
@@ -244,7 +324,14 @@ def analyze(clone_dir: str, solution: str, report_dir: Path) -> DotnetResult:
         if rc != 0:
             # A failure we could not attribute to a source line or an error code
             # is a toolchain problem, not a verdict on the pull request.
-            log(f"dotnet build exited {rc} after {took} with no parseable error; skipping the step.")
+            if timed_out:
+                result.build_timed_out = True
+                log(
+                    f"dotnet build was still running after {DOTNET_TIMEOUT}s and was "
+                    "stopped; skipping the step."
+                )
+            else:
+                log(f"dotnet build exited {rc} after {took} with no parseable error; skipping the step.")
             said = " ".join(text.split())[-800:]
             if said:
                 log(f"dotnet said: {said}")
@@ -264,7 +351,7 @@ def analyze(clone_dir: str, solution: str, report_dir: Path) -> DotnetResult:
         if trx.exists():
             trx.unlink()
         started = time.monotonic()
-        rc, text = _run(
+        rc, text, timed_out = _run(
             [
                 dotnet, "test", solution,
                 "--nologo",
@@ -277,6 +364,7 @@ def analyze(clone_dir: str, solution: str, report_dir: Path) -> DotnetResult:
         )
         took = build_log.format_duration(time.monotonic() - started)
         result.tested = True
+        result.test_run = {"exit": rc, "timed_out": timed_out, "timeout": DOTNET_TIMEOUT}
         if trx.exists():
             result.test_failures = build_log.parse_trx_failures(trx)
             result.tests_ok = not result.test_failures
@@ -293,8 +381,9 @@ def analyze(clone_dir: str, solution: str, report_dir: Path) -> DotnetResult:
             # not evidence of a failing test, so it must not fail the build, and
             # it is not evidence of a passing one either.
             log(
-                f"dotnet test produced no report after {took} (exit {rc}); not "
-                "counting it as a failure, and not reporting the run as tested either."
+                f"dotnet test produced no report after {took} "
+                f"({_how_it_ended(timed_out, rc)}); not counting it as a failure, and "
+                "not reporting the run as tested either."
             )
             said = " ".join(text.split())[-800:]
             if said:

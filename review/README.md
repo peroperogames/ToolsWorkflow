@@ -391,7 +391,7 @@ A run that produced no report does **not** fail the build. A hung processor, a m
 
 `UNITY_TEST_TIMEOUT` and the tail together answer the two halves of "why": how long it was given, and what it said instead. It is not evidence of a passing suite either, so it is not called one: the status line becomes `⚠️ Unity: 编译通过；单元测试没有产出报告，本次未真正运行。` (and the same for `.NET`), which is also what the review model is shown — a reviewer approving under a ⚠️ does so knowingly, which is not true of one who was told the package was tested.
 
-When the run actually died, the exit code says so, and the status comment is posted to the pull request even though the step passed: the only other place that fact appears is the job log, which the author never reads.
+When the run actually died, the exit code says so, and the status comment is posted to the pull request even though the step passed: the only other place that fact appears is the job log, which the author never reads. A deadline and an exit code are different facts, so the sentence keeps them apart — `⚠️ .NET: 编译通过；.NET 测试运行失败（dotnet test 退出码 3），没有产出报告。` and `⚠️ .NET: 编译通过；.NET 测试超时（30 分钟还没跑完，被停掉了），没有产出报告。` — because "测试没有跑完" does not say whether the run is still going, was stopped at a deadline, or exited on its own, and those call for different next steps. The clean-exit case says `（dotnet test 退出码 0）` too, for the same reason.
 
 **A run that printed nothing is bisected down to the test method.** Unity Test Framework writes its report at the end of the platform's run and says nothing per test, so the output of a hung suite cannot name the test — but running *less* of the suite can. The candidates are the test **methods** read out of the package's sources (namespace, class and method; a flat list, no namespace walk and no class-level unit — the answer is one method), and each round runs half of them with a `--filter` built from their full names. A report means that half finished and the hang is in the other half; no report means it is in this one. What is left is a single method, run on its own:
 
@@ -411,6 +411,12 @@ Three details are what keep the answer honest. **A report with no cases in it is
 Two things it cannot do. The filter is a regular expression over the full test name, so the pattern allows the suffixes the report adds and the sources do not (a generic fixture's `<RectMask2D>`, a `[TestCase]` argument list). And a hang that needs the *whole* suite — not a group small enough to reproduce — is reported as where the search stopped, with the log saying so.
 
 `UNITY_TEST_TIMEOUT` is the same problem seen from the other side. One hung suite spent thirty minutes of a job before the CLI's own timeout ended it, and the only deadline that could be moved was the build's. A test run with a deadline of its own can be cut short without shortening the build, which is the difference between a lever and a re-run. It defaults to **ten minutes**, not the build's thirty: no suite seen here runs longer than a minute, so a test run still going after ten is stuck, and the remaining twenty buy nothing but a longer wait for the answer.
+
+### Where the reports go
+
+The reports live in the pull request's own directory under the system temp directory, which nobody can open after the job. So each stage copies them into the checkout — `ai-review-artifacts/`, at the top of the workspace — and the workflow uploads that as `ai-review-reports-<run id>-<attempt>` for fourteen days. What arrives is the NUnit XML per platform, the captured output of any run that wrote no report, the editor log, ReSharper's report and the stage's `checks-*.json`; the session log, the lock file and the package clone stay where they are. The status comment links to the run's artefacts page, which fills in when the job ends.
+
+The directory is **not dot-prefixed**, and that is load-bearing rather than tidy. `upload-artifact` leaves hidden files out unless `include-hidden-files` is true, so a `.ai-review-artifacts` directory is searched, found empty and reported as *No files were found with the provided path* — while the stage's own log says `Copied 8 report file(s)`, in the same twenty-five seconds. It took three runs and two wrong fixes (the path, then the timing) to read those two lines together.
 
 ### What a build and a test run print
 
