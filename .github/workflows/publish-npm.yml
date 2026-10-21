@@ -119,6 +119,35 @@ jobs:
              fi
            fi
            echo "pushing to $TARGET"
+
+           # The bump was committed on the tagged commit, and the branch may have
+           # moved since the release was cut — the push of that commit is then a
+           # non-fast-forward and GitHub rejects it ("a pushed branch tip is
+           # behind its remote counterpart"). Rebase it onto the branch tip so the
+           # push is a fast-forward.
+           #
+           # The working tree is dirty on purpose at this point: the packaging
+           # steps renamed folders and deleted their .meta files, and none of that
+           # is meant to be committed. It is set aside for the rebase and put back
+           # afterwards, before the publish reads the tree.
+           git fetch origin "$TARGET"
+           DIRTY=0
+           if [ -n "$(git status --porcelain)" ]; then
+             git stash push --include-untracked -m publish-packaging > /dev/null
+             DIRTY=1
+           fi
+           if ! git rebase "origin/$TARGET"; then
+             git rebase --abort || true
+             if [ "$DIRTY" = 1 ]; then
+               git stash pop > /dev/null || echo "::warning::the packaging changes could not be restored after the failed rebase"
+             fi
+             echo "::error::The version bump does not rebase onto origin/$TARGET — package.json changed on the branch after this release was cut. Resolve it by hand and re-run; forcing the push would drop those commits."
+             exit 1
+           fi
+           if [ "$DIRTY" = 1 ]; then
+             git stash pop > /dev/null || echo "::warning::the packaging changes could not be restored (git stash pop); the publish will use the tree as it is"
+           fi
+
            git push https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/${{ github.repository }} HEAD:"$TARGET"
            git tag -f "$TAG"
            git push -f origin "$TAG"
