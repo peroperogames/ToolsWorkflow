@@ -81,7 +81,6 @@ Every setting is reachable three ways: the `with:` input when calling the reusab
 | `resharper-ignore-rules` | `INSPECT_IGNORE_RULES` | *(empty)* | Comma-separated ReSharper naming rules whose findings are dropped, e.g. `Unity serialized field`. For a rule the analyser reports and the team's IDE cannot display or silence — see [The analyser and the IDE disagree](#the-analyser-and-the-ide-disagree). |
 | — | `UNITY_TIMEOUT` / `DOTNET_TIMEOUT` | `1800` | Seconds either build step may take before it is ended — the tool and everything it started — and reported as skipped. |
 | — | `UNITY_TEST_TIMEOUT` | `UNITY_TIMEOUT` | Seconds the Unity test run may take, separately from the build — a hanging suite then costs only its own deadline. |
-| — | `UNITY_TEST_PLATFORMS` | *(from the package)* | Operator override for the test platforms. Left empty — which is the normal state — the pipeline reads them from the package: EditMode always, and PlayMode too when a test assembly compiles for the player rather than the editor. That is a fact about the package's own asmdefs, so no repository states it. Set this only on a machine that cannot run PlayMode. |
 
 `code-review.yml` also needs the `APP_ID`, `APP_PK` and `OPENAI_API_KEY` secrets; `main.py` additionally reads `GITHUB_REPOSITORY`, `GITHUB_EVENT_NAME` and `GITHUB_EVENT_PATH` (set by Actions) or `GITHUB_PR_NUMBER` for a manual run.
 
@@ -331,6 +330,8 @@ The list is `SCOPED_REGISTRIES` in `unity_runner.py`. It is written into the pro
 **The scopes are merged; the URL is not.** A registry of the same name keeps every scope it already had and gains the ones it is missing — a mirror, or an extra scope somebody added, survives. The URL is the configured one, which is what lets a feed that moves reach the projects that already exist rather than only the ones created afterwards; a repoint is logged, because it changes where a project resolves packages from.
 
 ### Running the package's own tests
+
+**Both platforms run.** Every review runs the EditMode suite and the PlayMode suite. A package with no PlayMode tests produces no PlayMode cases, which costs seconds and needs no decision; a package whose tests are mostly PlayMode gets them run instead of being reported "tested" without them. Which platform a test runs in is Unity's decision — the assembly it lives in — so the pipeline does not try to predict it, and there is no setting for it.
 
 The package under review is also registered in the project's `testables` (next to its `file:` dependency), which is what makes Unity compile its test assemblies and run them. A package that is only a dependency has its tests **ignored, not failed** — the test run reports nothing at all, so a package with broken tests would look like a clean pass. Like the registries, the entry is written idempotently and re-applied on every run, so a project created before this existed is fixed rather than left silently untested.
 
