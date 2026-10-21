@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.95"
+VERSION = "2026-10-14.unity.96"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3270,15 +3270,21 @@ def changed_lines_by_file(files: List[Dict[str, Any]]) -> Dict[str, set]:
 ARTIFACTS_DIRNAME = ".ai-review-artifacts"
 
 
-def share_artifacts(owner: str, repo: str, number: int) -> None:
+# Set once the stage knows which pull request it is; `share_artifacts` runs in a
+# `finally`, which is after that and often after an early return.
+_CURRENT_PR: Tuple[str, str, int] = ("", "", 0)
+
+
+def share_artifacts() -> None:
     """Copy this run's reports where the workflow can upload them.
 
     Best-effort and small: XML and text files that a person would otherwise have
     to ask for access to the runner to read. A failing run whose evidence cannot
     be looked at is a failing run that gets re-run until it passes.
     """
+    owner, repo, number = _CURRENT_PR
     workspace = os.environ.get("GITHUB_WORKSPACE", "").strip()
-    if not workspace:
+    if not owner or not workspace:
         return
     source = pr_workspace.meta_dir(owner, repo, number)
     if not source.is_dir():
@@ -5146,6 +5152,8 @@ def run_stage(stage: str) -> int:
             return 0
 
     owner, repo, number = resolve_pull_request(event_name, payload)
+    global _CURRENT_PR
+    _CURRENT_PR = (owner, repo, number)
     gh = GitHubClient(config.github_token)
 
     log(f"ai-review {VERSION} [{stage}]")
@@ -5204,18 +5212,14 @@ def run_stage(stage: str) -> int:
         if not files:
             log("No changed files found; nothing to check.")
             return 0
-        code = stage_checks(gh, owner, repo, number, pr, files, config)
-        share_artifacts(owner, repo, number)
-        return code
+        return stage_checks(gh, owner, repo, number, pr, files, config)
 
     if stage == "static":
-        code = stage_static(
+        return stage_static(
             gh, owner, repo, number, pr,
             _changed_files(gh, owner, repo, number), config,
             event_name, payload,
         )
-        share_artifacts(owner, repo, number)
-        return code
 
     return stage_review(gh, owner, repo, number, pr, config, event_name, payload)
 
@@ -5242,11 +5246,17 @@ def main() -> int:
         )
         return 2
 
-    for name in STAGES if stage == "all" else (stage,):
-        code = run_stage(name)
-        if code:
-            return code
-    return 0
+    try:
+        for name in STAGES if stage == "all" else (stage,):
+            code = run_stage(name)
+            if code:
+                return code
+        return 0
+    finally:
+        # Runs whether the stage finished, returned early or raised: the reports
+        # it managed to write are the evidence, and they are worth the upload
+        # exactly when something went wrong.
+        share_artifacts()
 
 
 if __name__ == "__main__":
