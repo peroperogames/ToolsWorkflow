@@ -1375,6 +1375,24 @@ def run_tests(
             # killed by the timeout — and that is worth telling the pull request.
             if rc != 0:
                 result.tests_broke = True
+                result.platform_failures.append(
+                    {
+                        "platform": platform,
+                        "exit": rc,
+                        "timed_out": rc < 0,
+                        "timeout": UNITY_TEST_TIMEOUT,
+                    }
+                )
+                if rc == 3:
+                    # Unity Test Framework's own exit codes: 0 all passed,
+                    # 2 some failed, 3 the runner could not run the tests at all.
+                    # 3 is not a failing test, it is a run that never happened —
+                    # and the editor log is the only place that says why.
+                    log(
+                        f"  Unity exited 3 without a report: the test runner could "
+                        f"not run the {platform} tests (not a failing test). "
+                        "The editor log says why; it is uploaded beside the report."
+                    )
                 if not output.strip():
                     # Nothing was printed at all, so the output cannot name the
                     # test. The only way to find it is to run less of the suite:
@@ -1772,6 +1790,10 @@ class UnityResult:
         # in which case the name holds the smallest group that reproduced it.
         self.hung_test: str = ""
         self.hung_alone: bool = True
+        # Which platform failed to produce a report, and why: an exit code is a
+        # failed run and a deadline is a run that did not finish, and calling both
+        # "没有跑完" is wrong about at least one of them.
+        self.platform_failures: List[Dict[str, Any]] = []
         self.compile_errors: List[Dict[str, Any]] = []
         self.test_failures: List[Dict[str, Any]] = []
         self.sln_path: Optional[str] = None
@@ -1798,16 +1820,9 @@ class UnityResult:
             return ""
         if self.ok:
             if self.tests_broke:
-                hung = ""
-                if self.hung_test:
-                    hung = (
-                        f"（卡在 `{self.hung_test}`）"
-                        if self.hung_alone
-                        else f"（单独跑都过，最小的复现组合是 `{self.hung_test}`）"
-                    )
                 return (
-                    f"⚠️ Unity: 编译通过；单元测试没有跑完{hung}，"
-                    "也就没有报告，不能算通过。" + self._platform_table()
+                    f"⚠️ Unity: 编译通过；{self._failure_sentence_zh()}"
+                    "没有产出报告，不能算通过。" + self._platform_table()
                 )
             if not self.tests_reported:
                 return "⚠️ Unity: 编译通过；单元测试没有产出报告，本次未真正运行。"
@@ -1818,6 +1833,55 @@ class UnityResult:
         if not self.tests_ok:
             parts.append(f"{len(self.test_failures)} 个单元测试失败")
         return "🔴 Unity: " + "；".join(parts) + "。" + self._platform_table()
+
+    def _failure_sentence_zh(self) -> str:
+        """What went wrong, platform by platform, in the review's language.
+
+        A deadline and an exit code are different facts about a run — one did not
+        finish, the other failed — and the sentence keeps them apart. The test the
+        search settled on, when there is one, is added after them.
+        """
+        parts: List[str] = []
+        for failure in self.platform_failures:
+            platform = failure.get("platform") or "测试"
+            if failure.get("timed_out"):
+                seconds = failure.get("timeout") or 0
+                minutes = int(seconds) // 60 if seconds else 0
+                limit = f"{minutes} 分钟" if minutes else f"{seconds} 秒"
+                parts.append(f"{platform} 测试超时（{limit}）")
+            else:
+                parts.append(
+                    f"{platform} 测试运行失败（Unity 退出码 {failure.get('exit')}）"
+                )
+        text = "、".join(parts) or "测试运行失败"
+        if self.hung_test:
+            text += (
+                f"，卡在 `{self.hung_test}`"
+                if self.hung_alone
+                else f"，单独跑都过，最小的复现组合是 `{self.hung_test}`"
+            )
+        return text + "，"
+
+    def _failure_sentence_en(self) -> str:
+        """The same sentence for the job log, which is written in English."""
+        parts: List[str] = []
+        for failure in self.platform_failures:
+            platform = failure.get("platform") or "the test"
+            if failure.get("timed_out"):
+                parts.append(f"{platform} tests timed out")
+            else:
+                parts.append(
+                    f"{platform} tests failed to run (Unity exited "
+                    f"{failure.get('exit')})"
+                )
+        text = ", ".join(parts) or "the test run failed"
+        if self.hung_test:
+            text += (
+                f", hung in {self.hung_test}"
+                if self.hung_alone
+                else f", no single test hangs (smallest reproducing set: {self.hung_test})"
+            )
+        return text + ", so it"
 
     def _platform_table(self) -> str:
         """The per-platform totals as a markdown table, or "" when nothing ran.
@@ -1863,16 +1927,8 @@ class UnityResult:
             return ""
         if self.ok:
             if self.tests_broke:
-                where = ""
-                if self.hung_test:
-                    where = (
-                        f" (hung in {self.hung_test})"
-                        if self.hung_alone
-                        else f" (no single test hangs; smallest reproducing set: {self.hung_test})"
-                    )
                 return (
-                    "Unity: compiled; the test run did not finish, so it produced "
-                    f"no report{where}."
+                    f"Unity: compiled; {self._failure_sentence_en()} produced no report."
                 )
             if not self.tests_reported:
                 return "Unity: compiled; the test run produced no report."
