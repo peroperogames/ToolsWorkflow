@@ -528,11 +528,14 @@ def ensure_minimum_version(project: str, package: str, minimum: str, why: str) -
 
 
 def ensure_test_framework(project: str) -> None:
-    """Give the project a Test Framework new enough for the package's tests."""
+    """Give the project a Test Framework new enough for the package's tests.
+
+    The version and the reason for it live in the constants above; this line is
+    what the job log shows, so it says what changed and nothing else. A changelog
+    in a log line is read once and in the way of the run it is describing.
+    """
     ensure_minimum_version(
-        project, TEST_FRAMEWORK, MIN_TEST_FRAMEWORK,
-        "test assemblies written against the newer TestRunner API need it, and "
-        "1.3.4 hangs a [Repeat] over an async Task test",
+        project, TEST_FRAMEWORK, MIN_TEST_FRAMEWORK, "the package's tests need it"
     )
 
 
