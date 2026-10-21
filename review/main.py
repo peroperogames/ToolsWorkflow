@@ -58,7 +58,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.74"
+VERSION = "2026-10-14.unity.75"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -847,13 +847,18 @@ RESOLVE_DECIDER_PROMPT = (
     "otherwise.\n"
     "Decide which of those threads are now ADDRESSED by that code and can be "
     "marked resolved.\n"
-    'Reply with ONLY a JSON object: {"resolved": ["<thread id>", ...]}\n'
+    'Reply with ONLY a JSON object: {"resolved": [{"id": "<thread id>", '
+    '"reason": "<one sentence: what settled it>"}]}\n'
     "Rules:\n"
     "- Include a thread only when the current code clearly fixes or removes the "
     "issue it raised.\n"
     "- If the concern is still present, or you cannot tell, LEAVE IT OUT — an "
     "unresolved thread costs nothing, a wrongly resolved one hides a bug.\n"
-    "- Never include ids that are not in the list."
+    "- Never include ids that are not in the list.\n"
+    "- The `reason` is posted in the thread for its author: say what changed, or "
+    "which part of the discussion settled it, in the language of the thread. A "
+    "thread resolved without a reason is indistinguishable from one resolved by "
+    "mistake."
 )
 
 INCREMENTAL_DIRECTIVE = (
@@ -1253,8 +1258,14 @@ def post_inline_comments(
     number: int,
     commit_id: str,
     comments: List[Dict[str, Any]],
+    posted_ids: Optional[List[int]] = None,
 ) -> int:
-    """Post inline comments individually (used when there is no review to attach them to)."""
+    """Post inline comments individually (used when there is no review to attach them to).
+
+    ``posted_ids`` collects the ids GitHub gave back. What this run posted is
+    what the retirement pass must not resolve — a finding that is answered by
+    being marked resolved seconds after it appeared was never a finding at all.
+    """
     if not comments:
         return 0
     if not commit_id:
@@ -1263,8 +1274,12 @@ def post_inline_comments(
     posted = 0
     for c in comments:
         try:
-            gh.post_review_comment(owner, repo, number, commit_id, c)
+            created = gh.post_review_comment(owner, repo, number, commit_id, c)
             posted += 1
+            if posted_ids is not None and isinstance(created, dict):
+                comment_id = created.get("id")
+                if isinstance(comment_id, int):
+                    posted_ids.append(comment_id)
         except Exception as exc:  # noqa: BLE001 - one bad comment shouldn't stop the rest
             log(f"Warning: inline comment failed ({c.get('path')}:{c.get('line')}): {exc}")
     log(f"Posted {posted}/{len(comments)} inline comment(s).")
@@ -1871,6 +1886,8 @@ def settle_threads_and_approve(
     diff_files: Optional[List[Dict[str, Any]]] = None,
     allow_approve: bool = True,
     why_not: str = "New findings were raised",
+    skip_ids: Optional[List[int]] = None,
+    language: str = "",
 ) -> None:
     """Resolve the threads that are done with, then approve if none are left.
 
@@ -1881,10 +1898,13 @@ def settle_threads_and_approve(
     run, the whole pull request otherwise. ``why_not`` is the reason printed when
     approval is withheld: "the build did not run" and "the review found
     something" are both reasons, and only one of them is about the code.
+    ``skip_ids`` are the comments this run just posted, which are never resolved
+    here — see :func:`decide_resolved_threads`.
     """
     decide_resolved_threads(
         ai, gh, owner, repo, number, pr, "perotoolsbot[bot]",
         diff_files=diff_files, conversation=conversation,
+        skip_ids=skip_ids, language=language,
     )
 
     if not allow_approve:
@@ -1939,6 +1959,24 @@ def _first_json_object(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _resolution_note(reason: str, language: str) -> str:
+    """What to post in a thread that is being resolved.
+
+    The reason is the model's own sentence, in the thread's language; only when
+    it did not give one does this fall back to a stock sentence. A thread that
+    disappears without a word is indistinguishable from one resolved by mistake,
+    which is exactly what a silent resolution looked like.
+    """
+    text = " ".join((reason or "").split()).strip()
+    if text:
+        return f"✔️ {text}"
+    return (
+        "✔️ 已解决：新代码或这段讨论已经处理了这个问题。"
+        if "chinese" in resolve_language(language).lower()
+        else "✔️ Resolved: the code, or this discussion, now covers it."
+    )
+
+
 def decide_resolved_threads(
     ai: AIClient,
     gh: GitHubClient,
@@ -1949,12 +1987,19 @@ def decide_resolved_threads(
     bot_login: str,
     diff_files: Optional[List[Dict[str, Any]]] = None,
     conversation: str = "",
+    skip_ids: Optional[List[int]] = None,
+    language: str = "",
 ) -> int:
     """Resolve the review threads that have been settled.
 
     A thread counts as settled when the code dealt with it (``diff_files``) or
     when the discussion concluded it (``conversation``) — a concern answered in
     the thread is resolved even if no code changed.
+
+    ``skip_ids`` are the comments this run posted itself. They are never
+    candidates: a finding whose own comment arrived seconds ago has not been
+    dealt with by anything, and resolving it turns a review into a review that
+    said nothing. Every resolution posts its reason in the thread first.
     """
     try:
         threads = gh.list_review_threads(owner, repo, number)
@@ -1962,7 +2007,9 @@ def decide_resolved_threads(
         log(f"Warning: could not list review threads: {exc}")
         return 0
 
+    posted_now = set(skip_ids or [])
     candidates: List[Dict[str, Any]] = []
+    fresh = 0
     for thread in threads:
         if thread.get("isResolved"):
             continue
@@ -1972,15 +2019,24 @@ def decide_resolved_threads(
         # Only resolve our own threads, never a human reviewer's.
         if not is_bot_author(nodes[0].get("author")):
             continue
+        if posted_now and (
+            nodes[0].get("databaseId") in posted_now
+            or nodes[-1].get("databaseId") in posted_now
+        ):
+            fresh += 1
+            continue
         candidates.append(
             {
                 "id": thread.get("id"),
                 "path": thread.get("path"),
                 "outdated": bool(thread.get("isOutdated")),
                 "body": " ".join((nodes[0].get("body") or "").split())[:600],
+                "comment_id": nodes[0].get("databaseId"),
             }
         )
 
+    if fresh:
+        log(f"Not judging {fresh} thread(s) this run posted itself.")
     if not candidates:
         log("No unresolved bot review threads to consider.")
         return 0
@@ -2013,12 +2069,21 @@ def decide_resolved_threads(
         log("Thread-resolution decision returned no usable JSON; resolving nothing.")
         return 0
 
-    wanted = {str(x) for x in data["resolved"]}
+    wanted: Dict[str, str] = {}
+    for item in data["resolved"]:
+        if isinstance(item, str):
+            wanted[item] = ""
+        elif isinstance(item, dict) and item.get("id"):
+            wanted[str(item["id"])] = str(item.get("reason") or "").strip()
+
     known = {str(c["id"]) for c in candidates}
     resolved = 0
     for c in candidates:
-        if str(c["id"]) not in wanted or str(c["id"]) not in known:
+        tid = str(c["id"])
+        if tid not in wanted or tid not in known:
             continue
+        note = _resolution_note(wanted.get(tid, ""), language)
+        _reply_in_thread(gh, owner, repo, number, c.get("comment_id"), note, c["path"])
         try:
             gh.resolve_review_thread(c["id"])
             resolved += 1
@@ -2027,6 +2092,30 @@ def decide_resolved_threads(
             log(f"Warning: failed to resolve thread on {c['path']}: {exc}")
     log(f"Resolved {resolved}/{len(candidates)} thread(s).")
     return resolved
+
+
+def _reply_in_thread(
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    comment_id: Any,
+    body: str,
+    path: str,
+) -> None:
+    """Say why a thread is being resolved, inside the thread itself.
+
+    Best-effort: the resolution still happens if the reply does not, because a
+    thread that stays open for a failed comment is worse than a resolution whose
+    reason is only in the log — which is where it is said either way.
+    """
+    if not isinstance(comment_id, int):
+        log(f"Thread on {path} has no comment id; the reason is in the log only.")
+        return
+    try:
+        gh.post_review_comment_reply(owner, repo, number, comment_id, body)
+    except Exception as exc:  # noqa: BLE001 - best-effort
+        log(f"Warning: could not post the resolution note on {path}: {exc}")
 
 
 def _code_change_context(
@@ -2427,6 +2516,7 @@ def settle_after_review(
     conversation: str,
     allow_approve: bool,
     why_not: str = "New findings were raised",
+    skip_ids: Optional[List[int]] = None,
 ) -> None:
     """Retire what an earlier round raised, once a review has finished.
 
@@ -2436,7 +2526,8 @@ def settle_after_review(
     that reviews on demand would otherwise never retire anything.
 
     The threads are judged against the whole pull request here, because that is
-    what this run looked at.
+    what this run looked at. ``skip_ids`` are the comments this run posted: a
+    finding from a minute ago is not one the code has since dealt with.
     """
     if config.dry_run:
         return
@@ -2446,6 +2537,8 @@ def settle_after_review(
         diff_files=files,
         allow_approve=allow_approve,
         why_not=why_not,
+        skip_ids=skip_ids,
+        language=config.language,
     )
 
 
@@ -2593,12 +2686,23 @@ REVIEW_TOOLS: List[Dict[str, Any]] = [
             "name": "resolve_thread",
             "description": (
                 "Mark one of your review threads as resolved, once the code or the "
-                "discussion has dealt with it."
+                "discussion has dealt with it. The reason you give is posted in the "
+                "thread before it is resolved."
             ),
             "parameters": {
                 "type": "object",
-                "properties": {"thread_id": {"type": "string", "description": "id from list_threads."}},
-                "required": ["thread_id"],
+                "properties": {
+                    "thread_id": {"type": "string", "description": "id from list_threads."},
+                    "reason": {
+                        "type": "string",
+                        "description": (
+                            "One sentence, in the review language, saying what settled "
+                            "this thread — the code that changed, or the answer the "
+                            "discussion reached."
+                        ),
+                    },
+                },
+                "required": ["thread_id", "reason"],
             },
         },
     },
@@ -2906,11 +3010,15 @@ class ToolContext:
     approved: bool = False
     finish_requested: bool = False
     finish_nudged: bool = False
+    resolve_nudged: bool = False
     verdict: str = ""
     reply_text: str = ""
     reply_reason: str = ""
     block_approve: bool = False
     posted_comments: List[str] = field(default_factory=list)
+    # Ids of the comments this run posted, in order. The retirement pass runs
+    # right after the review and must not resolve a thread from this very list.
+    posted_ids: List[int] = field(default_factory=list)
 
 
 def _tool_read_file(args: Dict[str, Any], ctx: ToolContext) -> str:
@@ -2968,7 +3076,8 @@ def _tool_post_inline_comment(args: Dict[str, Any], ctx: ToolContext) -> str:
         ctx.inline_posted += 1
         return f"dry-run: would post on {normalized[0]['path']}:{normalized[0]['line']}"
     posted = post_inline_comments(
-        ctx.gh, ctx.owner, ctx.repo, ctx.number, ctx.heads, normalized
+        ctx.gh, ctx.owner, ctx.repo, ctx.number, ctx.heads, normalized,
+        posted_ids=ctx.posted_ids,
     )
     if not posted:
         return "error: GitHub rejected the comment"
@@ -3017,16 +3126,45 @@ def _tool_list_threads(args: Dict[str, Any], ctx: ToolContext) -> str:
     return "\n\n".join(parts)
 
 
+def _thread_comment_id(ctx: ToolContext, thread_id: str) -> Any:
+    """The id of a thread's first comment, which is where a reply goes."""
+    try:
+        for thread in ctx.gh.list_review_threads(ctx.owner, ctx.repo, ctx.number):
+            if str(thread.get("id")) != str(thread_id):
+                continue
+            nodes = (thread.get("comments") or {}).get("nodes") or []
+            return nodes[0].get("databaseId") if nodes else None
+    except Exception as exc:  # noqa: BLE001 - best-effort
+        log(f"Warning: could not look up thread {thread_id}: {exc}")
+    return None
+
+
 def _tool_resolve_thread(args: Dict[str, Any], ctx: ToolContext) -> str:
     thread_id = args.get("thread_id")
     if not thread_id:
         return "error: 'thread_id' is required"
+    reason = " ".join((args.get("reason") or "").split()).strip()
+    if not reason and not ctx.resolve_nudged:
+        # Asked once, then honoured: resolving is still better than a thread that
+        # stays open because the model would not write a sentence.
+        ctx.resolve_nudged = True
+        return (
+            "refused: put the reason in `reason`. It is posted in the thread "
+            "before the thread is resolved, so the author can see what settled "
+            "it — a thread that closes without a word is indistinguishable from "
+            "one closed by mistake. Then call resolve_thread again."
+        )
+    comment_id = _thread_comment_id(ctx, thread_id)
+    _reply_in_thread(
+        ctx.gh, ctx.owner, ctx.repo, ctx.number, comment_id,
+        _resolution_note(reason, ctx.config.language), str(thread_id),
+    )
     try:
         ctx.gh.resolve_review_thread(thread_id)
     except Exception as exc:  # noqa: BLE001
         return f"error: could not resolve: {exc}"
     ctx.resolved_threads += 1
-    return "resolved"
+    return "resolved, with the reason posted in the thread"
 
 
 def _tool_finish_reply(args: Dict[str, Any], ctx: ToolContext) -> str:
@@ -4636,9 +4774,15 @@ def stage_review(
         # A concern answered in the thread is settled even without a code change,
         # so re-check the open threads and approve once nothing is left. No diff
         # is passed: what settles a thread here is the discussion, not the code.
+        # The bot's own reply is part of that discussion, so it must not be read
+        # as the answer that settles the thread it was written into — hence the
+        # ids this run posted are left out.
         if not config.dry_run:
             settle_threads_and_approve(
-                ai, gh, owner, repo, number, pr, conversation=conversation
+                ai, gh, owner, repo, number, pr,
+                conversation=conversation,
+                skip_ids=list(reply_ctx.posted_ids) if reply_ctx is not None else [],
+                language=config.language,
             )
         return 0
 
@@ -4709,6 +4853,8 @@ def stage_review(
             diff_files=push_files if push_files else files,
             allow_approve=not build_blocked,
             why_not=no_approve_reason,
+            skip_ids=list(ctx.posted_ids),
+            language=config.language,
         )
         return 0
 
@@ -4730,12 +4876,14 @@ def stage_review(
         print(review_text)
         return 0
 
+    posted_ids: List[int] = []
     if config.silent:
         result = gh.post_comment(owner, repo, number, review_text)
         log("Posted review as a regular comment (silent mode).")
         # A regular comment cannot carry inline comments, so post them one by one.
         post_inline_comments(
-            gh, owner, repo, number, pr.get("head", {}).get("sha", ""), inline
+            gh, owner, repo, number, pr.get("head", {}).get("sha", ""), inline,
+            posted_ids=posted_ids,
         )
     else:
         try:
@@ -4749,17 +4897,21 @@ def stage_review(
             result = gh.post_review(owner, repo, number, review_text, event=event)
             log(f"Posted review with event: {event}")
             post_inline_comments(
-                gh, owner, repo, number, pr.get("head", {}).get("sha", ""), inline
+                gh, owner, repo, number, pr.get("head", {}).get("sha", ""), inline,
+                posted_ids=posted_ids,
             )
 
     # On a later push, retire the threads that push settled, then approve when
-    # the review came back clean and nothing is left open.
+    # the review came back clean and nothing is left open. The comments posted
+    # above are not candidates for that: they are this run's findings.
     settle_threads_and_approve(
         ai, gh, owner, repo, number, pr,
         conversation=conversation,
         diff_files=push_files if push_files else files,
         allow_approve=(event == "APPROVE") and not build_blocked,
         why_not=no_approve_reason,
+        skip_ids=posted_ids,
+        language=config.language,
     )
 
     return 0

@@ -41,7 +41,7 @@ You have tools — **use them**. Do not print JSON, do not imitate a report form
 | `get_file_diff(path)` | One file's diff with each line's absolute line number, when you are unsure which line is which. |
 | `post_inline_comment(path, quote, body, side?, start_quote?)` | Reporting a finding — one call per finding. `quote` is the target line copied verbatim from the diff (no line-number prefix, no `+`/`-` marker). |
 | `list_threads()` | Listing your review threads: the unresolved ones (with the id to resolve), and the resolved ones, which are already dealt with and must never be raised again. |
-| `resolve_thread(thread_id)` | Resolving a thread that the new code or the discussion has dealt with. |
+| `resolve_thread(thread_id, reason)` | Resolving a thread that the new code or the discussion has dealt with. `reason` is one sentence saying what settled it; it is posted in the thread before the thread is resolved, so the author can see why. |
 | `finish(verdict)` | Ending the review and stating your verdict. Always call it last. `verdict` is `approve` (nothing to fix, merge as-is), `comment` (findings worth addressing, not blocking) or `block` (must not merge). |
 
 ## Workflow
