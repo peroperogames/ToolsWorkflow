@@ -58,7 +58,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.71"
+VERSION = "2026-10-14.unity.72"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3372,6 +3372,11 @@ def run_static_analysis(
     UnityEngine references only in Unity's — and each sees code the other does
     not, so both run and their findings are merged.
 
+    The Unity solution is inspected for the package's own projects only, so a
+    package is still the subject of the analysis while every reference between
+    one of its assemblies and another still resolves — see the comment on
+    ``filters`` below for what pointing inspectcode at a lone csproj costs.
+
     Deterministic, project-specific checks the model should not guess at.
     Best-effort: any failure just means no static-analysis comments.
     """
@@ -3381,16 +3386,29 @@ def run_static_analysis(
         return 0
 
     targets: List[str] = []
+    # Targets a project filter applies to: a solution inspected for the package's
+    # own projects, rather than for everything it contains.
+    filters: Dict[str, List[str]] = {}
     if kind is not None and kind.has_solution:
         targets.append(kind.solution)
     if unity is not None:
-        # The package's own generated projects come first: they are what the
-        # package is, so the analysis is about the reviewed code and nothing
-        # else, and a csproj works where a solution is missing or unusable. The
-        # solution is the fallback for whatever they do not cover.
-        targets.extend(unity.package_projects)
-        if not unity.package_projects and unity.sln_path:
+        # The package's own generated projects are what the analysis is *about*,
+        # but not what it is *pointed at*. Pointed at a lone csproj, inspectcode
+        # resolves the other projects it references from their build outputs, and
+        # Unity never builds them in that shape — so every cross-assembly base
+        # type is unresolved, and an unresolved `protected override` reads as a
+        # new protected member, which is CS0628 on every one of them. Pointed at
+        # the solution, the same projects load as sources and the reference
+        # resolves; `--project` keeps the findings on the package's own code.
+        if unity.sln_path:
             targets.append(unity.sln_path)
+            names = [Path(p).stem for p in unity.package_projects]
+            if names:
+                filters[unity.sln_path] = names
+        else:
+            # Without a solution the projects still give an analysis; it just
+            # cannot resolve what the package references.
+            targets.extend(unity.package_projects)
 
     # The same file can arrive twice — the repository's own solution and the one
     # the Unity step found, which are the same solution when generation wrote
@@ -3405,10 +3423,17 @@ def run_static_analysis(
             key = target
         if key in seen_targets:
             log(f"Inspecting {Path(target).name} once, not twice.")
+            # A filter belongs to the target it arrived with, and the entry kept
+            # was the earlier one: when that is the repository's own solution the
+            # whole of it is what should be inspected, not the package inside it.
+            filters.pop(target, None)
             continue
         seen_targets.add(key)
         unique.append(target)
     targets = unique
+    if filters:
+        kept = set(targets)
+        filters = {target: names for target, names in filters.items() if target in kept}
     if not targets:
         if unity is not None and not unity.ran:
             # The reason is upstream and worth naming: a package's projects only
@@ -3430,10 +3455,37 @@ def run_static_analysis(
     if not changed:
         return 0
 
+    report_dir = pr_workspace.meta_dir(owner, repo, number)
     analysis = inspect_code.analyze(
         workdir, changed, targets,
-        report_dir=pr_workspace.meta_dir(owner, repo, number),
+        report_dir=report_dir,
+        projects=filters,
     )
+
+    # A solution is a bigger thing to load than its projects, and a Unity run can
+    # leave it in a state MSBuild refuses — the case the project target existed
+    # for. The projects are still worth inspecting then: the analysis loses
+    # reference resolution, which the log says, and keeps the findings that do
+    # not need it. Only when the *filtered* solution produced nothing.
+    unity_solution = next((t for t in filters if t not in analysis.inspected), "")
+    if unity_solution and unity is not None and unity.package_projects:
+        log(
+            f"ReSharper: {Path(unity_solution).name} produced no report; inspecting the "
+            "package's own projects directly instead."
+        )
+        fallback = inspect_code.analyze(
+            workdir, changed, list(unity.package_projects), report_dir=report_dir
+        )
+        if fallback.ran:
+            # The other target, if any, reported already; its findings stay.
+            analysis = inspect_code.Analysis(
+                issues=analysis.issues + fallback.issues,
+                all_issues=analysis.all_issues + fallback.all_issues,
+                targets=analysis.targets + fallback.targets,
+                inspected=analysis.inspected + fallback.inspected,
+                reports=analysis.reports + fallback.reports,
+                duplicates=analysis.duplicates + fallback.duplicates,
+            )
 
     if analysis.targets and not analysis.ran:
         # Solutions were there to inspect and none produced a report. Saying

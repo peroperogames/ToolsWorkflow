@@ -179,8 +179,23 @@ def repo_settings(workdir: str) -> Optional[str]:
     return None
 
 
-def run_inspectcode(target: str, workdir: str, report: Path, timeout: int = 1200) -> bool:
+def run_inspectcode(
+    target: str,
+    workdir: str,
+    report: Path,
+    timeout: int = 1200,
+    projects: Sequence[str] = (),
+) -> bool:
     """Run ``jb inspectcode`` over ``target``, writing ``report``.
+
+    ``projects`` names the projects inside ``target`` to report on, when
+    ``target`` is a solution. Everything else in the solution is still *loaded* —
+    which is the point: a project inspected on its own resolves its references
+    from their build outputs, and those do not exist unless something built them
+    in the shape inspectcode expects. Pointed at the solution, the referenced
+    project is loaded as source and the reference resolves no matter what was
+    compiled. ``--project`` keeps the findings to the code under review, so the
+    rest of the solution costs project loading and nothing else.
 
     Returns whether a report was actually produced. The report path is per
     solution and inside the PR's own directory, so two reviews running at the
@@ -190,12 +205,19 @@ def run_inspectcode(target: str, workdir: str, report: Path, timeout: int = 1200
     if not binary:
         return False
     cmd = [binary, "inspectcode", target, f"--output={report}", "--format=Xml", *inspect_args()]
+    for name in projects:
+        cmd.append(f"--project={name}")
     settings = repo_settings(workdir)
     if settings:
         cmd.append(f"--settings={settings}")
         log(f"ReSharper: using the repository's settings from {Path(settings).name}.")
 
     log(f"Running ReSharper inspectcode on {Path(target).name} ...")
+    if projects:
+        log(
+            f"ReSharper: {Path(target).name} is inspected for {_sample(list(projects))} "
+            "only; the rest of the solution is loaded so their references resolve."
+        )
     try:
         rc, output = subproc.run(cmd, timeout, cwd=workdir)
     except FileNotFoundError:
@@ -436,11 +458,14 @@ class Analysis:
     ``all_issues`` is everything the inspection reported, including the parts of
     the file it is not going to be asked about — which is where the caller looks
     to find out whether a name it wants to rename is *declared* somewhere else.
+    ``inspected`` holds the targets that produced a report, so a caller can tell
+    which half of a two-solution analysis actually happened.
     """
 
     issues: List[Dict[str, Any]] = field(default_factory=list)
     all_issues: List[Dict[str, Any]] = field(default_factory=list)
     targets: List[str] = field(default_factory=list)
+    inspected: List[str] = field(default_factory=list)
     reports: int = 0
     duplicates: int = 0
 
@@ -455,15 +480,19 @@ def analyze(
     changed_lines: Dict[str, Set[int]],
     targets: Sequence[str],
     report_dir: Optional[Path] = None,
+    projects: Optional[Dict[str, Sequence[str]]] = None,
 ) -> Analysis:
     """Run ReSharper over every target and return the issues on changed lines.
 
     ``targets`` are the solutions to inspect — the repository's own and/or the
     Unity-generated one. An empty list means there is nothing to analyse, which
     the result distinguishes from an inspection that produced no report.
+    ``projects`` maps a target to the projects inside it that the findings should
+    be limited to; a target with no entry is inspected whole.
     Never raises: static analysis is best-effort and must not break the review.
     """
     targets = list(targets)
+    projects = dict(projects or {})
     try:
         if not workdir or not targets:
             log("No solution to inspect; skipping static analysis.")
@@ -472,13 +501,29 @@ def analyze(
 
         collected: List[Dict[str, Any]] = []
         reports = 0
+        inspected: List[str] = []
         for index, target in enumerate(targets, start=1):
             report = report_dir / f"resharper-{index}.xml"
             if report.exists():
                 report.unlink()
-            if not run_inspectcode(target, workdir, report):
-                continue
+            wanted = projects.get(target) or ()
+            if not run_inspectcode(target, workdir, report, projects=wanted):
+                if not wanted:
+                    continue
+                # A filter that matches nothing produces no report at all — it
+                # must not read as "nothing to report". The whole solution is
+                # still the correct analysis, only a wider one, so fall back to
+                # it rather than losing the step.
+                log(
+                    "ReSharper: none of " + _sample(list(wanted)) + " matched a project in "
+                    + f"{Path(target).name}; inspecting it whole instead."
+                )
+                if report.exists():
+                    report.unlink()
+                if not run_inspectcode(target, workdir, report):
+                    continue
             reports += 1
+            inspected.append(target)
             issues = parse_report(str(report))
             for issue in issues:
                 issue["file"] = relative_to_clone(issue["file"], target, workdir)
@@ -520,6 +565,7 @@ def analyze(
             issues=kept,
             all_issues=issues,
             targets=targets,
+            inspected=inspected,
             reports=reports,
             duplicates=duplicates,
         )
