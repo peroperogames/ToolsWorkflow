@@ -80,7 +80,7 @@ Every setting is reachable three ways: the `with:` input when calling the reusab
 | `resharper-build` | `INSPECT_BUILD` | `false` | Let `jb inspectcode` build the solution before inspecting it. Off by default: the pipeline already compiled the code, and Unity's generated projects do not build cleanly under a generic MSBuild, which fails the step with no report at all. |
 | `resharper-ignore-rules` | `INSPECT_IGNORE_RULES` | *(empty)* | Comma-separated ReSharper naming rules whose findings are dropped, e.g. `Unity serialized field`. For a rule the analyser reports and the team's IDE cannot display or silence — see [The analyser and the IDE disagree](#the-analyser-and-the-ide-disagree). |
 | — | `UNITY_TIMEOUT` / `DOTNET_TIMEOUT` | `1800` | Seconds either build step may take before it is ended — the tool and everything it started — and reported as skipped. |
-| — | `UNITY_TEST_TIMEOUT` | `UNITY_TIMEOUT` | Seconds the Unity test run may take, separately from the build — a hanging suite then costs only its own deadline. |
+| — | `UNITY_TEST_TIMEOUT` | `600` | Seconds the Unity test run may take, separately from the build — a hanging suite then costs only its own deadline. Every suite seen here finishes in seconds, so ten minutes is already generous: a run still going is stuck, not slow. |
 
 `code-review.yml` also needs the `APP_ID`, `APP_PK` and `OPENAI_API_KEY` secrets; `main.py` additionally reads `GITHUB_REPOSITORY`, `GITHUB_EVENT_NAME` and `GITHUB_EVENT_PATH` (set by Actions) or `GITHUB_PR_NUMBER` for a manual run.
 
@@ -405,7 +405,7 @@ The name goes into the status comment (`**测试卡在**：…`) and into the su
 
 Two things it cannot do. The filter is a regular expression over the full test name, so the pattern allows the suffixes the report adds and the sources do not (a generic fixture's `<RectMask2D>`, a `[TestCase]` argument list). And a method that **finishes on its own** while the rest of the suite is what hangs is reported as where the search stopped, with the log saying so — the hang then needs company, and the answer is not one method but a pair.
 
-`UNITY_TEST_TIMEOUT` is the same problem seen from the other side. One hung suite spent thirty minutes of a job before the CLI's own timeout ended it, and the only deadline that could be moved was the build's. A test run with a deadline of its own can be cut short without shortening the build, which is the difference between a lever and a re-run.
+`UNITY_TEST_TIMEOUT` is the same problem seen from the other side. One hung suite spent thirty minutes of a job before the CLI's own timeout ended it, and the only deadline that could be moved was the build's. A test run with a deadline of its own can be cut short without shortening the build, which is the difference between a lever and a re-run. It defaults to **ten minutes**, not the build's thirty: no suite seen here runs longer than a minute, so a test run still going after ten is stuck, and the remaining twenty buy nothing but a longer wait for the answer.
 
 ### What a build and a test run print
 

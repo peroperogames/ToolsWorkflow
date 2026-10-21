@@ -37,11 +37,11 @@ import tool_path
 
 UNITY_TIMEOUT = int(os.environ.get("UNITY_TIMEOUT", "1800"))  # 30 min default
 
-# The test run gets its own deadline, defaulting to the build one. A suite that
-# hangs costs the whole of it — one such run spent thirty minutes of a job before
-# the CLI's timeout ended it — and capping the tests without touching the build is
-# the difference between a lever and a re-run.
-UNITY_TEST_TIMEOUT = int(os.environ.get("UNITY_TEST_TIMEOUT", str(UNITY_TIMEOUT)))
+# The test run gets its own deadline, ten minutes rather than the build's half
+# hour: every suite seen here finishes in seconds, so a run still going after ten
+# minutes is not slow — it is stuck, and the extra twenty minutes buy nothing.
+# Separate from the build on purpose, so raising one does not raise the other.
+UNITY_TEST_TIMEOUT = int(os.environ.get("UNITY_TEST_TIMEOUT", "600"))
 
 # What the editor says when the run is already lost. Both phrases come from a
 # Mono crash, not from a slow test: the runtime prints the dump and then does not
@@ -1290,11 +1290,7 @@ def run_tests(
         # suite that "got slow" visible before it becomes a timeout.
         started = time.monotonic()
         if editor and display and platform == "PlayMode":
-            log(
-                f"Unity: in an editor with a window on display {display} — batch "
-                "mode never reaches the end of a frame, so WaitForEndOfFrame and "
-                "screen captures cannot work there."
-            )
+            log(f"Unity: in an editor with a window on display {display}.")
             rc, output = run_unity_tests_windowed(
                 editor, project, results, platform, UNITY_TEST_TIMEOUT,
                 results_dir / f"tests-{pr_workspace.sanitize(platform)}.editor.log",
