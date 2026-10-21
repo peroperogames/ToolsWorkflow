@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -1700,6 +1701,77 @@ class UnityResult:
         return "Unity: " + ", ".join(parts) + "."
 
 
+def _editor_pids(project: str) -> List[int]:
+    """PIDs of the editors that have this project open.
+
+    Read from ``/proc`` because there is no portable way to ask Unity, and the
+    command line is the only place the project path appears. Off POSIX this says
+    nothing: the runner is Linux, and a local Windows run does not have the
+    problem often enough to justify another dependency.
+    """
+    if os.name == "nt":
+        return []
+    found: List[int] = []
+    try:
+        entries = list(Path("/proc").iterdir())
+    except OSError:
+        return []
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        cmdline = raw.replace(b"\x00", b" ").decode("utf-8", "replace")
+        if project in cmdline:
+            found.append(int(entry.name))
+    return found
+
+
+def reap_stale_editor(project: str) -> None:
+    """End the editor an earlier run left holding this project, and clear its lock.
+
+    Every run starts by generating project files, and Unity refuses to open a
+    project another editor has open:
+
+        Error: The project at "…" is already open in a running Editor (PID 295801).
+
+    A run killed at its deadline, a cancelled job, or somebody trying the tests by
+    hand all leave that behind — and because the check happens *before* anything
+    else, every later run of that pull request loses its build, its tests and its
+    static analysis to a process nobody is looking at. The project is ours and
+    this runs before anything of ours is started, so anything holding it is stale
+    by definition.
+    """
+    pids = _editor_pids(project)
+    if pids:
+        log(f"Unity: ending editor(s) left on this project by an earlier run: {pids}.")
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and _editor_pids(project):
+            time.sleep(1)
+        for pid in _editor_pids(project):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        if _editor_pids(project):
+            log("Unity: an editor is still holding the project; the run may fail.")
+            return
+    lock = Path(project) / "Temp" / "UnityLockfile"
+    try:
+        if lock.exists():
+            lock.unlink()
+            log("Unity: removed a stale UnityLockfile.")
+    except OSError as exc:
+        log(f"Unity: could not remove the stale lock file: {exc}")
+
+
 def analyze(
     clone_dir: str, owner: str, repo: str, number: int, kind: "repo_kind.Kind"
 ) -> UnityResult:
@@ -1724,6 +1796,7 @@ def analyze(
             return result
 
         project = project_dir(owner, repo, number)
+        reap_stale_editor(project)
         if not ensure_package(project, kind.package_name, kind.package_root):
             return result
 
