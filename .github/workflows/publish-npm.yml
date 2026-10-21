@@ -123,17 +123,25 @@ jobs:
            git tag -f "$TAG"
            git push -f origin "$TAG"
 
-      - name: Show .npmrc
-        run: |
-          echo "==== show /root/.npmrc ===="
-          cat /root/.npmrc || echo "No /root/.npmrc"
-          echo "==== show project .npmrc ===="
-          cat .npmrc || echo "no project .npmrc"
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
+
+      - name: Check npm auth
+        run: |
+          # The login lives in the job user's own ~/.npmrc, done once by hand on
+          # the runner. Reading /root/.npmrc (what this step used to do) can only
+          # ever print "No such file": the job does not run as root, and that made
+          # a missing login look exactly like a broken registry.
+          if [ -f "$HOME/.npmrc" ]; then
+            echo "found $HOME/.npmrc; registries with credentials:"
+            grep -oE '^//[^:]+:' "$HOME/.npmrc" || true
+          else
+            echo "::warning::no $HOME/.npmrc — npm login has not been run for $(id -un) on this runner"
+          fi
+          # Fails loudly now rather than after three retries of the real publish.
+          npm whoami --registry "$NPM_URL" || echo "::warning::npm whoami failed — the publish will fail the same way"
 
       - name: Publish with retry
         run: |
