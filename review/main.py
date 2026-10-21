@@ -58,7 +58,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.82"
+VERSION = "2026-10-14.unity.83"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -2081,6 +2081,14 @@ def decide_resolved_threads(
     for c in candidates:
         tid = str(c["id"])
         if tid not in wanted or tid not in known:
+            continue
+        # Another run of this pull request may have got here first: runs used to
+        # overlap freely, and each posted its own "why this is resolved" note. The
+        # thread's state is asked again, now, and a thread already settled is left
+        # alone.
+        probe = getattr(gh, "thread_is_resolved", None)
+        if callable(probe) and probe(c["id"]) is True:
+            log(f"  {c['path']}: already resolved by another run; no note.")
             continue
         note = _resolution_note(wanted.get(tid, ""), language)
         _reply_in_thread(gh, owner, repo, number, c.get("comment_id"), note, c["path"])

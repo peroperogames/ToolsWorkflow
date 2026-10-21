@@ -38,6 +38,17 @@ mutation($threadId: ID!) {
 }
 """
 
+# One thread's current state, asked immediately before it is resolved: another
+# run of the same pull request may have resolved it since this one listed the
+# threads, and resolving it twice means telling the author twice.
+THREAD_STATE_QUERY = """
+query($threadId: ID!) {
+  node(id: $threadId) {
+    ... on PullRequestReviewThread { isResolved }
+  }
+}
+"""
+
 
 class GitHubClient:
     """Minimal GitHub REST API client for pull request reviews."""
@@ -140,6 +151,21 @@ class GitHubClient:
     def resolve_review_thread(self, thread_id: str) -> Dict[str, Any]:
         """Mark a review thread as resolved."""
         return self.graphql(RESOLVE_THREAD_MUTATION, {"threadId": thread_id})
+
+    def thread_is_resolved(self, thread_id: str) -> Optional[bool]:
+        """Whether the thread is resolved *now*, or None when that cannot be told.
+
+        Asked right before resolving, because runs of the same pull request can
+        overlap: each lists the threads, each finds the same ones unresolved, and
+        the author otherwise gets one "why this is resolved" note per run.
+        """
+        try:
+            data = self.graphql(THREAD_STATE_QUERY, {"threadId": thread_id})
+        except Exception:  # noqa: BLE001 - the caller simply resolves as before
+            return None
+        node = data.get("node") or {}
+        value = node.get("isResolved")
+        return value if isinstance(value, bool) else None
 
     def get_pull_request(self, owner: str, repo: str, number: int) -> Dict[str, Any]:
         """Fetch metadata for a single pull request."""

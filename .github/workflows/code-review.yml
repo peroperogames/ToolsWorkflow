@@ -103,6 +103,14 @@ on:
 jobs:
   review:
     runs-on: [build-server, unitypkg-share]
+    # One run per pull request at a time. Every comment starts its own run, so
+    # five replies written within a minute were five runs listing the same
+    # unresolved threads at the same moment, settling all of them and posting a
+    # note for each — four identical "✔️ fixed" replies in one thread. Queued
+    # rather than cancelled, so every comment still gets an answer, in turn.
+    concurrency:
+      group: ai-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+      cancel-in-progress: false
     # The one ceiling the run cannot escape. A composite action's steps may not
     # set `timeout-minutes` of their own, and each stage bounds its own
     # subprocesses, so this bounds the job: 360 minutes is GitHub's default and
