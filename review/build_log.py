@@ -11,7 +11,7 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Sequence, Tuple
 
 # `Assets/Foo.cs(12,5): error CS0103: The name 'x' does not exist`
 # MSBuild's shape, which Unity's editor log carries through unchanged.
@@ -136,6 +136,49 @@ def format_test_failures(
     if len(failures) > limit:
         lines.append(f"... and {len(failures) - limit} more")
     return lines
+
+
+def parse_nunit_summary(path: Path) -> Dict[str, Any]:
+    """The totals a NUnit report carries on its root element.
+
+    Unity writes them on ``<test-run total=… passed=… failed=… skipped=…
+    duration=…>``, which is what turns "11 of them failed" into a table a reader
+    can take in at a glance: how many cases ran, how long each platform took.
+    """
+    try:
+        tree = ET.parse(path)
+    except (ET.ParseError, OSError) as exc:
+        log(f"Could not parse the test report's totals: {exc}")
+        return {}
+    root = tree.getroot()
+    summary: Dict[str, Any] = {}
+    for key in ("total", "passed", "failed", "skipped", "inconclusive"):
+        value = root.get(key)
+        if value is not None:
+            try:
+                summary[key] = int(value)
+            except ValueError:
+                continue
+    duration = root.get("duration")
+    if duration is not None:
+        try:
+            summary["duration"] = float(duration)
+        except ValueError:
+            pass
+    return summary
+
+
+def split_test_name(name: str) -> Tuple[str, str]:
+    """``Ns.Class.Method(args)`` -> ``("Ns.Class", "Method(args)")``.
+
+    The class is what a reader groups by — eleven failures in one fixture are one
+    problem, not eleven — and the arguments are part of the case, not the class.
+    """
+    text = (name or "unknown test").strip()
+    head, _, method = text.rpartition(".")
+    if not head:
+        return "", method
+    return head, method
 
 
 def parse_compile_errors(text: str) -> List[Dict[str, Any]]:

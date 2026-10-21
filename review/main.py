@@ -59,7 +59,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.89"
+VERSION = "2026-10-14.unity.90"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3262,6 +3262,22 @@ def changed_lines_by_file(files: List[Dict[str, Any]]) -> Dict[str, set]:
     return result
 
 
+def _test_duration(seconds: Any) -> str:
+    """A report's duration as something a table cell can hold."""
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        return "—"
+    if value < 60:
+        return f"{value:.1f}s"
+    return f"{int(value) // 60}m {int(value) % 60}s"
+
+
+def _table_cell(text: str) -> str:
+    """Markdown table cells have no newlines and no raw pipes."""
+    return " ".join((text or "").replace("|", "\\|").split())
+
+
 def run_artifacts_url() -> str:
     """Where this run's uploaded reports live, or "" outside GitHub Actions.
 
@@ -3363,11 +3379,33 @@ def report_build_result(
         for e in orphan_errors[:20]:
             where = f"`{e['file']}:{e['line']}` " if e.get("file") else ""
             status_lines.append(f"- {where}{e['code']}: {e['message']}")
+    # What ran, as numbers: how many cases, how many failed, how long it took.
+    # "11 failed" is not the same fact as "11 of 129 failed in 2m 42s", and the
+    # second one is what tells a reviewer whether the suite is healthy.
+    runs = getattr(result, "platform_runs", []) or []
+    if runs:
+        status_lines.append("\n**测试结果**：")
+        status_lines.append("| 平台 | 用例 | 通过 | 失败 | 跳过 | 耗时 |")
+        status_lines.append("| --- | --- | --- | --- | --- | --- |")
+        for run in runs:
+            summary = run.get("summary") or {}
+            status_lines.append(
+                f"| {run.get('platform', '?')} | {summary.get('total', 0)} "
+                f"| {summary.get('passed', 0)} | {summary.get('failed', 0)} "
+                f"| {summary.get('skipped', 0)} | {_test_duration(summary.get('duration'))} |"
+            )
     if result.test_failures:
-        status_lines.append("\n**单元测试失败**：")
-        for t in result.test_failures[:20]:
-            msg = (t.get("message") or "").splitlines()[0][:200] if t.get("message") else ""
-            status_lines.append(f"- {t['name']}" + (f" — {msg}" if msg else ""))
+        status_lines.append(f"\n**失败用例（{len(result.test_failures)}）**：")
+        status_lines.append("| 类 | 用例 | 消息 |")
+        status_lines.append("| --- | --- | --- |")
+        for t in result.test_failures[:30]:
+            fixture, method = build_log.split_test_name(t.get("name") or "")
+            first = (t.get("message") or "").splitlines()[0][:160] if t.get("message") else ""
+            status_lines.append(
+                f"| {_table_cell(fixture) or '—'} | {_table_cell(method)} | {_table_cell(first)} |"
+            )
+        if len(result.test_failures) > 30:
+            status_lines.append(f"| … | 其余 {len(result.test_failures) - 30} 个 | |")
         # The list says which tests; this says what they said. A comment is where
         # the failing run is read, and "AssertionException" alone leaves the
         # author to run the suite again to see the frames that matter.

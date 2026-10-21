@@ -1330,6 +1330,11 @@ def run_tests(
         took = build_log.format_duration(time.monotonic() - started)
         if results.exists():
             result.tests_reported = True
+            summary = build_log.parse_nunit_summary(results)
+            if summary:
+                result.platform_runs.append(
+                    {"platform": platform, "summary": summary, "report": str(results)}
+                )
             failures = build_log.parse_nunit_failures(results)
             result.test_failures.extend(failures)
             if failures:
@@ -1769,6 +1774,10 @@ class UnityResult:
         # The generated projects that compile the package itself — the precise
         # thing static analysis should look at.
         self.package_projects: List[str] = []
+        # One entry per platform that produced a report: its name, the totals the
+        # report carries and where it was written — the numbers the pull request's
+        # summary table is built from.
+        self.platform_runs: List[Dict[str, Any]] = []
 
     @property
     def ok(self) -> bool:
