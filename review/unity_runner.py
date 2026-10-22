@@ -2046,9 +2046,10 @@ class UnityResult:
             platform = failure.get("platform") or "测试"
             lines.append("")
             lines.append("")
+            # No "没有产出报告" here: the line above the table already says it.
             lines.append(
-                f"**{platform} 没有产出报告，编辑器日志里 {diagnosis.get('total', 0)} "
-                f"次异常、{diagnosis.get('kinds', 0)} 类**："
+                f"**{platform} 编辑器日志里的异常（{diagnosis.get('total', 0)} 次、"
+                f"{diagnosis.get('kinds', 0)} 类）**："
             )
             for item in exceptions:
                 frame = item.get("frame") or ""
@@ -2057,7 +2058,9 @@ class UnityResult:
             verdict = diagnosis.get("verdict") or ""
             if verdict:
                 lines.append("")
-                lines.append(f"测试运行器自己的结论：`{verdict}`")
+                # The runner's own closing line, with the code it wanted: the
+                # process exit code above is the editor's, not the test runner's.
+                lines.append(f"{platform} 测试结果：`{verdict}`")
         return "\n".join(lines)
 
     def _platform_table(self) -> str:

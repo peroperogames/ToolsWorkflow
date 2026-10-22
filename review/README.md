@@ -400,11 +400,11 @@ When the run actually died, the exit code says so, and the status comment is pos
 **The editor log is read, not only uploaded.** A run that dies before writing its NUnit file leaves one line of output — `Unity exited with code 3 before reporting results` — and a 300 KB editor log, and the reason is in the log: the same exception, thrown once per fixture while the runner was setting each of them up. `build_log.parse_editor_diagnosis` groups the exceptions by message, counts them, keeps the outermost frame that is not engine plumbing (the fixture, not `Assert.Fail`) and quotes the runner's own verdict. UIQueen PR #3 is the case that made it worth writing: 23 exceptions in 2 kinds,
 
 ```
-**PlayMode 没有产出报告，编辑器日志里 23 次异常、2 类**：
+**PlayMode 编辑器日志里的异常（23 次、2 类）**：
 - `AssertionException: There is no Addressables Settings in project, please create it!` ×16 — `MDSampleInit.Init`
 - `NullReferenceException: Object reference not set to an instance of an object` ×7 — `DefaultPanelInserterTests.IPrebuildSetup.Setup`
 
-测试运行器自己的结论：`Test run completed. Exiting with code 3 (RunError). Multiple unexpected errors happened while running tests.`
+PlayMode 测试结果：`Test run completed. Exiting with code 3 (RunError). Multiple unexpected errors happened while running tests.`
 ```
 
 The count is what makes it diagnosable rather than merely loud: sixteen of one assertion means every fixture that needs Addressables fails, not that one test is flaky. It goes into `summary()`, so the pull request comment, the job log and the review prompt all see it — the model approving a change is told why the suite did not run.
