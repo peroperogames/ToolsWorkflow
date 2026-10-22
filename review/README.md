@@ -29,6 +29,8 @@ jobs:
       APP_PK: ${{ secrets.APP_PK }}
 ```
 
+**`synchronize` is what makes a push review anything.** Without it in the caller's `pull_request` types, a push starts no run at all, and every review comes from a comment — which judges the whole pull request by design. The pipeline cannot review a push it was never told about; the log line `Full review: asked for by a comment …` is the one that says so.
+
 The GitHub App token is generated in `code-review.yml` via `actions/create-github-app-token` and passed to the composite action as `github-token`. **It lives for one hour**, and the clock starts when the token is minted, not when the gate starts: a run that spends longer than that testing and analysing (two thirty-minute test timeouts are enough) reaches the reporting step with nothing left to authenticate with, and GitHub answers `401 Bad credentials`. That is not a comment worth retrying — the log says so in as many words — and it is a reason to make the gate finish in minutes rather than a reason to post harder. Per-PR state lives in the runner's working directory (not inside the action): each pull request owns one directory named `<repo>-PR<number>` that holds both its session and its Unity project, and the whole directory is removed when the PR closes.
 
 ## Requirements
@@ -685,6 +687,8 @@ Handed this run the last 15 message(s) of history: 15 omitted to stay under 40k 
 That is enough, because what a run needs from the earlier ones is *what was raised*, and the threads are exactly that — `list_threads` is one call away, and it is authoritative in a way the transcript never was. Measured on a ten-run session: 72k tokens of history became 37k handed to the run, with its own new turns intact. The budget within a run (`MAX_AGENT_CONTEXT_TOKENS`) still applies on top of this.
 
 The fixed cost of a step is small by comparison — the prompt is ~1.7k tokens and the tool schemas ~0.8k — so what a review of a tiny push costs is now roughly *steps × (history + what it read)*, and `read_file` returns at most 8000 characters.
+
+**A run is also told what it already said.** A review of a later push is handed the new commits and the tail of the session, and when the code has been moved between files the same finding looks brand new. AccessKing PR #3 is what that looks like: the same "the result collection is not released under an exception" concern was raised and resolved five times — `CollectionPool.cs`, `CommandOperationAsyncExtensions.cs` twice, `CommandBus.cs`, `CommandOperation.cs:98` — and then raised a sixth time on `CommandOperation.Extensions.cs:57`, where the settle step closed it again two minutes later. The model was never shown the threads, so it could not know. It is now: `threads_briefing` renders the threads already on the pull request (path, line, open or resolved, the opening 160 characters), and the turn carries them with an instruction that leaves exactly one door open — a resolved thread is done, *unless the new commits changed the answer or the resolution was wrong*, and then the comment has to say which.
 
 ## Files
 

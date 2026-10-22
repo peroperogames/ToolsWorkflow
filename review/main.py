@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.111"
+VERSION = "2026-10-14.unity.112"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -4402,19 +4402,23 @@ def build_review_turns(
     stored: List[Dict[str, Any]],
     incremental: bool,
     extra_context: str = "",
+    threads: str = "",
 ) -> List[Dict[str, Any]]:
     """The new session turns for a review run.
 
     A session that has never seen the PR is handed the full diff once; after
     that only what changed — the push's own diff when the event carries one,
-    otherwise a diff against the commit the session last saw.
+    otherwise a diff against the commit the session last saw. ``threads`` is the
+    list of threads already on the pull request: a push-only turn cannot contain
+    what an earlier run said, and a finding on a moved line looks new without it.
     """
+    suffix = context_suffix(extra_context) + ("\n\n" + threads if threads else "")
     head_sha = pr.get("head", {}).get("sha", "")
     turns = conversation_records(unseen_entries(entries, stored))
     if not session.has_bootstrap(session_records):
         turns.append(
             turn_record(
-                build_diff_text(pr, files) + context_suffix(extra_context),
+                build_diff_text(pr, files) + suffix,
                 "open",
                 head_sha,
             )
@@ -4443,7 +4447,7 @@ def build_review_turns(
     if diff_text:
         turns.append(
             turn_record(
-                diff_text + INCREMENTAL_DIRECTIVE + context_suffix(extra_context),
+                diff_text + INCREMENTAL_DIRECTIVE + suffix,
                 "push",
                 head_sha,
             )
@@ -4453,7 +4457,7 @@ def build_review_turns(
         # than letting the model review a stale picture.
         turns.append(
             turn_record(
-                build_diff_text(pr, files) + INCREMENTAL_DIRECTIVE + context_suffix(extra_context),
+                build_diff_text(pr, files) + INCREMENTAL_DIRECTIVE + suffix,
                 "push",
                 head_sha,
             )
@@ -4463,7 +4467,7 @@ def build_review_turns(
             turn_record(
                 "## Review Request\n\nThe pull request now points at commit "
                 f"{head_sha[:8]}. Review its current state with your tools."
-                + context_suffix(extra_context),
+                + suffix,
                 "request",
                 head_sha,
             )
@@ -4669,6 +4673,54 @@ def agent_messages(
             f"{MAX_AGENT_HISTORY_TOKENS // 1000}k tokens."
         )
     return messages
+
+
+# What the model is told about the threads already on the pull request. A review of
+# a later push is handed only the new commits, so an issue raised three runs ago is
+# invisible to it — and when the code has moved between files, the same finding
+# looks brand new. AccessKing PR #3 shows what that costs: the same "result
+# collection is not released under an exception" concern was raised and resolved
+# five times (CollectionPool.cs, CommandOperationAsyncExtensions.cs twice,
+# CommandBus.cs, CommandOperation.cs:98) before being raised a sixth time on
+# CommandOperation.Extensions.cs:57 — and closed again two minutes later.
+THREAD_BRIEFING_LIMIT = 40
+THREAD_BRIEFING_CHARS = 160
+
+
+def threads_briefing(gh: GitHubClient, owner: str, repo: str, number: int) -> str:
+    """The threads already on the pull request, compact, for the model to respect.
+
+    This is the half of "do not repeat what you already said" that the agent path
+    was missing: it gets the new turns only, and `conversation` — which does carry
+    the threads — is never passed to it. The threads are the record, so the record
+    is what it is shown.
+    """
+    try:
+        threads = gh.list_review_threads(owner, repo, number)
+    except Exception as exc:  # noqa: BLE001 - context is best-effort
+        log(f"Warning: could not list review threads for the briefing: {exc}")
+        return ""
+    lines: List[str] = []
+    for thread in threads[:THREAD_BRIEFING_LIMIT]:
+        nodes = (thread.get("comments") or {}).get("nodes") or []
+        if not nodes:
+            continue
+        body = " ".join((nodes[0].get("body") or "").split())[:THREAD_BRIEFING_CHARS]
+        state = "resolved" if thread.get("isResolved") else "open"
+        lines.append(f"- {thread.get('path')}:{thread.get('line') or '?'} [{state}] {body}")
+    if not lines:
+        return ""
+    log(f"Handing the model {len(lines)} existing thread(s) so it does not raise them again.")
+    return (
+        "## Threads already on this pull request\n\n"
+        "Every line below is a comment already posted here, with its state. Do not "
+        "open another thread for an issue listed here: a resolved thread means the "
+        "author dealt with it, and re-raising it on a moved or renamed line reads as "
+        "noise. The only exception is new evidence — something the new commits "
+        "changed, or a resolution that was wrong — and then say what that evidence "
+        "is in the comment.\n\n"
+        + "\n".join(lines)
+    )
 
 
 def run_agent_review(
@@ -5430,7 +5482,24 @@ def stage_review(
     incremental = _incremental_push(event_name, payload, fresh)
     review_prompt = system_prompt + INCREMENTAL_DIRECTIVE if incremental else system_prompt
     if incremental:
-        log("Later push detected: running an incremental (unstructured) review.")
+        log("Later push detected: running an incremental review of the pushed commits only.")
+    elif _may_be_incremental(event_name, payload):
+        log("First review of this pull request: every changed file is judged.")
+    elif event_name in ("pull_request", "pull_request_target"):
+        log(
+            f"Full review: a {payload.get('action')!r} event is not a push, so every "
+            "changed file is judged. Pushes are reviewed incrementally."
+        )
+    else:
+        # The line that would have explained a review of 285 files for a
+        # one-commit question: a run started by a comment judges the pull
+        # request's current state, and a repository whose `pull_request` types
+        # omit `synchronize` never gets the incremental path at all.
+        log(
+            "Full review: asked for by a comment, so the whole pull request is "
+            "judged — pushes are reviewed incrementally, and for that the caller "
+            "workflow needs `synchronize` in its `pull_request` types."
+        )
 
     files = gh.list_files(owner, repo, number)
     log(f"Changed files: {len(files)}")
@@ -5475,6 +5544,7 @@ def stage_review(
     turns = build_review_turns(
         gh, owner, repo, pr, files, payload, records, entries, stored,
         incremental, extra_context=extra_context,
+        threads=threads_briefing(gh, owner, repo, number),
     )
     ctx = run_agent_review(
         ai, gh, owner, repo, number, pr, files, system_prompt, records, turns, config,
