@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.112"
+VERSION = "2026-10-14.unity.113"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -4386,6 +4386,52 @@ def last_turn_sha(session_records: List[Dict[str, Any]]) -> str:
     return ""
 
 
+# Words after a `review` command that ask for the whole pull request instead of the
+# delta, which is what a review judges by default once the session remembers a
+# commit: `@perotoolsbot review full`, `review --full`, `review: 全部`.
+FULL_REVIEW_WORDS = ("full", "--full", "全部", "全量")
+
+
+def review_asked_for_full(event_name: str, payload: Dict[str, Any]) -> bool:
+    """Did this comment ask for the whole pull request rather than the delta?
+
+    A word, not a parser: `review full`, `review --full`, `review: 全部`. Chinese
+    does not put a space after the word, so `全量再看一遍` counts too; `fully` does
+    not, because it is not the word.
+    """
+    invocation = _comment_invocation(payload) if _comment_event(event_name) else None
+    if not invocation or invocation[1].name != "review":
+        return False
+    argument = (invocation[1].argument or "").strip().lower()
+    for word in FULL_REVIEW_WORDS:
+        if argument == word:
+            return True
+        if argument.startswith(word):
+            rest = argument[len(word):]
+            if word.isascii() and rest[:1].isalnum():
+                continue
+            return True
+    return False
+
+
+def _incremental_command_review(
+    records: List[Dict[str, Any]], head_sha: str
+) -> bool:
+    """Is a review asked for by a command judging only what changed since last time?
+
+    These repositories deliberately do not run a workflow on push — the review is
+    asked for by a comment — so the push event's `before...after` never exists.
+    What does exist is the session: every review records the commit it looked at,
+    and the difference between that commit and the current head is the same
+    increment a push event would have produced. A first review (nothing recorded
+    yet) and a review of an unchanged head are both full passes.
+    """
+    if not session.has_bootstrap(records):
+        return False
+    previous = last_turn_sha(records)
+    return bool(previous) and previous != head_sha
+
+
 def context_suffix(extra_context: str) -> str:
     return f"\n\n{extra_context}" if extra_context else ""
 
@@ -5476,13 +5522,28 @@ def stage_review(
         return 0
 
     # Review mode.
-    # The PR's first pass gets the full review. Later pushes only get a light
-    # incremental pass: just the issues the new commits introduced, as inline
-    # comments.
+    # The PR's first pass gets the full review. A later one judges the delta: the
+    # push event's own range when there is one, and otherwise what the session
+    # recorded as the commit it last reviewed — these repositories ask for reviews
+    # by comment and deliberately do not run a workflow on push, but "the commit I
+    # looked at last time" is exactly as good a base as "the commit before the
+    # push". `review full` asks for the whole pull request instead.
+    head_sha = pr.get("head", {}).get("sha", "")
     incremental = _incremental_push(event_name, payload, fresh)
+    asked_full = review_asked_for_full(event_name, payload)
+    if not incremental and not asked_full:
+        incremental = _incremental_command_review(records, head_sha)
     review_prompt = system_prompt + INCREMENTAL_DIRECTIVE if incremental else system_prompt
     if incremental:
-        log("Later push detected: running an incremental review of the pushed commits only.")
+        if _may_be_incremental(event_name, payload):
+            log("Later push detected: running an incremental review of the pushed commits only.")
+        else:
+            log(
+                "Incremental review: judging only what changed since the last "
+                f"reviewed commit ({last_turn_sha(records)[:8] or '?'} -> {head_sha[:8]})."
+            )
+    elif asked_full:
+        log("Full review was asked for (`review full`): every changed file is judged.")
     elif _may_be_incremental(event_name, payload):
         log("First review of this pull request: every changed file is judged.")
     elif event_name in ("pull_request", "pull_request_target"):
@@ -5491,15 +5552,14 @@ def stage_review(
             "changed file is judged. Pushes are reviewed incrementally."
         )
     else:
-        # The line that would have explained a review of 285 files for a
-        # one-commit question: a run started by a comment judges the pull
-        # request's current state, and a repository whose `pull_request` types
-        # omit `synchronize` never gets the incremental path at all.
-        log(
-            "Full review: asked for by a comment, so the whole pull request is "
-            "judged — pushes are reviewed incrementally, and for that the caller "
-            "workflow needs `synchronize` in its `pull_request` types."
-        )
+        previous = last_turn_sha(records)
+        if previous and previous == head_sha:
+            log(f"Full review: nothing has changed since the last reviewed commit ({head_sha[:8]}).")
+        else:
+            log(
+                "Full review: asked for by a comment, and the session has no earlier "
+                "review to compare against, so every changed file is judged."
+            )
 
     files = gh.list_files(owner, repo, number)
     log(f"Changed files: {len(files)}")

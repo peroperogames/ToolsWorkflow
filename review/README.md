@@ -168,7 +168,7 @@ The words live in one registry (`COMMANDS` in `main.py`): each entry names the c
 
 - **Review request** — `@perotoolsbot review` starts a review without consulting the intent classifier, so a repository that only ever reviews on demand cannot have its request read as something else. The word must be `review` right after the mention, and whatever follows becomes a note: `@perotoolsbot review this PR for me.` and `@perotoolsbot review: 关注并发` are both the command. Any other way of asking (`@perotoolsbot 帮忙看下`) still goes through the classifier.
 
-  A review started this way runs **exactly what an automatic one runs** — the clone, the Unity/.NET build and test gates, and ReSharper — before the model sees anything, so a broken build cannot be approved just because nobody pushed. The one difference is scope: it covers the whole pull request, not the latest push.
+  A review started this way runs **exactly what an automatic one runs** — the clone, the Unity/.NET build and test gates, and ReSharper — before the model sees anything, so a broken build cannot be approved just because nobody pushed. Its scope is the change since the last review: every review records the commit it looked at in the session, and the next one diffs that commit against the head. These repositories deliberately do not run a workflow on push, so this comparison is what the push event's `before...after` would have been. `@perotoolsbot review full` (or `--full`, `全部`, `全量`) asks for the whole pull request instead; so does a first review, and so does a head that has not moved since the last one.
 
   **The level says how much of that to run.** A bare `review` is `review(o3)`:
 
