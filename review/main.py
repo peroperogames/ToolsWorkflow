@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.104"
+VERSION = "2026-10-14.unity.105"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -1673,22 +1673,37 @@ def handle_rebuild_command(ctx: CommandContext, command: Command) -> int:
     )
 
     kind_line = gates.kind.describe() if gates.kind else "unknown"
-    lines = ["🔧 **重新构建与测试**（只跑门禁，未做评审）", f"仓库类型：{kind_line}", ""]
-    if gates.extra_context:
-        # The section as the model would see it, minus its heading: the same
-        # words, from the same place.
-        lines.append(gates.extra_context.split("\n\n", 1)[-1])
-    else:
-        lines.append("没有构建/测试步骤运行——该仓库没有，或工具链不可用，详见日志。")
-    if gates.static_posted:
-        lines.append(f"ReSharper：新提出 {gates.static_posted} 条行内意见。")
-    body = "\n".join(lines)
+    body = rebuild_comment_body(kind_line, gates.extra_context, gates.static_posted)
 
     if ctx.config.dry_run:
         print(body)
         return 0
     ctx.gh.post_comment(ctx.owner, ctx.repo, ctx.number, body)
     return 0
+
+
+def rebuild_comment_body(
+    kind_line: str, extra_context: str, static_posted: int
+) -> str:
+    """What a `rebuild` run says: the gates' own words, and where their reports are.
+
+    The rebuild comment is the only thing such a run posts, so the reports it is
+    talking about have to be reachable from it — and by the time the review step
+    writes it, the upload has already happened, so the link is the artifact's own.
+    """
+    lines = ["🔧 **重新构建与测试**（只跑门禁，未做评审）", f"仓库类型：{kind_line}", ""]
+    if extra_context:
+        # The section as the model would see it, minus its heading: the same
+        # words, from the same place.
+        lines.append(extra_context.split("\n\n", 1)[-1])
+    else:
+        lines.append("没有构建/测试步骤运行——该仓库没有，或工具链不可用，详见日志。")
+    if static_posted:
+        lines.append(f"ReSharper：新提出 {static_posted} 条行内意见。")
+    link = report_link_line()
+    if link:
+        lines.append(link)
+    return "\n".join(lines)
 
 
 # Every command the bot answers to. A command never reaches the intent
@@ -3351,6 +3366,31 @@ def run_artifacts_url() -> str:
     return f"https://github.com/{repo}/actions/runs/{run}#artifacts"
 
 
+def artifacts_link() -> str:
+    """Where this run's uploaded reports are, preferring the artifact's own URL.
+
+    The upload step hands the exact artifact URL to the steps that run after it, so
+    a comment written then links straight at the zip. The checks stage runs before
+    the upload and can only name the run's artifact page; `stage_artifact_link`
+    replaces that with the artifact's URL once there is one.
+    """
+    exact = os.environ.get("REVIEW_ARTIFACT_URL", "").strip()
+    if exact:
+        return exact
+    return run_artifacts_url()
+
+
+def report_link_line() -> str:
+    """The reports line a comment that says how a build went ends with, or "".
+
+    Every such comment gets it, because the alternative is what already happened
+    twice: a failure that says "no report was produced" and leaves the reader with
+    no way to look at the files.
+    """
+    url = artifacts_link()
+    return f"\n完整报告（XML 与日志）：{url}" if url else ""
+
+
 def stage_artifact_link(
     gh: GitHubClient, owner: str, repo: str, number: int
 ) -> int:
@@ -3544,9 +3584,9 @@ def report_build_result(
     # that wrote no report at all. A run stopped at its deadline and a run that
     # crashed both leave their evidence only in these files.
     if result.test_failures or result.tests_broke or hung:
-        artifacts = run_artifacts_url()
-        if artifacts:
-            status_lines.append(f"\n完整报告（XML 与日志）：{artifacts}")
+        line = report_link_line()
+        if line:
+            status_lines.append(line)
     if hung:
         # The run printed nothing, so the bisection in unity_runner is what put a
         # name to it — and that name is the only thing an author can act on. When

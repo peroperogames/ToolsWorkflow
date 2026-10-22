@@ -198,4 +198,7 @@ runs:
         DRY_RUN: ${{ inputs.dry-run }}
         REVIEW_WORK_DIR: ${{ inputs.state-dir }}
         PROJECT_PROMPT_PATH: ${{ inputs.project-prompt-path }}
+        # The review step posts the rebuild comment, which is the only comment a
+        # `rebuild` run leaves: it links at the artifact the upload already made.
+        REVIEW_ARTIFACT_URL: ${{ steps.upload-reports.outputs.artifact-url }}
       run: python3 "$GITHUB_ACTION_PATH/main.py" review
