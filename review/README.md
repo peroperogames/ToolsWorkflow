@@ -645,7 +645,25 @@ A finding that is not about a particular line — missing tests, a missing chang
 
 Praise is not a finding. A comment that only compliments a change — however technically detailed — is never posted; the approval is the only positive signal, so a clean PR stays silent.
 
-`finish(verdict)` states `approve`, `comment` or `block`; `approve` is what approves the PR. A clean PR therefore produces no comments at all — the approval is the report. The review takes as many steps as it needs: when the transcript outgrows its budget the oldest tool results are stubbed out (the diff and the conversation are never touched), so a long investigation neither overflows the model's window nor makes every later step expensive. The step cap is only a runaway guard, and the final step tells the model to finish on time; if it still ends without `finish`, nothing is posted and nothing is approved, and the log says why (`Ignored the review: …`). No labels are applied. If the model answers in prose instead of calling the tools, the run falls back to parsing that text into a review body, which is the only path that posts one (and the only path `SILENT_MODE` still affects).
+`finish(verdict)` states `approve`, `comment` or `block`; `approve` is what approves the PR. A clean PR therefore produces no comments at all — the approval is the report. The review takes as many steps as it needs: when the transcript outgrows its budget it is compacted, in three passes, so a long investigation neither overflows the model's window nor makes every later step expensive. The step cap is only a runaway guard, and the final step tells the model to finish on time; if it still ends without `finish`, nothing is posted and nothing is approved, and the log says why (`Ignored the review: …`). No labels are applied. If the model answers in prose instead of calling the tools, the run falls back to parsing that text into a review body, which is the only path that posts one (and the only path `SILENT_MODE` still affects).
+
+**The budget is in tokens, and the ratio is not four characters.** `MAX_AGENT_CONTEXT_TOKENS` is 200k, `estimate_tokens` counts a CJK character as a token and four ASCII bytes as one, and compaction aims at 60% of the budget rather than at the budget itself. All three came from one AccessKing review whose log reads:
+
+```
+  Context compacted: 12 old tool result(s) omitted to stay within budget.
+    Tokens: 499673 prompt + 3152 completion = 502825 total
+  Context compacted: 2 old tool result(s) omitted to stay within budget.
+    Tokens: 503340 prompt + 2096 completion = 505436 total
+  … "Context compacted" on all 22 steps …
+```
+
+The old budget was 400 000 **characters**, sized as "100k tokens at four characters per token" — an English rule. A transcript of code and Chinese is closer to one character per token, so that budget was really a 500k-token request: it sat at the model's ceiling, compaction freed exactly enough for the next step, and every step compacted again. Stubbing tool results is also not enough on its own, because a pull request reviewed a dozen times carries the earlier runs in its session, and that history is not a tool result. So compaction is three passes — stub the older results, drop the oldest turns one at a time (oldest first, keeping the newest request and as much history as fits), then stub what is left — and each pass reports what it did in tokens:
+
+```
+Context compacted: 45 tool result(s) stubbed, 93 earlier message(s) dropped, 290k -> 115k tokens.
+```
+
+That leaves ~10 further steps before the next compaction instead of one, which is what "compacted" is supposed to mean.
 
 ## Files
 

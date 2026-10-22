@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.106"
+VERSION = "2026-10-14.unity.107"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -75,9 +75,37 @@ REVIEW_SECTIONS = (
     ("recommendation_long", "Long-term (technical debt)"),
 )
 
-# Rough heuristic: ~4 characters per token, used for chunking large PRs.
-CHARS_PER_TOKEN = 4
 DEFAULT_MAX_TOKENS_PER_CHUNK = 131072  # DeepSeek V4's max_tokens ceiling
+
+
+def _is_wide(ch: str) -> bool:
+    """Characters that cost about one token each rather than a quarter of one.
+
+    CJK ideographs, kana, the punctuation around them and fullwidth forms. The
+    four-characters-per-token rule below is an ASCII rule, and applying it to a
+    Chinese review is what made a "100k-token" transcript a 500k-token request.
+    """
+    return (
+        "\u3000" <= ch <= "\u303f"  # CJK punctuation
+        or "\u3040" <= ch <= "\u30ff"  # kana
+        or "\u3400" <= ch <= "\u4dbf"  # CJK extension A
+        or "\u4e00" <= ch <= "\u9fff"  # CJK unified ideographs
+        or "\uf900" <= ch <= "\ufaff"  # compatibility ideographs
+        or "\uff00" <= ch <= "\uffef"  # fullwidth forms
+    )
+
+
+def estimate_tokens(text: str) -> int:
+    """A token count good enough to budget with, for code and for Chinese.
+
+    Deliberately not a tokenizer: the point is the order of magnitude, and this
+    one is within a small factor of the tokenizer for both an English diff and a
+    Chinese review — which `len(text) / 4` is not.
+    """
+    if not text:
+        return 0
+    wide = sum(1 for ch in text if _is_wide(ch))
+    return wide + (len(text) - wide) // 4
 
 # Conversation transcript limits, to avoid unbounded context growth.
 MAX_CONVERSATION_ENTRIES = 50
@@ -807,14 +835,19 @@ def build_diff_text(
     return "\n".join(lines)
 
 
-def chunk_files(files: List[Dict[str, Any]], max_chars: int) -> List[List[Dict[str, Any]]]:
-    """Split files into chunks so no chunk exceeds ``max_chars``."""
+def chunk_files(files: List[Dict[str, Any]], max_tokens: int) -> List[List[Dict[str, Any]]]:
+    """Split files into chunks so no chunk exceeds ``max_tokens``.
+
+    Measured with :func:`estimate_tokens` rather than characters: a chunk sized
+    by the four-characters-per-token rule is a chunk four times too big for a diff
+    written in Chinese or full of code.
+    """
     chunks: List[List[Dict[str, Any]]] = []
     current: List[Dict[str, Any]] = []
     size = 0
     for f in files:
-        f_size = len(f.get("patch") or "") + len(f.get("filename", "")) + 120
-        if current and size + f_size > max_chars:
+        f_size = estimate_tokens(f.get("patch") or "") + estimate_tokens(f.get("filename", "")) + 30
+        if current and size + f_size > max_tokens:
             chunks.append(current)
             current = []
             size = 0
@@ -976,8 +1009,7 @@ def perform_review(
     are reviewed in chunks; general findings are grouped into one body and line
     findings are merged into a single comment list.
     """
-    max_chars = max_tokens_per_chunk * CHARS_PER_TOKEN
-    chunks = chunk_files(files, max_chars)
+    chunks = chunk_files(files, max_tokens_per_chunk)
 
     if len(chunks) <= 1:
         raw = review_files(ai, system_prompt, pr, files, conversation=conversation)
@@ -2158,7 +2190,7 @@ def _code_change_context(
     bigger output. Files the instruction names come first, then the rest in the
     order they arrived, until the budget is spent.
     """
-    budget = max_tokens_per_chunk * CHARS_PER_TOKEN
+    budget = max_tokens_per_chunk
     named: List[Dict[str, str]] = []
     rest: List[Dict[str, str]] = []
     for fc in file_contents:
@@ -2173,7 +2205,7 @@ def _code_change_context(
     omitted: List[str] = []
     used = 0
     for fc in named + rest:
-        size = len(fc.get("content") or "") + len(fc.get("path") or "") + 32
+        size = estimate_tokens(fc.get("content") or "") + estimate_tokens(fc.get("path") or "") + 8
         if chosen and used + size > budget:
             omitted.append(fc.get("path") or "?")
             continue
@@ -2608,22 +2640,33 @@ def review_event(review_text: str, may_approve: bool) -> str:
 MAX_AGENT_ITERATIONS = 64
 
 # The whole message list is re-sent on every step, so an investigation that
-# reads a dozen files would keep growing until it overflows the model's window
-# or makes each later step cost more than the review itself. Over this budget,
-# the oldest tool results are stubbed out.
+# reads a dozen files would keep growing until it overflows the model's window or
+# makes each later step cost more than the review itself.
 #
-# Sized from observed runs rather than from the 4-chars-per-token guess (which
-# only holds for ASCII): the diff + prompt + conversation start at ~40k tokens,
-# a real run's prompt reached ~105k tokens and the request still succeeded, and
-# completions alone have hit 32k tokens. ~100k tokens of transcript leaves the
-# completion room even on a 160k window, with the initial context leaving ~60k
-# tokens of headroom for tool results — roughly 30 file reads before the first
-# stub, instead of the ~8 the previous 240k budget allowed.
-MAX_AGENT_CONTEXT_CHARS = 400000
+# Measured in **tokens**, and with a ratio that holds for code and for Chinese. The
+# budget used to be 400 000 characters, sized as "100k tokens at four characters
+# per token" — an English rule. A review transcript is code and CJK, close to one
+# character per token, so that budget was really a 500 000-token request: the
+# request sat at the model's ceiling, and compaction therefore ran on every single
+# step, freeing exactly enough for the next one. The log of one AccessKing review
+# shows it: 499k, 503k, 523k, 525k prompt tokens, "Context compacted" on all 22
+# steps.
+MAX_AGENT_CONTEXT_TOKENS = 200_000
+# Compaction aims below the ceiling, not at it. A pass that ends exactly at the
+# limit is a pass that runs again on the very next step, which is what "compacted
+# every step" looked like — and it is indistinguishable from not compacting.
+COMPACT_TARGET_RATIO = 0.6
 # Tool results this recent are never stubbed — they are what the model is
 # currently working from.
 KEEP_RECENT_TOOL_RESULTS = 6
 COMPACTED_TOOL_RESULT_PREFIX = "[older "
+# What stands in for the turns that were dropped, so the model knows the
+# conversation did not start there and can ask for what it needs again.
+DROPPED_TURNS_MARKER = (
+    "[earlier conversation omitted to keep the context small: {count} message(s) from "
+    "previous steps of this review. Read or ask again if you still need something "
+    "from them.]"
+)
 # What one tool-call turn contributes to the transcript. The model's narration
 # (or leaked reasoning) is replayed on every later step, and a thinking model
 # can write tens of thousands of characters per step — the measured over 24k
@@ -4365,30 +4408,38 @@ def _tool_call_labels(messages: List[Dict[str, Any]]) -> Dict[str, str]:
     return labels
 
 
-def compact_agent_messages(
-    messages: List[Dict[str, Any]],
-    budget: int = MAX_AGENT_CONTEXT_CHARS,
-    keep_recent: int = KEEP_RECENT_TOOL_RESULTS,
-) -> int:
-    """Stub out old tool results when the transcript outgrows its budget.
+def _message_tokens(message: Dict[str, Any]) -> int:
+    """One message's size, its tool calls included.
 
-    The newest results stay whole — they are what the model is working from —
-    and older ones are replaced by a stub that keeps the ``tool_call_id``
-    pairing intact, so the model simply sees that it read something a while
-    ago and can call the tool again if it still needs it. System prompts, the
-    diff and the conversation are never touched.
-
-    Returns how many results were stubbed.
+    The tool-call arguments are part of what the API counts, and a review's comment
+    bodies live there, so leaving them out would under-count the messages that grow.
     """
-    total = sum(len(m.get("content") or "") for m in messages)
-    if total <= budget:
-        return 0
+    total = estimate_tokens(message.get("content") or "")
+    for call in message.get("tool_calls") or []:
+        function = call.get("function") or {}
+        total += estimate_tokens(function.get("name") or "")
+        total += estimate_tokens(function.get("arguments") or "")
+    return total
+
+
+def messages_tokens(messages: List[Dict[str, Any]]) -> int:
+    """How big one request is, in tokens."""
+    return sum(_message_tokens(message) for message in messages)
+
+
+def _stub_old_tool_results(messages: List[Dict[str, Any]], target: int, keep_recent: int) -> int:
+    """Replace old tool results with a note naming the tool; the newest stay whole.
+
+    The stub keeps the ``tool_call_id`` pairing intact, so the model sees that it
+    read something a while ago and can call the tool again if it still needs it.
+    """
     labels = _tool_call_labels(messages)
+    total = messages_tokens(messages)
     positions = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
     candidates = positions[:-keep_recent] if keep_recent else positions
-    dropped = 0
+    stubbed = 0
     for index in candidates:
-        if total <= budget:
+        if total <= target:
             break
         message = messages[index]
         content = message.get("content") or ""
@@ -4399,10 +4450,83 @@ def compact_agent_messages(
             "result omitted to keep the context small - call the tool again if "
             "you still need it]"
         )
-        total += len(stub) - len(content)
+        total += estimate_tokens(stub) - estimate_tokens(content)
         message["content"] = stub
-        dropped += 1
+        stubbed += 1
+    return stubbed
+
+
+def _drop_older_conversation(messages: List[Dict[str, Any]], target: int) -> int:
+    """Drop the oldest turns until what is left fits, keeping the newest request.
+
+    One turn at a time, oldest first: a session that is a little over budget loses
+    a couple of old turns and keeps the rest of its history. Dropping everything
+    back to the newest request was the first version, and it threw away a run's
+    own earlier steps for a few thousand tokens.
+
+    Cuts before a ``user`` message, so no tool result is left without the call
+    that produced it.
+    """
+    starts = [index for index in range(1, len(messages)) if messages[index].get("role") == "user"]
+    if len(starts) < 2:
+        return 0
+    # Suffix sums, so "how big is what would be left" is a subtraction rather than
+    # a rescan of a 400k-character transcript for every candidate cut.
+    counts = [_message_tokens(message) for message in messages]
+    suffix = [0] * (len(counts) + 1)
+    for index in range(len(counts) - 1, -1, -1):
+        suffix[index] = suffix[index + 1] + counts[index]
+    head = suffix[0] - suffix[starts[0]]
+    marker_tokens = estimate_tokens(DROPPED_TURNS_MARKER.format(count=len(messages)))
+    cut = starts[-1]
+    for position in starts[:-1]:
+        if head + marker_tokens + suffix[position] <= target:
+            cut = position
+            break
+    dropped = cut - 1
+    if dropped <= 0:
+        return 0
+    messages[1:cut] = [
+        {"role": "user", "content": DROPPED_TURNS_MARKER.format(count=dropped)}
+    ]
     return dropped
+
+
+def compact_agent_messages(
+    messages: List[Dict[str, Any]],
+    budget_tokens: int = MAX_AGENT_CONTEXT_TOKENS,
+    keep_recent: int = KEEP_RECENT_TOOL_RESULTS,
+) -> Dict[str, int]:
+    """Bring the transcript back under budget, cheapest pass first.
+
+    Three passes, each only if the previous one was not enough: stub the older
+    tool results (the model can call the tool again), drop the conversation before
+    the newest request (a long-lived session is mostly earlier runs), and finally
+    stub what is left, newest results included, because then even they are too
+    big to send.
+
+    Returns ``{"stubbed", "dropped", "before", "after"}`` in tokens, so the caller
+    can say what happened instead of only that something did.
+    """
+    before = messages_tokens(messages)
+    report = {"stubbed": 0, "dropped": 0, "before": before, "after": before}
+    if before <= budget_tokens:
+        return report
+    target = int(budget_tokens * COMPACT_TARGET_RATIO)
+    report["stubbed"] += _stub_old_tool_results(messages, target, keep_recent)
+    if messages_tokens(messages) > target:
+        report["dropped"] += _drop_older_conversation(messages, target)
+    if messages_tokens(messages) > target:
+        report["stubbed"] += _stub_old_tool_results(messages, target, 0)
+    report["after"] = messages_tokens(messages)
+    if report["after"] > budget_tokens:
+        # Said once per step, and only when nothing else can be done: the request
+        # that is left is too big on its own.
+        log(
+            f"Warning: the transcript is still {report['after'] // 1000}k tokens after "
+            "compaction; the current request is that large on its own."
+        )
+    return report
 
 
 def run_agent_review(
@@ -4451,11 +4575,12 @@ def run_agent_review(
         # Why the loop ended, reported when it ends without a finish.
         stop_reason = f"the {MAX_AGENT_ITERATIONS}-step budget ran out"
         for iteration in range(1, MAX_AGENT_ITERATIONS + 1):
-            dropped = compact_agent_messages(messages)
-            if dropped:
+            compaction = compact_agent_messages(messages)
+            if compaction["stubbed"] or compaction["dropped"]:
                 log(
-                    f"Context compacted: {dropped} old tool result(s) omitted to "
-                    "stay within budget."
+                    f"Context compacted: {compaction['stubbed']} tool result(s) stubbed, "
+                    f"{compaction['dropped']} earlier message(s) dropped, "
+                    f"{compaction['before'] // 1000}k -> {compaction['after'] // 1000}k tokens."
                 )
             if iteration == MAX_AGENT_ITERATIONS:
                 # Last call: say so. A model that is cut off mid-investigation
@@ -4569,11 +4694,12 @@ def run_agent_reply(
         if store:
             store.append(turns)
         for iteration in range(1, MAX_AGENT_ITERATIONS + 1):
-            dropped = compact_agent_messages(messages)
-            if dropped:
+            compaction = compact_agent_messages(messages)
+            if compaction["stubbed"] or compaction["dropped"]:
                 log(
-                    f"Context compacted: {dropped} old tool result(s) omitted to "
-                    "stay within budget."
+                    f"Context compacted: {compaction['stubbed']} tool result(s) stubbed, "
+                    f"{compaction['dropped']} earlier message(s) dropped, "
+                    f"{compaction['before'] // 1000}k -> {compaction['after'] // 1000}k tokens."
                 )
             answer = ai.chat_message(messages, tools=REPLY_TOOLS)
             calls = answer.get("tool_calls") or []
