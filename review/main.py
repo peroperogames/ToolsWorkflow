@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.107"
+VERSION = "2026-10-14.unity.108"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -4772,6 +4772,43 @@ def already_approved(
     )
 
 
+def settle_after_reply_actions(
+    ai: AIClient,
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    pr: Dict[str, Any],
+    config: "Config",
+    reply_ctx: Optional[ToolContext],
+    conversation: str = "",
+) -> None:
+    """Settle and approve after a reply that only *acted*.
+
+    A reply run ends with no text in two very different situations. One is "this
+    comment needs no answer", where nothing happened and nothing should be decided
+    from it. The other is "I closed the threads and there is nothing left to say":
+    the pull request was just emptied of comments by this very run, and the
+    approval that follows a clean review is what the request was asking for. Only
+    the second one gets here — the run has to have done something.
+    """
+    if config.dry_run or reply_ctx is None:
+        return
+    if not (reply_ctx.resolved_threads or reply_ctx.inline_posted):
+        return
+    log(
+        "The reply had nothing to say but acted on the pull request "
+        f"({reply_ctx.resolved_threads} resolved, {reply_ctx.inline_posted} posted); "
+        "settling the threads and approving if nothing is left open."
+    )
+    settle_threads_and_approve(
+        ai, gh, owner, repo, number, pr,
+        conversation=conversation,
+        skip_ids=list(reply_ctx.posted_ids),
+        language=config.language,
+    )
+
+
 def approve_if_clean(
     gh: GitHubClient, owner: str, repo: str, number: int, head_sha: str, what: str
 ) -> bool:
@@ -5208,6 +5245,13 @@ def stage_review(
                 if did:
                     reason += f" (it {' and '.join(did)} first)"
             log(f"Ignored the comment: {reason}.")
+            # Nothing to say is not nothing to do. A run that closed the threads
+            # has left the pull request clean, and that is exactly what the
+            # approval is for — skipping it here is how ten closed threads ended
+            # with no approval on AccessKing PR #3.
+            settle_after_reply_actions(
+                ai, gh, owner, repo, number, pr, config, reply_ctx, conversation
+            )
             return 0
 
         if config.dry_run:
