@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.110"
+VERSION = "2026-10-14.unity.111"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -2733,6 +2733,19 @@ DROPPED_TURNS_MARKER = (
     "previous steps of this review. Read or ask again if you still need something "
     "from them.]"
 )
+# How much of the *session* a run is handed. The session is the whole history of
+# every earlier run of this pull request, and it used to be handed over in full and
+# only trimmed once the transcript crossed `MAX_AGENT_CONTEXT_TOKENS` — so a push
+# that changed one line paid for every file the previous ten runs had read, on
+# every step. What a run actually needs from its history is "what was raised", and
+# that is the thread list, which the model can ask for (`list_threads`) at any
+# time. Everything older than this is replaced by a note that says so.
+MAX_AGENT_HISTORY_TOKENS = 40_000
+HISTORY_OMITTED_MARKER = (
+    "[earlier runs of this review are not repeated here: {count} message(s) omitted. "
+    "The review threads are the record of what was already raised — call "
+    "list_threads to see them.]"
+)
 # What one tool-call turn contributes to the transcript. The model's narration
 # (or leaked reasoning) is replayed on every later step, and a thinking model
 # can write tens of thousands of characters per step — the measured over 24k
@@ -4595,6 +4608,69 @@ def compact_agent_messages(
     return report
 
 
+def limit_handed_history(
+    messages: List[Dict[str, Any]],
+    history_end: int,
+    budget_tokens: int = MAX_AGENT_HISTORY_TOKENS,
+) -> int:
+    """Trim what a run is handed from the session, keeping its newest turns.
+
+    ``messages[1:history_end]`` is the history; everything from ``history_end`` on
+    is this run's own turns and is never touched. Cuts before a ``user`` message,
+    so no tool result is left without the call that produced it.
+
+    Returns how many messages were omitted.
+    """
+    if history_end <= 1:
+        return 0
+    counts = [_message_tokens(message) for message in messages[:history_end]]
+    suffix = [0] * (history_end + 1)
+    for index in range(history_end - 1, 0, -1):
+        suffix[index] = suffix[index + 1] + counts[index]
+    if suffix[1] <= budget_tokens:
+        return 0
+    starts = [index for index in range(1, history_end) if messages[index].get("role") == "user"]
+    marker_tokens = estimate_tokens(HISTORY_OMITTED_MARKER.format(count=history_end))
+    # Keep the newest turn even when it alone is over budget: a run with no history
+    # at all is worse than a run with a big one.
+    cut = starts[-1] if starts else history_end
+    for position in starts:
+        if suffix[position] + marker_tokens <= budget_tokens:
+            cut = position
+            break
+    omitted = cut - 1
+    if omitted <= 0:
+        return 0
+    messages[1:cut] = [
+        {"role": "user", "content": HISTORY_OMITTED_MARKER.format(count=omitted)}
+    ]
+    return omitted
+
+
+def agent_messages(
+    system_prompt: str,
+    session_records: List[Dict[str, Any]],
+    turns: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """The message list a run starts from: the system prompt, bounded history, turns.
+
+    One place rather than two, because the review and the reply are handed the
+    same session and must be bounded the same way.
+    """
+    messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    messages.extend(session.to_messages(session_records))
+    history_end = len(messages)
+    messages.extend(session.to_messages(turns))
+    omitted = limit_handed_history(messages, history_end)
+    if omitted:
+        log(
+            f"Handed this run the last {history_end - 1 - omitted} message(s) of "
+            f"history: {omitted} omitted to stay under "
+            f"{MAX_AGENT_HISTORY_TOKENS // 1000}k tokens."
+        )
+    return messages
+
+
 def run_agent_review(
     ai: AIClient,
     gh: GitHubClient,
@@ -4629,9 +4705,7 @@ def run_agent_review(
         config=config, heads=pr.get("head", {}).get("sha", ""),
         block_approve=block_approve,
     )
-    messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-    messages.extend(session.to_messages(session_records))
-    messages.extend(session.to_messages(turns))
+    messages = agent_messages(system_prompt, session_records, turns)
 
     # Exclusive access to the session for the whole run; another job for the
     # same PR keeps working, just without persistence.
@@ -4752,9 +4826,7 @@ def run_agent_reply(
         gh=gh, owner=owner, repo=repo, number=number, pr=pr, files=files,
         config=config, heads=pr.get("head", {}).get("sha", ""),
     )
-    messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-    messages.extend(session.to_messages(session_records))
-    messages.extend(session.to_messages(turns))
+    messages = agent_messages(system_prompt, session_records, turns)
 
     with session.hold(owner, repo, number) as store:
         if store:

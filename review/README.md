@@ -676,6 +676,16 @@ Context compacted: 45 tool result(s) stubbed, 93 earlier message(s) dropped, 290
 
 That leaves ~10 further steps before the next compaction instead of one, which is what "compacted" is supposed to mean.
 
+**A run is handed only the tail of the session.** The session is every earlier run of the pull request, kept so a run can continue instead of starting over — and it was handed over in full, trimmed only once the transcript crossed 200k tokens. A one-line push then paid for every file the previous ten pushes had read, on every step of its own run. `MAX_AGENT_HISTORY_TOKENS` bounds what a run is *handed* to 40k tokens, newest turns first, with a note naming what was left out:
+
+```
+Handed this run the last 15 message(s) of history: 15 omitted to stay under 40k tokens.
+```
+
+That is enough, because what a run needs from the earlier ones is *what was raised*, and the threads are exactly that — `list_threads` is one call away, and it is authoritative in a way the transcript never was. Measured on a ten-run session: 72k tokens of history became 37k handed to the run, with its own new turns intact. The budget within a run (`MAX_AGENT_CONTEXT_TOKENS`) still applies on top of this.
+
+The fixed cost of a step is small by comparison — the prompt is ~1.7k tokens and the tool schemas ~0.8k — so what a review of a tiny push costs is now roughly *steps × (history + what it read)*, and `read_file` returns at most 8000 characters.
+
 ## Files
 
 - `main.py` — entry point and orchestration.
