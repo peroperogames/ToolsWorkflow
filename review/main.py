@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.109"
+VERSION = "2026-10-14.unity.110"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -1738,6 +1738,60 @@ def rebuild_comment_body(
     return "\n".join(lines)
 
 
+def handle_settle_command(ctx: CommandContext, command: Command) -> int:
+    """Re-judge the open threads, and approve if none are left.
+
+    Deterministic where the person who asked cares: it runs no build and leaves no
+    new inline comment, so "settle" cannot turn into another round of findings. A
+    thread it judges done gets its reason posted *inside* that thread — a reply,
+    not a thread — and when nothing is left the run approves, which is the whole
+    point of asking for it. The threads are judged from their own comments and the
+    discussion; no diff is passed, exactly as when a reply settles them, because
+    the question is whether the concern was dealt with, not whether the code
+    changed.
+    """
+    log("Settle command: judging the open threads again; no build, no new comments.")
+    before = unresolved_bot_thread_count(ctx.gh, ctx.owner, ctx.repo, ctx.number)
+    if ctx.config.dry_run:
+        print(
+            f"dry-run: would judge {before} unresolved thread(s) and approve if none "
+            "are left"
+        )
+        return 0
+    approved = settle_threads_and_approve(
+        ctx.ai, ctx.gh, ctx.owner, ctx.repo, ctx.number, ctx.pr,
+        conversation=ctx.conversation,
+        language=ctx.config.language,
+    )
+    after = unresolved_bot_thread_count(ctx.gh, ctx.owner, ctx.repo, ctx.number)
+    ctx.gh.post_comment(
+        ctx.owner, ctx.repo, ctx.number, settle_comment_body(before, after, approved)
+    )
+    return 0
+
+
+def settle_comment_body(before: int, after: int, approved: bool) -> str:
+    """What a `settle` run says, including the part it did not do.
+
+    "All resolved but not approved" has two causes — this commit was already
+    approved, or the API refused — and neither is a failure of the command, so the
+    comment says which state the pull request is in instead of pretending.
+    """
+    lines = ["🧹 **重新检查评论线程**（只处理已有线程；不新建评论，不跑构建）"]
+    if before >= 0 and after >= 0:
+        lines.append(f"未解决线程：{before} → {after}。")
+    if after < 0:
+        lines.append("读不到线程状态，详见 workflow 日志。")
+    elif after == 0:
+        if approved:
+            lines.append("全部线程已解决，已 approve ✅")
+        else:
+            lines.append("全部线程已解决；approve 未提交（该提交此前已批准过，或没有权限）。")
+    else:
+        lines.append(f"还有 {after} 个线程没处理完，暂不 approve。")
+    return "\n".join(lines)
+
+
 # Every command the bot answers to. A command never reaches the intent
 # classifier — that is what makes it deterministic — and everything without one
 # still does.
@@ -1755,6 +1809,14 @@ COMMANDS: Tuple[CommandSpec, ...] = (
     CommandSpec(
         "rebuild", "note", "re-run the build/test/static steps only",
         handle_rebuild_command, stages=frozenset({"checks", "static"}),
+    ),
+    # Neither a build nor an analysis: the threads are judged again and the pull
+    # request is approved when none are left, which is what someone who has just
+    # dealt with every finding wants to say.
+    CommandSpec(
+        "settle", "note",
+        "re-judge the open threads and approve if none are left; no build, no review",
+        handle_settle_command, stages=frozenset(),
     ),
 )
 COMMAND_BY_NAME = {spec.name: spec for spec in COMMANDS}
@@ -1937,8 +1999,12 @@ def settle_threads_and_approve(
     why_not: str = "New findings were raised",
     skip_ids: Optional[List[int]] = None,
     language: str = "",
-) -> None:
+) -> bool:
     """Resolve the threads that are done with, then approve if none are left.
+
+    Returns whether the approval was actually submitted — a thread still open, an
+    approval already on this commit and a refused API call are all "no", and the
+    commands that report back to the person who asked need to tell them apart.
 
     Called after every review, not only after a push: a review is the bot looking
     at the current state, so it is also the moment to retire what an earlier
@@ -1958,9 +2024,9 @@ def settle_threads_and_approve(
 
     if not allow_approve:
         log(f"{why_not}; not approving.")
-        return
+        return False
 
-    approve_if_clean(
+    return approve_if_clean(
         gh, owner, repo, number,
         pr.get("head", {}).get("sha", ""),
         "所有遗留问题已解决 ✅",
@@ -5490,10 +5556,16 @@ def run_stage(stage: str) -> int:
     if stage in ("checks", "static"):
         wanted = _wanted_stages(event_name, payload)
         if stage not in wanted:
-            log(
-                f"Nothing for the {stage} stage to do: this run runs "
-                f"{', '.join(name for name in STAGES if name in wanted)}."
-            )
+            if not wanted:
+                log(
+                    f"Nothing for the {stage} stage to do: this run asks for neither "
+                    "the build nor the analysis."
+                )
+            else:
+                log(
+                    f"Nothing for the {stage} stage to do: this run runs "
+                    f"{', '.join(name for name in STAGES if name in wanted)}."
+                )
             return 0
         # `rebuild` answers with its own comment, so this stage's report is the
         # same report twice — see `_COMMAND_POSTS_RESULT`.

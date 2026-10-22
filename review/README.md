@@ -153,6 +153,7 @@ Some things a comment can ask for are too consequential to guess at, so they are
 | `review` | Review the pull request now — everything: clone, build, tests, static analysis. |
 | `review(o1)` / `review(o2)` / `review(o3)` | The same review at a chosen level: the diff alone, with the build and the tests, or with everything. `o3` is what a bare `review` means. |
 | `rebuild` | Re-run the build, test and static-analysis steps only — no review, no approval. |
+| `settle` | Re-judge the threads that are still open and approve if none are left — no build, no review, no new comments. |
 
 The words live in one registry (`COMMANDS` in `main.py`): each entry names the command, what the text after it means, and its handler, and the parsing, the logging and the precedence all come from there rather than from a separate parser and branch per command.
 
@@ -182,6 +183,14 @@ The words live in one registry (`COMMANDS` in `main.py`): each entry names the c
   At `o1` and `o2` the model is told what is missing, in the same `## 构建与测试状态` section the build step writes to, so it never reviews as though the change were verified.
 
 - **Rebuild** — `@perotoolsbot rebuild` runs the same gates and nothing else: clone, classify, Unity/.NET build and test, ReSharper. It answers "does it compile now?" without paying for a review, and it cannot approve — only a review's verdict does that. Compile errors still land as inline comments, and one comment reports what ran.
+
+- **Settle** — `@perotoolsbot settle` is for "I have dealt with everything; check and close it out". It re-reads the threads that are still open, decides which ones the discussion has settled, and approves once none are left — no build, no review, and no new inline comment, so asking for it cannot turn into another round of findings. It judges threads from their own comments and the discussion rather than from the diff, exactly as a reply run does: the question is whether the concern was dealt with, not whether the code changed. Each thread it closes gets its reason posted *inside* that thread — a reply, not a thread — and one comment reports the outcome, including the case where everything is resolved but the approval was not submitted because this commit was already approved:
+
+  ```
+  🧹 **重新检查评论线程**（只处理已有线程；不新建评论，不跑构建）
+  未解决线程：38 → 0。
+  全部线程已解决，已 approve ✅
+  ```
 
 Replying requires the GitHub App to have **`Issues: Read and write`** permission (issue comments use the Issues API, which is separate from `Pull requests`).
 
@@ -262,7 +271,7 @@ The stage is still the authority: a closed pull request that arrives some other 
 
 **The model's key is not in the step that runs the pull request's code.** `checks` and `static` execute arbitrary code from the pull request — MSBuild targets, Unity editor code, test assemblies, the repository's own analyzers. Neither needs to call the model, so neither is given `OPENAI_API_KEY`; `load_config(require_openai=False)` is what enforces it. Each step also declares only the environment its own stage reads, so the shared configuration surface is two variables instead of twenty.
 
-**A comment only reaches the build step when it asks for one.** `@perotoolsbot review` and `@perotoolsbot rebuild` want the gates, and a command is deterministic — the person who wrote it knows what they meant — so the checks and static stages run for it exactly as they do for a push, and the review step reads their results instead of building again. The level picks how much of that switch is on: `review(o1)` wants the review and not the gates, so both stages stand down and the review step reviews with no build status to read — and, because there is none, with approval off; `review(o2)` turns the checks stage on and leaves the static one off. A comment that asks for nothing (`prompt:`, or a question) stands them both down too; building for every comment that mentions the bot would mean a Unity build for "why did you flag this?". **A review asked for in prose** is the one case that cannot be routed this way: recognising the request is the classifier's job, and that is a model call inside the review step, so those runs build and analyse *there* — in the step that also holds the model's key. The log says which happened, in both directions:
+**A comment only reaches the build step when it asks for one.** `@perotoolsbot review` and `@perotoolsbot rebuild` want the gates, `@perotoolsbot settle` wants neither, and a command is deterministic — the person who wrote it knows what they meant — so the checks and static stages run for it exactly as they do for a push, and the review step reads their results instead of building again. The level picks how much of that switch is on: `review(o1)` wants the review and not the gates, so both stages stand down and the review step reviews with no build status to read — and, because there is none, with approval off; `review(o2)` turns the checks stage on and leaves the static one off. A comment that asks for nothing (`prompt:`, or a question) stands them both down too; building for every comment that mentions the bot would mean a Unity build for "why did you flag this?". **A review asked for in prose** is the one case that cannot be routed this way: recognising the request is the classifier's job, and that is a model call inside the review step, so those runs build and analyse *there* — in the step that also holds the model's key. The log says which happened, in both directions:
 
 ```
 Using the build and test results the checks stage left for this run.
