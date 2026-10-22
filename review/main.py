@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.105"
+VERSION = "2026-10-14.unity.106"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3296,6 +3296,12 @@ ARTIFACTS_DIRNAME = "ai-review-artifacts"
 _CURRENT_PR: Tuple[str, str, int] = ("", "", 0)
 
 
+# Set when the run was started by a `rebuild` command: that command answers with a
+# comment of its own, built from the same results and posted from the review step,
+# so the status comment this stage would post is the same report twice.
+_COMMAND_POSTS_RESULT = False
+
+
 def share_artifacts() -> None:
     """Copy this run's reports where the workflow can upload them.
 
@@ -3621,6 +3627,15 @@ def report_build_result(
         body = "\n".join(status_lines)
         if config.dry_run:
             print(body)
+        elif _COMMAND_POSTS_RESULT:
+            # A `rebuild` command posts this result itself, from the review step,
+            # with the artifact's URL rather than the run page's. Two comments
+            # saying the same thing is how a pull request ends up with neither
+            # of them read.
+            log(
+                "The rebuild command reports this result itself; not posting the "
+                "status comment for it."
+            )
         else:
             post_status_comment(gh, owner, repo, number, body)
 
@@ -5308,6 +5323,11 @@ def run_stage(stage: str) -> int:
                 f"{', '.join(name for name in STAGES if name in wanted)}."
             )
             return 0
+        # `rebuild` answers with its own comment, so this stage's report is the
+        # same report twice — see `_COMMAND_POSTS_RESULT`.
+        global _COMMAND_POSTS_RESULT
+        invocation = _comment_invocation(payload) if _comment_event(event_name) else None
+        _COMMAND_POSTS_RESULT = bool(invocation and invocation[1].name == "rebuild")
 
     # The reports are already uploaded by the time this one runs, and the comment
     # naming them was written before that: the one thing left is to give it the

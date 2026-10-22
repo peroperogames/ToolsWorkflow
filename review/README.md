@@ -438,6 +438,8 @@ The reports live in the pull request's own directory under the system temp direc
 
 **Every comment that reports a build ends with that line**, because two did not and both were the ones that mattered: the status comment written by the checks stage (which now gets the page URL first and the artifact's URL after the edit) and the **rebuild comment** — the only comment a `@perotoolsbot rebuild` run posts. The rebuild comment is written by the review step, which runs *after* the upload, so `REVIEW_ARTIFACT_URL` is already in its environment and the link it prints is the artifact itself.
 
+**A `rebuild` run posts one comment, not two.** `@perotoolsbot rebuild` runs the checks stage and then answers from the review step, and both used to report the same results: the status comment, then the reply saying the same thing a second time. Now the checks stage recognises the command (`_comment_invocation`, no model call), sees that its reply is the report, and stays quiet — one comment, the one that answers the person who asked. Every other run still gets the status comment, because for those the reply is a review, not a build report.
+
 The directory is **not dot-prefixed**, and that is load-bearing rather than tidy. `upload-artifact` leaves hidden files out unless `include-hidden-files` is true, so a `.ai-review-artifacts` directory is searched, found empty and reported as *No files were found with the provided path* — while the stage's own log says `Copied 8 report file(s)`, in the same twenty-five seconds. It took three runs and two wrong fixes (the path, then the timing) to read those two lines together.
 
 ### What a build and a test run print
