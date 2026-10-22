@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.108"
+VERSION = "2026-10-14.unity.109"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -5244,7 +5244,9 @@ def stage_review(
                     did.append(f"posted {reply_ctx.inline_posted} inline comment(s)")
                 if did:
                     reason += f" (it {' and '.join(did)} first)"
-            log(f"Ignored the comment: {reason}.")
+            # Not "ignored": a run that closed ten threads did a great deal, and
+            # may be about to approve. What did not happen is the reply.
+            log(f"No reply posted: {reason}.")
             # Nothing to say is not nothing to do. A run that closed the threads
             # has left the pull request clean, and that is exactly what the
             # approval is for — skipping it here is how ten closed threads ended
