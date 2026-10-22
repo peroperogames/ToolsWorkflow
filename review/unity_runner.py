@@ -1280,17 +1280,26 @@ TEST_PLATFORMS = ("EditMode", "PlayMode")
 # "There is no Addressables Settings in project" instead of running, and a project
 # laid out from a template has none — so a package that resolves Addressables gets
 # the settings created before its tests run, and one that does not is left alone.
+#
+# The play mode script is part of the same assumption, and it is why this runs again
+# on later builds: "Use Asset Database (fastest)" bypasses the Addressables runtime
+# entirely, and a fixture that asserts `ActivePlayModeDataBuilderIndex != 0` refuses
+# to run in it (UIQueen's do). The index lives in a binary `Library` config, so the
+# method writes the result to a stamp this side can read.
 ADDRESSABLES_PACKAGE = "com.unity.addressables"
 ADDRESSABLE_SETTINGS = Path("Assets") / "AddressableAssetsData" / "AddressableAssetSettings.asset"
+ADDRESSABLE_PLAYMODE = 1  # "Simulate Groups (advanced)", as the editor orders them
 PROVISION_SCRIPT = Path("Assets") / "Editor" / "AiReviewProvision.cs"
 PROVISION_METHOD = "AiReviewProvision.EnsureAddressableSettings"
 PROVISION_TIMEOUT = 600
+PROVISION_STAMP = Path("Library") / "ai-review-provisioned.txt"
 PROVISION_HEADER = "ai-review:"
 PROVISION_SOURCE = """\
 // Written by the AI code review pipeline, one method, for one reason: a project
 // laid out from a template has no Addressables settings, and the package's tests
-// assert on their absence instead of running. Creating them is what a developer's
-// own project already has, not a change to the package.
+// assert on their absence instead of running. Creating them — and choosing the
+// play mode script the tests expect — is what a developer's own project already
+// has, not a change to the package.
 using UnityEditor;
 using UnityEditor.AddressableAssets;
 using UnityEditor.AddressableAssets.Settings;
@@ -1309,15 +1318,33 @@ public static class AiReviewProvision
             EditorApplication.Exit(1);
             return;
         }
+        int index = settings.ActivePlayModeDataBuilderIndex;
+        if (index == 0)
+        {
+            // 0 is "Use Asset Database (fastest)", which does not go through the
+            // Addressables runtime at all; 1 is "Simulate Groups (advanced)".
+            settings.ActivePlayModeDataBuilderIndex = %(playmode)d;
+            index = settings.ActivePlayModeDataBuilderIndex;
+        }
         AssetDatabase.SaveAssets();
         AssetDatabase.Refresh();
+        // Read back by the other side, which cannot parse the binary config this
+        // index is stored in.
+        System.IO.Directory.CreateDirectory("Library");
+        System.IO.File.WriteAllText(
+            "%(stamp)s", "activePlayModeDataBuilderIndex=" + index);
         UnityEngine.Debug.Log(
             "%(header)s Addressables settings at " + AssetDatabase.GetAssetPath(settings)
+            + ", play mode script index " + index
             + ", default group: "
             + (settings.DefaultGroup != null ? settings.DefaultGroup.Name : "none"));
     }
 }
-""" % {"header": PROVISION_HEADER}
+""" % {
+    "header": PROVISION_HEADER,
+    "playmode": ADDRESSABLE_PLAYMODE,
+    "stamp": PROVISION_STAMP.as_posix(),
+}
 
 
 def _resolves_addressables(project: str) -> bool:
@@ -1344,12 +1371,36 @@ def _resolves_addressables(project: str) -> bool:
         return False
 
 
+def _provisioned(project: str) -> Optional[int]:
+    """The play mode index the stamp records, or None when there is no stamp.
+
+    The editor writes it, because the value itself lives in a binary config in
+    ``Library`` that this side cannot read; when ``Library`` is thrown away the
+    stamp goes with it, which is exactly when the project needs provisioning again.
+    """
+    path = Path(project) / PROVISION_STAMP
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() == "activePlayModeDataBuilderIndex":
+            try:
+                return int(value.strip())
+            except ValueError:
+                return None
+    return None
+
+
 def ensure_project_settings(cli: str, project: str, log_file: Path) -> None:
     """Give the project what the package's tests may assume it has. Never raises.
 
-    Today that is one thing — Addressables settings — and it is created by the
-    editor itself rather than by a yaml file this pipeline would have to keep in
-    step with four versions of the package. The script is written into the
+    Two things today, and neither is a guess about a yaml file: the Addressables
+    settings a template project does not have, and the play mode script the tests
+    expect — "Simulate Groups", because "Use Asset Database (fastest)" bypasses the
+    Addressables runtime and a fixture that stores its assets through it refuses to
+    run. Both are created by the editor itself, through a script written into the
     project's own ``Assets/Editor`` and removed again when the project stops
     resolving Addressables, because a reference to a package that is gone is a
     compile error in every later run.
@@ -1365,7 +1416,10 @@ def ensure_project_settings(cli: str, project: str, log_file: Path) -> None:
                         pass
                 log("Unity: removed the Addressables provisioning script; the project no longer resolves it.")
             return
-        if (Path(project) / ADDRESSABLE_SETTINGS).is_file():
+        index = _provisioned(project)
+        if (Path(project) / ADDRESSABLE_SETTINGS).is_file() and index:
+            # Both are already what the tests need; the stamp is what makes this
+            # cheap on every later run, since one of the two cannot be read here.
             return
         try:
             script.parent.mkdir(parents=True, exist_ok=True)
@@ -1373,12 +1427,20 @@ def ensure_project_settings(cli: str, project: str, log_file: Path) -> None:
         except OSError as exc:
             log(f"Unity: could not write {script}: {exc}")
             return
-        log("Unity: the project has no Addressables settings; creating them before the tests run.")
+        if index == 0:
+            log(
+                "Unity: the project's Addressables play mode script is \"Use Asset "
+                "Database (fastest)\"; switching it to \"Simulate Groups\" before the "
+                "tests run."
+            )
+        elif (Path(project) / ADDRESSABLE_SETTINGS).is_file():
+            log("Unity: checking the project's Addressables play mode script before the tests run.")
+        else:
+            log("Unity: the project has no Addressables settings; creating them before the tests run.")
         provision_log = log_file.with_name("provision.log")
         rc, text = run_unity(
             cli, project, ["-executeMethod", PROVISION_METHOD], PROVISION_TIMEOUT, provision_log
         )
-        created = (Path(project) / ADDRESSABLE_SETTINGS).is_file()
         said = [
             line.strip()
             for line in text.splitlines()
@@ -1386,14 +1448,19 @@ def ensure_project_settings(cli: str, project: str, log_file: Path) -> None:
         ]
         for line in said[-3:]:
             log(f"  {line}")
-        if created:
-            log(f"Unity: Addressables settings created ({ADDRESSABLE_SETTINGS.as_posix()}).")
+        created = (Path(project) / ADDRESSABLE_SETTINGS).is_file()
+        index = _provisioned(project)
+        if created and index:
+            log(
+                f"Unity: Addressables ready ({ADDRESSABLE_SETTINGS.as_posix()}, "
+                f"play mode script index {index})."
+            )
         else:
             # Not fatal: the package may not need them, and a run that cannot
             # create them is the same run as before this existed.
             log(
-                f"Unity: could not create Addressables settings (exit {rc}); the "
-                "tests run without them."
+                f"Unity: could not prepare Addressables settings (exit {rc}); the "
+                "tests run as they did before."
             )
     except Exception as exc:  # noqa: BLE001 - a missing setting is not a broken review
         log(f"Unity: project provisioning failed, continuing without it: {exc}")
