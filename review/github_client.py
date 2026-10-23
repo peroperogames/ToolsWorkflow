@@ -458,6 +458,32 @@ class GitHubClient:
         except Exception:  # noqa: BLE001 - callers have a default to fall back to
             return None
 
+    def path_exists(
+        self, owner: str, repo: str, path: str, ref: Optional[str] = None
+    ) -> Optional[bool]:
+        """Does ``path`` exist at ``ref``? ``None`` when the answer is not available.
+
+        The contents API answers 404 for a missing path and 200 for anything it can
+        list, a binary or oversized file included — which is the distinction a
+        thread decider needs: "this file was removed" must not be confused with "I
+        could not read it as text", or a thread asking for a removal is told the
+        file is still there when it is not.
+        """
+        params: Dict[str, Any] = {}
+        if ref:
+            params["ref"] = ref
+        try:
+            self._request("GET", f"/repos/{owner}/{repo}/contents/{path}", params=params)
+            return True
+        except RuntimeError as exc:
+            if "GitHub API error (404)" in str(exc):
+                return False
+            log(f"Warning: could not check whether {path} exists: {exc}")
+            return None
+        except Exception as exc:  # noqa: BLE001 - the caller says "unknown"
+            log(f"Warning: could not check whether {path} exists: {exc}")
+            return None
+
     def put_file(
         self,
         owner: str,

@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.117"
+VERSION = "2026-10-14.unity.118"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -879,7 +879,7 @@ RESOLVE_DECIDER_PROMPT = (
     "Earlier review comments of yours on a pull request are listed below as "
     "unresolved threads. The code below is what to judge them against: the diff "
     "of the latest push when a push triggered this review, the whole pull request "
-    "otherwise.\n"
+    "otherwise. Each thread says whether the pull request still changes its file.\n"
     "Decide which of those threads are now ADDRESSED by that code and can be "
     "marked resolved.\n"
     'Reply with ONLY a JSON object: {"resolved": [{"id": "<thread id>", '
@@ -888,6 +888,13 @@ RESOLVE_DECIDER_PROMPT = (
     "Rules:\n"
     "- Include a thread only when the current code clearly fixes or removes the "
     "issue it raised.\n"
+    "- `file at head: no` means the file itself is gone from the branch: a thread "
+    "asking to remove or ignore it has been carried out, and that is a reason to "
+    "resolve it. `changed by this pull request: no` alone does not say that, "
+    "because the file may simply be untouched.\n"
+    "- `changed by this pull request: no` means the pull request no longer touches "
+    "that file at all — a request to remove or revert it may have been carried out, "
+    "and that is a reason to resolve it.\n"
     "- If the concern is still present, or you cannot tell, LEAVE IT OUT of "
     "`resolved` — an unresolved thread costs nothing, a wrongly resolved one hides "
     "a bug. List it in `open` instead, with what is still missing.\n"
@@ -1764,33 +1771,44 @@ def _thread_paths(
     return paths
 
 
-def settle_diff_files(
+def settle_scope(
     gh: GitHubClient, owner: str, repo: str, number: int
-) -> Optional[List[Dict[str, Any]]]:
-    """The diff of the files the open threads are about, or None.
+) -> Tuple[Optional[List[Dict[str, Any]]], Optional["set[str]"]]:
+    """What to judge the open threads against: their files' diff, and what the PR changes.
 
-    A thread is judged against the code as it stands now, which is the whole reason
-    a `settle` after a fix should close it: the concern may have been dealt with by
-    a commit nobody reviewed. Only those files — a 285-file diff is expensive to
-    send and says nothing about the one file a thread is on.
+    The diff of the files the threads are about is the code question — a concern may
+    have been dealt with by a commit nobody reviewed. The second half is the one that
+    was missing: whether the file is part of the pull request at all. NativeAudio PR
+    #1 asked to remove three Eclipse files from the PR; the commits did remove them,
+    so they are no longer in `list_files` — and a decider shown only "no diff for
+    this path" cannot tell "already done" from "nothing to look at", which is why the
+    thread stayed open for days. Only the threads' files are sent as a diff: a
+    285-file diff is expensive and says nothing about the one file a thread is on.
     """
     paths = _thread_paths(gh, owner, repo, number)
-    if not paths:
-        return None
     try:
         files = gh.list_files(owner, repo, number)
     except Exception as exc:  # noqa: BLE001 - best-effort, never block the command
         log(f"Warning: could not list the changed files: {exc}")
-        return None
+        return None, None
+    changed_paths = {f.get("filename") or "" for f in files}
+    if not paths:
+        return None, changed_paths
     wanted = [
         f for f in files if (f.get("filename") or "") in paths and f.get("patch")
     ]
+    gone = sorted(p for p in paths if p not in changed_paths)
+    if gone:
+        log(
+            "Settle command: thread(s) on file(s) this pull request no longer changes: "
+            + ", ".join(gone[:5])
+        )
     if wanted:
         log(
             f"Settle command: judging against the diff of {len(wanted)} file(s) the "
             "open thread(s) are about."
         )
-    return wanted or None
+    return wanted or None, changed_paths
 
 
 def handle_settle_command(ctx: CommandContext, command: Command) -> int:
@@ -1816,10 +1834,12 @@ def handle_settle_command(ctx: CommandContext, command: Command) -> int:
             "are left"
         )
         return 0
+    diff_files, changed_paths = settle_scope(ctx.gh, ctx.owner, ctx.repo, ctx.number)
     outcome = settle_threads_and_approve(
         ctx.ai, ctx.gh, ctx.owner, ctx.repo, ctx.number, ctx.pr,
         conversation=ctx.conversation,
-        diff_files=settle_diff_files(ctx.gh, ctx.owner, ctx.repo, ctx.number),
+        diff_files=diff_files,
+        changed_paths=changed_paths,
         language=ctx.config.language,
     )
     after = unresolved_bot_thread_count(ctx.gh, ctx.owner, ctx.repo, ctx.number)
@@ -2063,6 +2083,7 @@ def settle_threads_and_approve(
     why_not: str = "New findings were raised",
     skip_ids: Optional[List[int]] = None,
     language: str = "",
+    changed_paths: Optional["set[str]"] = None,
 ) -> SettleOutcome:
     """Resolve the threads that are done with, then approve if none are left.
 
@@ -2084,7 +2105,7 @@ def settle_threads_and_approve(
     outcome = decide_resolved_threads(
         ai, gh, owner, repo, number, pr, "perotoolsbot[bot]",
         diff_files=diff_files, conversation=conversation,
-        skip_ids=skip_ids, language=language,
+        skip_ids=skip_ids, language=language, changed_paths=changed_paths,
     )
 
     if not allow_approve:
@@ -2158,6 +2179,27 @@ def _resolution_note(reason: str, language: str) -> str:
     )
 
 
+def _file_exists_at(
+    gh: GitHubClient, owner: str, repo: str, path: str, ref: str
+) -> Optional[bool]:
+    """Does ``path`` still exist at ``ref``? ``None`` when that cannot be told.
+
+    For a thread whose file the pull request no longer changes, this separates "the
+    file was removed, the request was carried out" from "the file is still there,
+    the thread was about something else" — the difference between closing the thread
+    and guessing about it.
+    """
+    probe = getattr(gh, "path_exists", None)
+    if callable(probe):
+        return probe(owner, repo, path, ref)
+    # A client without the probe can still tell "readable" from "not", which is
+    # enough to say no for a removed file.
+    getter = getattr(gh, "get_file_content_optional", None)
+    if callable(getter):
+        return getter(owner, repo, path, ref) is not None
+    return None
+
+
 def _open_note(reason: str, language: str) -> str:
     """What to post in a thread that stays open: what is still missing.
 
@@ -2202,6 +2244,7 @@ def decide_resolved_threads(
     conversation: str = "",
     skip_ids: Optional[List[int]] = None,
     language: str = "",
+    changed_paths: Optional["set[str]"] = None,
 ) -> SettleOutcome:
     """Resolve the review threads that have been settled.
 
@@ -2261,10 +2304,34 @@ def decide_resolved_threads(
         log("No unresolved bot review threads to consider.")
         return 0
 
+    # A thread whose file the pull request no longer touches may have had its request
+    # carried out by removing the file — the case that guessed wrong on NativeAudio
+    # PR #1, where the decider said "仍未从 PR 移除" about three files that were gone
+    # from the branch. One cheap API call per such thread says which.
+    head_sha = pr.get("head", {}).get("sha", "")
+    if changed_paths is not None and head_sha:
+        for c in candidates:
+            c["exists"] = None
+            if c["path"] and c["path"] not in changed_paths:
+                c["exists"] = _file_exists_at(gh, owner, repo, c["path"], head_sha)
     log(f"Judging {len(candidates)} unresolved thread(s)...")
     listing = "\n".join(
         f"- id: {c['id']}\n  path: {c['path']}\n  outdated: {c['outdated']}\n"
-        f"  comment: {c['body']}"
+        + (
+            "  changed by this pull request: "
+            + ("yes" if c["path"] in changed_paths else "no")
+            + "\n"
+            if changed_paths is not None
+            else ""
+        )
+        + (
+            "  file at head: "
+            + ("yes" if c.get("exists") else "no" if c.get("exists") is False else "unknown")
+            + "\n"
+            if c.get("exists") is not None
+            else ""
+        )
+        + f"  comment: {c['body']}"
         for c in candidates
     )
     context = "## Unresolved threads\n\n" + listing
@@ -5653,15 +5720,18 @@ def stage_review(
 
         # A concern answered in the thread is settled even without a code change,
         # so re-check the open threads and approve once nothing is left. No diff
-        # is passed: what settles a thread here is the discussion, not the code.
-        # The bot's own reply is part of that discussion, so it must not be read
-        # as the answer that settles the thread it was written into — hence the
-        # ids this run posted are left out.
+        # is passed: what settles a thread here is the discussion, not the code —
+        # but *which files the pull request still changes* is, so a thread about a
+        # file that has since been removed can be closed. The bot's own reply is
+        # part of that discussion, so it must not be read as the answer that
+        # settles the thread it was written into — hence the ids this run posted
+        # are left out.
         if not config.dry_run:
             settle_threads_and_approve(
                 ai, gh, owner, repo, number, pr,
                 conversation=conversation,
                 skip_ids=list(reply_ctx.posted_ids) if reply_ctx is not None else [],
+                changed_paths={f.get("filename") or "" for f in reply_files},
                 language=config.language,
             )
         return 0
@@ -5763,6 +5833,7 @@ def stage_review(
             ai, gh, owner, repo, number, pr,
             conversation=conversation,
             diff_files=push_files if push_files else files,
+            changed_paths={f.get("filename") or "" for f in (push_files or files)},
             allow_approve=not build_blocked,
             why_not=no_approve_reason,
             skip_ids=list(ctx.posted_ids),
