@@ -194,6 +194,15 @@ The words live in one registry (`COMMANDS` in `main.py`): each entry names the c
 
   The comment carries the result and nothing about the command — whoever reads it asked for `settle`, so a line explaining that it posts no new comments is the bot restating the request back at them. The same rule removed the parenthetical from the rebuild heading (`🔧 **重新构建与测试**`, with no "只跑门禁，未做评审") and the description from the reports link (`完整报告：<url>`).
 
+  When threads are left open it says which, and why — the decider is asked for a sentence per thread it does not close, and the comment lists them:
+
+  ```
+  未解决线程 1 → 1，暂不 approve：
+  - `AndroidProject~/.project:12` — 新提交没有改动这个文件，构建产物仍然会被提交。
+  ```
+
+  "Not approved" without a reason is the one answer the command could not give by staying quiet; a thread whose decider gave no reason falls back to its own opening comment, said plainly as such, and more than five are counted rather than listed.
+
 Replying requires the GitHub App to have **`Issues: Read and write`** permission (issue comments use the Issues API, which is separate from `Pull requests`).
 
 ### Reviewing only on demand

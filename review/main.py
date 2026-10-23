@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.115"
+VERSION = "2026-10-14.unity.116"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -883,17 +883,21 @@ RESOLVE_DECIDER_PROMPT = (
     "Decide which of those threads are now ADDRESSED by that code and can be "
     "marked resolved.\n"
     'Reply with ONLY a JSON object: {"resolved": [{"id": "<thread id>", '
-    '"reason": "<one sentence: what settled it>"}]}\n'
+    '"reason": "<one sentence: what settled it>"}], "open": [{"id": "<thread id>", '
+    '"reason": "<one sentence: what is still missing>"}]}\n'
     "Rules:\n"
     "- Include a thread only when the current code clearly fixes or removes the "
     "issue it raised.\n"
-    "- If the concern is still present, or you cannot tell, LEAVE IT OUT — an "
-    "unresolved thread costs nothing, a wrongly resolved one hides a bug.\n"
+    "- If the concern is still present, or you cannot tell, LEAVE IT OUT of "
+    "`resolved` — an unresolved thread costs nothing, a wrongly resolved one hides "
+    "a bug. List it in `open` instead, with what is still missing.\n"
     "- Never include ids that are not in the list.\n"
     "- The `reason` is posted in the thread for its author: say what changed, or "
     "which part of the discussion settled it, in the language of the thread. A "
     "thread resolved without a reason is indistinguishable from one resolved by "
-    "mistake."
+    "mistake.\n"
+    "- The `open` reason is read by the person who asked why the pull request was "
+    "not approved: name what the code still lacks, not that it was reviewed."
 )
 
 INCREMENTAL_DIRECTIVE = (
@@ -1812,7 +1816,7 @@ def handle_settle_command(ctx: CommandContext, command: Command) -> int:
             "are left"
         )
         return 0
-    approved = settle_threads_and_approve(
+    outcome = settle_threads_and_approve(
         ctx.ai, ctx.gh, ctx.owner, ctx.repo, ctx.number, ctx.pr,
         conversation=ctx.conversation,
         diff_files=settle_diff_files(ctx.gh, ctx.owner, ctx.repo, ctx.number),
@@ -1820,17 +1824,19 @@ def handle_settle_command(ctx: CommandContext, command: Command) -> int:
     )
     after = unresolved_bot_thread_count(ctx.gh, ctx.owner, ctx.repo, ctx.number)
     ctx.gh.post_comment(
-        ctx.owner, ctx.repo, ctx.number, settle_comment_body(before, after, approved)
+        ctx.owner, ctx.repo, ctx.number, settle_comment_body(before, after, outcome)
     )
     return 0
 
 
-def settle_comment_body(before: int, after: int, approved: bool) -> str:
-    """What a `settle` run says: the result, and nothing about the command.
+def settle_comment_body(before: int, after: int, outcome: "SettleOutcome") -> str:
+    """What a `settle` run says: the result, why, and nothing about the command.
 
     Whoever reads this asked for `settle`, so they know what it does — a sentence
     explaining that it posts no new comments is not news, it is the bot restating
-    the request back at them. What they cannot know without it is what happened.
+    the request back at them. What they cannot know without it is what happened,
+    and *why the pull request is still unapproved*: a thread that stayed open with
+    no sentence about it is the one thing this command used to leave out.
 
     "All resolved but not approved" has two causes — this commit was already
     approved, or the API refused — and neither is a failure of the command, so the
@@ -1840,10 +1846,25 @@ def settle_comment_body(before: int, after: int, approved: bool) -> str:
         return "读不到线程状态，详见 workflow 日志。"
     counts = f"未解决线程 {before} → {after}，" if before >= 0 else f"未解决线程 {after}，"
     if after == 0:
-        if approved:
+        if outcome.approved:
             return counts + "已 approve ✅"
         return counts + "approve 未提交（该提交此前已批准过，或没有权限）。"
-    return counts + "暂不 approve。"
+    if outcome.unknown:
+        return counts + "判定失败，详见 workflow 日志。"
+    lines = [counts + "暂不 approve："]
+    for item in outcome.open[:5]:
+        path = item.get("path") or "线程"
+        line = item.get("line")
+        where = f"`{path}:{line}`" if line else f"`{path}`"
+        reason = (item.get("reason") or "").strip()
+        if not reason:
+            # The decider said nothing, so the thread's own opening line is the
+            # only honest thing left to show.
+            reason = "判定器没有说明原因；原意见：" + (item.get("body") or "")[:160]
+        lines.append(f"- {where} — {reason[:300]}")
+    if len(outcome.open) > 5:
+        lines.append(f"- … 另有 {len(outcome.open) - 5} 个")
+    return "\n".join(lines)
 
 
 # Every command the bot answers to. A command never reaches the intent
@@ -2053,12 +2074,13 @@ def settle_threads_and_approve(
     why_not: str = "New findings were raised",
     skip_ids: Optional[List[int]] = None,
     language: str = "",
-) -> bool:
+) -> SettleOutcome:
     """Resolve the threads that are done with, then approve if none are left.
 
-    Returns whether the approval was actually submitted — a thread still open, an
-    approval already on this commit and a refused API call are all "no", and the
-    commands that report back to the person who asked need to tell them apart.
+    The outcome carries all three answers a comment needs: whether the approval was
+    submitted (a thread still open, an approval already on this commit and a refused
+    API call are all "no"), how many threads it resolved, and — for the ones it left
+    alone — the decider's sentence about what is still missing.
 
     Called after every review, not only after a push: a review is the bot looking
     at the current state, so it is also the moment to retire what an earlier
@@ -2070,7 +2092,7 @@ def settle_threads_and_approve(
     ``skip_ids`` are the comments this run just posted, which are never resolved
     here — see :func:`decide_resolved_threads`.
     """
-    decide_resolved_threads(
+    outcome = decide_resolved_threads(
         ai, gh, owner, repo, number, pr, "perotoolsbot[bot]",
         diff_files=diff_files, conversation=conversation,
         skip_ids=skip_ids, language=language,
@@ -2078,13 +2100,14 @@ def settle_threads_and_approve(
 
     if not allow_approve:
         log(f"{why_not}; not approving.")
-        return False
+        return outcome
 
-    return approve_if_clean(
+    outcome.approved = approve_if_clean(
         gh, owner, repo, number,
         pr.get("head", {}).get("sha", ""),
         "所有遗留问题已解决 ✅",
     )
+    return outcome
 
 
 def unresolved_bot_thread_count(
@@ -2146,6 +2169,21 @@ def _resolution_note(reason: str, language: str) -> str:
     )
 
 
+@dataclass
+class SettleOutcome:
+    """What judging the threads produced, in the terms a comment needs.
+
+    ``open`` is the part that used to be lost: a thread left alone because the code
+    still does not fix it, with the decider's sentence about what is missing — the
+    one thing the person who asked "why was this not approved?" needs.
+    """
+
+    resolved: int = 0
+    open: List[Dict[str, Any]] = field(default_factory=list)
+    approved: bool = False
+    unknown: bool = False
+
+
 def decide_resolved_threads(
     ai: AIClient,
     gh: GitHubClient,
@@ -2158,7 +2196,7 @@ def decide_resolved_threads(
     conversation: str = "",
     skip_ids: Optional[List[int]] = None,
     language: str = "",
-) -> int:
+) -> SettleOutcome:
     """Resolve the review threads that have been settled.
 
     A thread counts as settled when the code dealt with it (``diff_files``) or
@@ -2170,11 +2208,13 @@ def decide_resolved_threads(
     dealt with by anything, and resolving it turns a review into a review that
     said nothing. Every resolution posts its reason in the thread first.
     """
+    outcome = SettleOutcome()
     try:
         threads = gh.list_review_threads(owner, repo, number)
     except Exception as exc:  # noqa: BLE001 - best-effort, never block the review
         log(f"Warning: could not list review threads: {exc}")
-        return 0
+        outcome.unknown = True
+        return outcome
 
     posted_now = set(skip_ids or [])
     candidates: List[Dict[str, Any]] = []
@@ -2236,7 +2276,8 @@ def decide_resolved_threads(
     data = _first_json_object(raw or "")
     if not data or not isinstance(data.get("resolved"), list):
         log("Thread-resolution decision returned no usable JSON; resolving nothing.")
-        return 0
+        outcome.unknown = True
+        return outcome
 
     wanted: Dict[str, str] = {}
     for item in data["resolved"]:
@@ -2245,11 +2286,29 @@ def decide_resolved_threads(
         elif isinstance(item, dict) and item.get("id"):
             wanted[str(item["id"])] = str(item.get("reason") or "").strip()
 
+    # What the decider said about the ones it is leaving open: the reason a thread
+    # stays open is the thing the person asking for a settle wants to know.
+    why_open: Dict[str, str] = {}
+    for item in data.get("open") or []:
+        if isinstance(item, dict) and item.get("id"):
+            why_open[str(item["id"])] = " ".join(
+                str(item.get("reason") or "").split()
+            )
+
     known = {str(c["id"]) for c in candidates}
     resolved = 0
+    kept_open: List[Dict[str, Any]] = []
     for c in candidates:
         tid = str(c["id"])
         if tid not in wanted or tid not in known:
+            kept_open.append(
+                {
+                    "path": c.get("path"),
+                    "line": c.get("line"),
+                    "reason": why_open.get(tid, ""),
+                    "body": c.get("body") or "",
+                }
+            )
             continue
         # Another run of this pull request may have got here first: runs used to
         # overlap freely, and each posted its own "why this is resolved" note. The
@@ -2267,8 +2326,23 @@ def decide_resolved_threads(
             log(f"Resolved thread on {c['path']}.")
         except Exception as exc:  # noqa: BLE001 - one failure shouldn't stop the rest
             log(f"Warning: failed to resolve thread on {c['path']}: {exc}")
+            kept_open.append(
+                {
+                    "path": c.get("path"),
+                    "line": c.get("line"),
+                    "reason": f"判定可以关闭，但 GitHub 拒绝了这个操作：{exc}",
+                    "body": c.get("body") or "",
+                }
+            )
+    outcome.resolved = resolved
+    outcome.open = kept_open
+    for item in kept_open:
+        log(
+            f"  left open: {item.get('path')}:{item.get('line') or '?'}"
+            f" — {item.get('reason') or '(the decider gave no reason)'}"
+        )
     log(f"Resolved {resolved}/{len(candidates)} thread(s).")
-    return resolved
+    return outcome
 
 
 def _reply_in_thread(
