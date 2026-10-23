@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.113"
+VERSION = "2026-10-14.unity.114"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -1738,6 +1738,57 @@ def rebuild_comment_body(
     return "\n".join(lines)
 
 
+def _thread_paths(
+    gh: GitHubClient, owner: str, repo: str, number: int
+) -> "set[str]":
+    """The files the open bot threads are about (empty when they cannot be read)."""
+    try:
+        threads = gh.list_review_threads(owner, repo, number)
+    except Exception as exc:  # noqa: BLE001 - the settle still runs without a diff
+        log(f"Warning: could not list review threads: {exc}")
+        return set()
+    paths: "set[str]" = set()
+    for thread in threads:
+        if thread.get("isResolved"):
+            continue
+        nodes = (thread.get("comments") or {}).get("nodes") or []
+        if nodes and not is_bot_author(nodes[0].get("author")):
+            continue
+        path = thread.get("path")
+        if path:
+            paths.add(path)
+    return paths
+
+
+def settle_diff_files(
+    gh: GitHubClient, owner: str, repo: str, number: int
+) -> Optional[List[Dict[str, Any]]]:
+    """The diff of the files the open threads are about, or None.
+
+    A thread is judged against the code as it stands now, which is the whole reason
+    a `settle` after a fix should close it: the concern may have been dealt with by
+    a commit nobody reviewed. Only those files — a 285-file diff is expensive to
+    send and says nothing about the one file a thread is on.
+    """
+    paths = _thread_paths(gh, owner, repo, number)
+    if not paths:
+        return None
+    try:
+        files = gh.list_files(owner, repo, number)
+    except Exception as exc:  # noqa: BLE001 - best-effort, never block the command
+        log(f"Warning: could not list the changed files: {exc}")
+        return None
+    wanted = [
+        f for f in files if (f.get("filename") or "") in paths and f.get("patch")
+    ]
+    if wanted:
+        log(
+            f"Settle command: judging against the diff of {len(wanted)} file(s) the "
+            "open thread(s) are about."
+        )
+    return wanted or None
+
+
 def handle_settle_command(ctx: CommandContext, command: Command) -> int:
     """Re-judge the open threads, and approve if none are left.
 
@@ -1745,10 +1796,13 @@ def handle_settle_command(ctx: CommandContext, command: Command) -> int:
     new inline comment, so "settle" cannot turn into another round of findings. A
     thread it judges done gets its reason posted *inside* that thread — a reply,
     not a thread — and when nothing is left the run approves, which is the whole
-    point of asking for it. The threads are judged from their own comments and the
-    discussion; no diff is passed, exactly as when a reply settles them, because
-    the question is whether the concern was dealt with, not whether the code
-    changed.
+    point of asking for it.
+
+    The code is part of the judgment: the diff of the files the open threads are
+    about goes with the threads, so a fix pushed since the review — which the review
+    has not seen yet — can be what closes them. Without it, asking for a settle
+    after pushing a fix leaves the thread exactly where it was, which is what
+    happened on AccessKing PR #3 (`未解决线程：1 → 1`).
     """
     log("Settle command: judging the open threads again; no build, no new comments.")
     before = unresolved_bot_thread_count(ctx.gh, ctx.owner, ctx.repo, ctx.number)
@@ -1761,6 +1815,7 @@ def handle_settle_command(ctx: CommandContext, command: Command) -> int:
     approved = settle_threads_and_approve(
         ctx.ai, ctx.gh, ctx.owner, ctx.repo, ctx.number, ctx.pr,
         conversation=ctx.conversation,
+        diff_files=settle_diff_files(ctx.gh, ctx.owner, ctx.repo, ctx.number),
         language=ctx.config.language,
     )
     after = unresolved_bot_thread_count(ctx.gh, ctx.owner, ctx.repo, ctx.number)
