@@ -196,25 +196,45 @@ jobs:
       # The install snippet in a README is the same fact as package.json, written
       # down twice, and it goes stale silently — AccessKing's still said 0.2.5 two
       # releases later. Rewritten here so it lands in the same commit as the bump.
+      #
+      # Two READMEs can carry it: the package's own (which npm shows) and the
+      # repository's, which is where AccessKing writes its install snippets — the
+      # package lives in `Unity/` and the README it belongs to sits above it. The
+      # step therefore works from the repository root and reads the manifest through
+      # the package directory.
       - name: Update the README's version
+        working-directory: ${{ github.workspace }}
         env:
           CI_COMMIT_TAG: ${{ github.ref_name }}
+          PACKAGE_DIR: ${{ inputs.working-directory }}
         run: |
-          PACKAGE_NAME=$(grep '"name"' package.json | head -1 | sed 's/.*"name": *"\([^"]*\)".*/\1/')
-          NEW_VERSION=$(grep '"version"' package.json | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
+          PACKAGE_NAME=$(grep '"name"' "$PACKAGE_DIR/package.json" | head -1 | sed 's/.*"name": *"\([^"]*\)".*/\1/')
+          NEW_VERSION=$(grep '"version"' "$PACKAGE_DIR/package.json" | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
           echo "package: $PACKAGE_NAME, version: $NEW_VERSION, tag: $CI_COMMIT_TAG"
           # The npm/OpenUPM snippets want the published version; a `git#…` URL wants
           # the tag, which is the ref a consumer can resolve — `0.3.0` and
           # `0.3.0-base` are not the same string.
-          PACKAGE_NAME="$PACKAGE_NAME" NEW_VERSION="$NEW_VERSION" GIT_REF="$CI_COMMIT_TAG" \
-            bash "$RUNNER_TEMP/devops/ToolsWorkflow/publish/update_readme_version.sh" README.md
+          candidates=("$PACKAGE_DIR/README.md")
+          if [ "$PACKAGE_DIR" != "." ]; then candidates+=(README.md); fi
+          for readme in "${candidates[@]}"; do
+            PACKAGE_NAME="$PACKAGE_NAME" NEW_VERSION="$NEW_VERSION" GIT_REF="$CI_COMMIT_TAG" \
+              bash "$RUNNER_TEMP/devops/ToolsWorkflow/publish/update_readme_version.sh" "$readme"
+          done
 
       # The same version again, in whatever assembly/package properties the
       # repository keeps — `<Version>`, `<AssemblyVersion>`, `<FileVersion>` in a
       # .csproj or in a shared .props. Nothing else bumps those, so they drift.
+      #
+      # From the repository root, because the .NET side of a package usually sits
+      # beside the package directory rather than inside it: AccessKing's manifest is
+      # in `Unity/` and its project at `Core/`, and a scan of the package directory
+      # only ever found one of them.
       - name: Update the assembly version properties
+        working-directory: ${{ github.workspace }}
+        env:
+          PACKAGE_DIR: ${{ inputs.working-directory }}
         run: |
-          NEW_VERSION=$(grep '"version"' package.json | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
+          NEW_VERSION=$(grep '"version"' "$PACKAGE_DIR/package.json" | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
           # The list of files it changed, which the commit step stages. The
           # runner's scratch directory, because the working tree is dirty with the
           # packaging and a stray file in it could end up in the tarball.
@@ -226,15 +246,22 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+      # Also from the repository root: git resolves the pathspecs below against the
+      # current directory, so a manifest in `Unity/` and a project at `Core/` cannot
+      # both be named from inside the package directory.
       - name: Commit version update
         id: commit_version
+        working-directory: ${{ github.workspace }}
+        env:
+          PACKAGE_DIR: ${{ inputs.working-directory }}
         run: |
-          NEW_VERSION=$(grep '"version"' package.json | head -1 | sed 's/.*"version": "\(.*\)".*/\1/')
-          # The files this bump is made of: the manifest, the README whose install
-          # snippet repeats it, and whatever assembly-version properties the
+          NEW_VERSION=$(grep '"version"' "$PACKAGE_DIR/package.json" | head -1 | sed 's/.*"version": "\(.*\)".*/\1/')
+          # The files this bump is made of: the manifest, whichever READMEs carry
+          # the install snippet, and whatever assembly-version properties the
           # previous step rewrote.
-          FILES=(package.json)
-          if [ -f README.md ]; then FILES+=(README.md); fi
+          FILES=("$PACKAGE_DIR/package.json")
+          if [ -f "$PACKAGE_DIR/README.md" ]; then FILES+=("$PACKAGE_DIR/README.md"); fi
+          if [ "$PACKAGE_DIR" != "." ] && [ -f README.md ]; then FILES+=(README.md); fi
           if [ -s "$RUNNER_TEMP/version-files.txt" ]; then
             while IFS= read -r path; do FILES+=("$path"); done < "$RUNNER_TEMP/version-files.txt"
           fi

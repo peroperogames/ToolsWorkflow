@@ -62,6 +62,30 @@ to NuGet and nothing else. Each channel owns its prerequisites, so a caller that
 uses one need not supply the others'; what a channel is missing is reported by
 `resolve_channels.sh`, by name, before anything is built.
 
+## What goes where
+
+The npm channels and the NuGet channel carry **different artifacts from the same
+release**, and nothing is published to the wrong one:
+
+| Artifact | Where it comes from | Who gets it |
+| --- | --- | --- |
+| The Unity package — the tarball of `working-directory`, exactly what `npm pack` produces there | `npm pack` after the version bump | PeroNPM and npmjs (the same bytes) |
+| The .NET package(s) | `dotnet pack` of `nuget-project` | nuget.org |
+| The shared library the Unity package ships, if it ships a precompiled one | a committed file under the package (`Unity/Plugins/…` in AccessKing), copied there by that project's own build | inside the Unity tarball only |
+
+The third row is the one to watch: the publish bumps `<AssemblyVersion>` in the
+project but never rebuilds that committed assembly, so a package built from a stale
+copy ships an older binary than the NuGet package of the same version. AccessKing's
+`Core` project already has a `CopyToUnityPackage` target for this — running
+
+```bash
+dotnet build Core/PeroTools2.AccessKing.Core.csproj -c Unity
+```
+
+before the release refreshes `Unity/Plugins/` (the DLL, its `.pdb` and its `.xml`),
+and the resulting files belong in the same commit as the version bump. Making the
+publish do that automatically is one input away if it turns out to be wanted.
+
 ## The two runners
 
 The work is split over two jobs because it has to be:
@@ -165,15 +189,22 @@ different versions of itself:
 That version is then written into every place the repository repeats it:
 
 1. `package.json` — `version`, and the package name is moved under
-   `expected-package-prefix` if it is not already there.
+   `expected-package-prefix` if it is not already there. (A publish with no prefix
+   at all is refused: it would name the package `.com.prpr.accessking`.)
 2. `README.md` — only the lines that name this package: the `"pkg": "x.y.z"` of an
    install snippet becomes the version, and a `git#…` reference becomes the tag
    itself, because `0.3.0` and `0.3.0-base` are not the same string to a consumer.
-   Other packages' versions on the same page are left alone.
+   Other packages' versions on the same page are left alone. Both READMEs are
+   looked at — the package's own, which npm shows, and the repository's, which is
+   where a package whose manifest lives in a subdirectory usually writes its
+   install snippets.
 3. `*.csproj`, `*.props`, `*.targets` — `<Version>`, `<PackageVersion>` and
    `<InformationalVersion>` become the version; `<AssemblyVersion>` and
    `<FileVersion>` become its numeric core (`0.3.0`, also for
    `0.3.0-android-variant`), because those two cannot carry a prerelease label.
+   The scan covers the whole repository, not just `working-directory`: the .NET
+   side of a package sits beside the package directory rather than inside it
+   (AccessKing's manifest is in `Unity/`, its project at `Core/`).
 
 All of it lands in one commit, `chore: update package version to <version>.`, on the
 branch the release was cut from. The commit is made with `--only` and the exact
@@ -181,13 +212,18 @@ paths above, because the packaging has already moved folders and deleted `.meta`
 files in the working tree and anything else staged at that moment must not be swept
 in. If nothing needs rewriting the commit is skipped and the run carries on.
 
+Those three steps — the two rewrites and the commit — run from the **repository
+root**, with the manifest read through `working-directory`. Git resolves a
+pathspec against the current directory, so a bump that has to name `Unity/package.json`
+and `Core/…csproj` in the same commit cannot run from inside `Unity/`.
+
 ## What the run does, in order
 
 | Step (job) | What and why |
 | --- | --- |
 | Resolve the publish channels (`publish`) | Validates `channels` and what each named channel needs, prints `Publishing to: …`, and hands the three flags to the other jobs as this job's outputs. |
 | Pack the NuGet packages (`publish`) | Runs before the folders are renamed: `changefoldername.sh` puts a `~` on the folders `package.json` refers to, so a project inside one would no longer be at the path the repository names. The version is passed on the command line, which is a global property and therefore wins over the properties that are only bumped later. |
-| Change folder name, Package preprocess, Update the README's version, Update the assembly version properties (`publish`) | The packaging and the version rewrite, see above. |
+| Change folder name, Package preprocess, Update the README's version, Update the assembly version properties (`publish`) | The packaging and the version rewrite, see above. The rewrites run from the repository root so the .NET project and the repository README are reachable. |
 | Commit version update, Push changes (`publish`) | The one commit, rebased onto the branch tip so the push is a fast-forward, then the tag is moved to it. |
 | Check the PeroNPM login, Publish to PeroNPM (`publish`) | `npm whoami` first, so a missing login fails here instead of after three publish attempts. |
 | Collect the packages, Upload the packages (`publish`) | `npm pack` of the packaged tree plus the `.nupkg` files, into one `publish-packages` artifact. This is also what you download for a first, manual publish. |

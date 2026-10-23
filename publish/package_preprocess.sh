@@ -6,6 +6,13 @@ source "$(dirname "${BASH_SOURCE[0]}")/version_from_tag.sh"
 CLEAN_VERSION=$(extract_version "$CI_COMMIT_TAG") || exit 1
 echo "Extracted version: $CLEAN_VERSION"
 
+# 前缀为空时会把包名拼成 ".com.prpr.xxx"（空串 + "." + 原名），而这个包名会被真的
+# 发出去。宁可在这里停下来。
+if [ -z "${EXPECTED_PACKAGE_PREFIX:-}" ]; then
+    echo "Error: EXPECTED_PACKAGE_PREFIX must be set (the publish workflow defaults it to com.prpr)" >&2
+    exit 1
+fi
+
 # 包名处理
 old_package_name=$(grep "\"name\"\: " package.json | sed -n "1p" | awk -F'"' '{print $(NF-1)}')
 echo "$old_package_name" > old_package_name_file
