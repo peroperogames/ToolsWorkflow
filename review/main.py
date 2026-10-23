@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.120"
+VERSION = "2026-10-14.unity.121"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -4431,6 +4431,7 @@ def run_static_analysis(
         workdir, changed, targets,
         report_dir=report_dir,
         projects=filters,
+        unity=unity is not None,
     )
 
     # A solution is a bigger thing to load than its projects, and a Unity run can
@@ -4445,7 +4446,8 @@ def run_static_analysis(
             "package's own projects directly instead."
         )
         fallback = inspect_code.analyze(
-            workdir, changed, list(unity.package_projects), report_dir=report_dir
+            workdir, changed, list(unity.package_projects), report_dir=report_dir,
+            unity=True,
         )
         if fallback.ran:
             # The other target, if any, reported already; its findings stay.

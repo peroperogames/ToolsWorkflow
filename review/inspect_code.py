@@ -242,6 +242,53 @@ def run_inspectcode(
     return True
 
 
+# Unity compiles without nullable reference types: every project the editor
+# generates has `<Nullable>` off, and object lifetimes are the engine's rather than
+# the CLR's — a destroyed `UnityEngine.Object` compares equal to null while being a
+# live reference, and code is written for that. An inspection whose verdict comes
+# from nullability annotations is therefore reasoning about a contract the project
+# does not have.
+#
+# AccessKing PR #3 is what that costs: `o?.GetHashCode() ?? 0` in an equality
+# comparer was reported twice on one line — `ConstantConditionalAccessQualifier` and
+# `ConstantNullCoalescingCondition` — while the author's Rider, whose Unity project
+# model resolves Unity's own reference assemblies, reported neither. The ids are
+# matched by prefix because ReSharper ships suffixed variants
+# (`…AccordingToNullableAPIContract`).
+UNITY_NULLABLE_INSPECTIONS = (
+    "ConstantConditionalAccessQualifier",
+    "ConstantNullCoalescingCondition",
+    "ConditionIsAlwaysTrueOrFalse",
+    "PossibleNullReferenceException",
+    "AssignNullToNotNullAttribute",
+    "AnnotationRedundancyInHierarchy",
+    "RedundantNullnessAttributeWithNullableReferenceTypes",
+    "NullableWarningSuppressionIsUsed",
+)
+
+
+def is_nullable_inspection(type_id: str) -> bool:
+    """Is this finding a verdict about nullability?"""
+    return any(
+        (type_id or "").startswith(prefix) for prefix in UNITY_NULLABLE_INSPECTIONS
+    )
+
+
+def drop_nullable_issues(
+    issues: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """Split out the nullability findings a Unity project cannot honour."""
+    kept: List[Dict[str, Any]] = []
+    dropped: Dict[str, int] = {}
+    for issue in issues:
+        type_id = issue.get("type") or ""
+        if is_nullable_inspection(type_id):
+            dropped[type_id] = dropped.get(type_id, 0) + 1
+        else:
+            kept.append(issue)
+    return kept, dropped
+
+
 def parse_report(report_path: str) -> List[Dict[str, Any]]:
     """Parse a ReSharper XML report into issue dicts.
 
@@ -481,6 +528,7 @@ def analyze(
     targets: Sequence[str],
     report_dir: Optional[Path] = None,
     projects: Optional[Dict[str, Sequence[str]]] = None,
+    unity: bool = False,
 ) -> Analysis:
     """Run ReSharper over every target and return the issues on changed lines.
 
@@ -488,7 +536,9 @@ def analyze(
     Unity-generated one. An empty list means there is nothing to analyse, which
     the result distinguishes from an inspection that produced no report.
     ``projects`` maps a target to the projects inside it that the findings should
-    be limited to; a target with no entry is inspected whole.
+    be limited to; a target with no entry is inspected whole. ``unity`` says the
+    code under analysis is a Unity project, whose findings are filtered for
+    nullability — see :data:`UNITY_NULLABLE_INSPECTIONS`.
     Never raises: static analysis is best-effort and must not break the review.
     """
     targets = list(targets)
@@ -531,6 +581,18 @@ def analyze(
             collected.extend(issues)
 
         issues = _dedupe(collected)
+        if unity:
+            issues, nullable_dropped = drop_nullable_issues(issues)
+            if nullable_dropped:
+                detail = ", ".join(
+                    f"{name} ×{count}" for name, count in sorted(nullable_dropped.items())
+                )
+                log(
+                    f"ReSharper: {sum(nullable_dropped.values())} nullability "
+                    f"finding(s) dropped ({detail}) — a Unity project compiles "
+                    "without nullable reference types, so the annotation the "
+                    "inspection reasons from is not a contract this code has."
+                )
         duplicates = len(collected) - len(issues)
         if duplicates:
             log(f"ReSharper: {duplicates} duplicate finding(s) merged.")
