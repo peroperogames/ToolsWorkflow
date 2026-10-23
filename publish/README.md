@@ -205,7 +205,7 @@ off runs nothing at all — a NuGet-only release never sets up Node.
 | Input | Default | Description |
 | --- | --- | --- |
 | `channels` | `peronpm` | Comma-separated list of `peronpm`, `npmjs`, `nuget`. |
-| `nuget-project` | — | The `.csproj` or `.sln` the `nuget` channel packs, relative to `working-directory`. A solution packs every project in it that is packable. |
+| `nuget-project` | — | The `.csproj` or `.sln` the `nuget` channel packs, relative to the **repository root** — not to `working-directory`, because a package whose manifest lives in a subdirectory keeps its projects beside it, not inside it. A solution packs every project in it that is packable. |
 | `nuget-user` | — | The nuget.org profile name the trusted publishing policy belongs to. |
 | `nuget-source` | `https://api.nuget.org/v3/index.json` | The feed the `nuget` channel pushes to. |
 | `expected-package-prefix` | `com.prpr` | Package name prefix the manifest is moved under. |

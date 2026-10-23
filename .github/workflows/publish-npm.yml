@@ -13,8 +13,10 @@ on:
         default: 'peronpm'
       nuget-project:
         description: >-
-          The .csproj or .sln the nuget channel packs, relative to
-          working-directory. Only used when the nuget channel is named.
+          The .csproj or .sln the nuget channel packs, relative to the
+          REPOSITORY ROOT — not to working-directory, because a package whose
+          manifest lives in a subdirectory usually keeps its projects beside it
+          rather than inside it. Only used when the nuget channel is named.
         required: false
         type: string
         default: ''
@@ -146,6 +148,10 @@ jobs:
       # though the properties are only bumped two steps later.
       - name: Pack the NuGet packages
         if: ${{ steps.channels.outputs.DO_NUGET == 'true' }}
+        # From the repository root rather than the package directory: the projects
+        # usually sit beside the package manifest, not inside it, so the path in
+        # `nuget-project` means what the repository shows.
+        working-directory: ${{ github.workspace }}
         env:
           CI_COMMIT_TAG: ${{ github.ref_name }}
           NUGET_PROJECT: ${{ inputs.nuget-project }}
@@ -155,7 +161,7 @@ jobs:
             exit 1
           fi
           if [ ! -e "$NUGET_PROJECT" ]; then
-            echo "::error::No '$NUGET_PROJECT' in $(pwd) — the nuget-project input names the .csproj or .sln to pack."
+            echo "::error::No '$NUGET_PROJECT' at the repository root — the nuget-project input names the .csproj or .sln to pack, relative to the repository root."
             exit 1
           fi
           source "$RUNNER_TEMP/devops/ToolsWorkflow/publish/version_from_tag.sh"
