@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.119"
+VERSION = "2026-10-14.unity.120"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -907,6 +907,13 @@ RESOLVE_DECIDER_PROMPT = (
     "which part of the discussion settled it, in the language of the thread. A "
     "thread resolved without a reason is indistinguishable from one resolved by "
     "mistake.\n"
+    "- When the author dismissed a finding instead of changing the code, that "
+    "dismissal is the reason: quote their words, say the code was left unchanged, "
+    "and stop. Do not restate the warning for them, do not call it a false "
+    "positive, and never write 「作者认为…」 followed by a technical claim the author "
+    "did not make — AccessKing PR #3 has a note reading 「作者认为该警告无意义（'??' "
+    "左操作数永不为 null 属于防御性写法的误报），不处理。」 in reply to an author who "
+    "wrote only \"non sense.\"\n"
     "- The `open` reason is read by the person who asked why the pull request was "
     "not approved: name what the code still lacks, not that it was reviewed."
 )
