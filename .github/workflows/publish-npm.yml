@@ -329,6 +329,32 @@ jobs:
            git tag -f "$TAG"
            git push -f origin "$TAG"
 
+      # npm shows the README that is inside the published tarball, and the tarball is
+      # the package directory — so a package whose README lives at the repository
+      # root gets an empty page on npmjs and PeroNPM. It is copied in here, after the
+      # version commit and before anything is packed: part of the published package,
+      # never part of the commit, and only when the package has no README of its own.
+      - name: Give the package the repository's README
+        working-directory: ${{ github.workspace }}
+        env:
+          PACKAGE_DIR: ${{ inputs.working-directory }}
+        run: |
+          if [ "$PACKAGE_DIR" = "." ]; then
+            echo "The package is the repository root; its README is already inside it."
+            exit 0
+          fi
+          if [ ! -f README.md ]; then
+            echo "There is no README.md at the repository root; nothing to copy."
+            exit 0
+          fi
+          if [ -f "$PACKAGE_DIR/README.md" ]; then
+            echo "$PACKAGE_DIR has a README.md of its own; leaving it as it is."
+            exit 0
+          fi
+          cp README.md "$PACKAGE_DIR/README.md"
+          echo "Copied README.md into $PACKAGE_DIR so the published package carries it."
+          wc -l "$PACKAGE_DIR/README.md"
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:

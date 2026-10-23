@@ -70,10 +70,17 @@ release**, and nothing is published to the wrong one:
 | Artifact | Where it comes from | Who gets it |
 | --- | --- | --- |
 | The Unity package — the tarball of `working-directory`, exactly what `npm pack` produces there | `npm pack` after the version bump | PeroNPM and npmjs (the same bytes) |
+| The README shown on the npm page | the repository's `README.md`, copied into the package just before packing | inside the Unity tarball, never in the commit |
 | The .NET package(s) | `dotnet pack` of `nuget-project` | nuget.org |
 | The shared library the Unity package ships, if it ships a precompiled one | a committed file under the package (`Unity/Plugins/…` in AccessKing), copied there by that project's own build | inside the Unity tarball only |
 
-The third row is the one to watch: the publish bumps `<AssemblyVersion>` in the
+npm renders the README that is **inside the tarball**, and the tarball is the package
+directory: a repository whose README lives at its root therefore publishes a package
+with an empty page. So the root README is copied into the package at release time —
+after the version commit, so it is never part of the commit, and only when the package
+does not have a README of its own (one that does keeps it).
+
+The last row is the one to watch: the publish bumps `<AssemblyVersion>` in the
 project but never rebuilds that committed assembly, so a package built from a stale
 copy ships an older binary than the NuGet package of the same version. AccessKing's
 `Core` project already has a `CopyToUnityPackage` target for this — running
@@ -225,6 +232,7 @@ and `Core/…csproj` in the same commit cannot run from inside `Unity/`.
 | Pack the NuGet packages (`publish`) | Runs before the folders are renamed: `changefoldername.sh` puts a `~` on the folders `package.json` refers to, so a project inside one would no longer be at the path the repository names. The version is passed on the command line, which is a global property and therefore wins over the properties that are only bumped later. |
 | Change folder name, Package preprocess, Update the README's version, Update the assembly version properties (`publish`) | The packaging and the version rewrite, see above. The rewrites run from the repository root so the .NET project and the repository README are reachable. |
 | Commit version update, Push changes (`publish`) | The one commit, rebased onto the branch tip so the push is a fast-forward, then the tag is moved to it. |
+| Give the package the repository's README (`publish`) | npm shows the README inside the tarball, so the repository's is copied into the package directory — after the commit, so it never lands in it, and only when the package has none of its own. |
 | Check the PeroNPM login, Publish to PeroNPM (`publish`) | `npm whoami` first, so a missing login fails here instead of after three publish attempts. |
 | Collect the packages, Upload the packages (`publish`) | `npm pack` of the packaged tree plus the `.nupkg` files, into one `publish-packages` artifact. This is also what you download for a first, manual publish. |
 | Report the identity this job publishes under (`external`) | Decodes the OIDC claims and prints the repository and both workflow refs, so a trusted publisher can be filled in from a run rather than guessed. |
