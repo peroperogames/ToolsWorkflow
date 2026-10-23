@@ -6,14 +6,21 @@
 # snippet is the same fact written down twice, and it goes stale silently. This
 # rewrites it in the same commit.
 #
-#   PACKAGE_NAME=com.prpr.accessking NEW_VERSION=0.3.0 bash update_readme_version.sh README.md
+#   PACKAGE_NAME=com.prpr.accessking NEW_VERSION=0.3.0 GIT_REF=0.3.0-base \
+#       bash update_readme_version.sh README.md
 #
 # Only lines that *name the package* are touched. On such a line the version next
 # to the name is this package's version; on any other line a number like `2.5.5` is
 # a dependency's, and rewriting it would be wrong. Two shapes are handled:
 #
-#   "com.prpr.accessking": "0.2.5"
-#   "com.prpr.accessking": "https://github.com/peroperogames/AccessKing.git#v0.2.5"
+#   "com.prpr.accessking": "0.2.5"                 -> the published version
+#   "com.prpr.accessking": "https://…/…git#v0.2.5" -> GIT_REF, the ref a consumer
+#                                                     can actually resolve
+#
+# The two are not always the same string: AccessKing publishes clean version numbers
+# to npm and tags its releases `0.3.0-base`, so a git URL pointing at `0.3.0` would
+# name a ref that does not exist. `GIT_REF` defaults to `NEW_VERSION` for the
+# repositories where they are the same.
 #
 # Anything else — a badge nobody can classify, a changelog heading — is left alone.
 # A README with no version reference says so and exits 0: not every package writes
@@ -23,6 +30,7 @@ set -uo pipefail
 README="${1:-README.md}"
 PACKAGE_NAME="${PACKAGE_NAME:-}"
 NEW_VERSION="${NEW_VERSION:-}"
+GIT_REF="${GIT_REF:-$NEW_VERSION}"
 
 if [ -z "$PACKAGE_NAME" ] || [ -z "$NEW_VERSION" ]; then
     echo "Error: PACKAGE_NAME and NEW_VERSION must be set" >&2
@@ -35,6 +43,7 @@ fi
 
 escaped_pkg=$(printf '%s' "$PACKAGE_NAME" | sed 's/[.]/\\./g')
 escaped_new=$(printf '%s' "$NEW_VERSION" | sed 's/[.&/]/\\&/g')
+escaped_ref=$(printf '%s' "$GIT_REF" | sed 's/[.&/]/\\&/g')
 semver='[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?'
 
 before=$(mktemp)
@@ -43,7 +52,7 @@ cp -f "$README" "$before"
 
 sed -i -E \
     -e "/\"${escaped_pkg}\"/ {
-        s/(\"${escaped_pkg}\"[[:space:]]*:[[:space:]]*\"[^\"]*#v?)${semver}\"/\1${escaped_new}\"/g
+        s/(\"${escaped_pkg}\"[[:space:]]*:[[:space:]]*\"[^\"]*#)v?${semver}\"/\1${escaped_ref}\"/g
         s/(\"${escaped_pkg}\"[[:space:]]*:[[:space:]]*\")${semver}\"/\1${escaped_new}\"/g
     }" \
     "$README"

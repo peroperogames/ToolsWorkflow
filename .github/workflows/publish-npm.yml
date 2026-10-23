@@ -82,15 +82,20 @@ jobs:
         run: |
           bash "$RUNNER_TEMP/devops/ToolsWorkflow/publish/package_preprocess.sh"
 
-# The install snippet in a README is the same fact as `package.json`, written
+      # The install snippet in a README is the same fact as package.json, written
       # down twice, and it goes stale silently — AccessKing's still said 0.2.5 two
       # releases later. Rewritten here so it lands in the same commit as the bump.
       - name: Update the README's version
+        env:
+          CI_COMMIT_TAG: ${{ github.ref_name }}
         run: |
           PACKAGE_NAME=$(grep '"name"' package.json | head -1 | sed 's/.*"name": *"\([^"]*\)".*/\1/')
           NEW_VERSION=$(grep '"version"' package.json | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
-          echo "package: $PACKAGE_NAME, version: $NEW_VERSION"
-          PACKAGE_NAME="$PACKAGE_NAME" NEW_VERSION="$NEW_VERSION" \
+          echo "package: $PACKAGE_NAME, version: $NEW_VERSION, tag: $CI_COMMIT_TAG"
+          # The npm/OpenUPM snippets want the published version; a `git#…` URL wants
+          # the tag, which is the ref a consumer can resolve — `0.3.0` and
+          # `0.3.0-base` are not the same string.
+          PACKAGE_NAME="$PACKAGE_NAME" NEW_VERSION="$NEW_VERSION" GIT_REF="$CI_COMMIT_TAG" \
             bash "$RUNNER_TEMP/devops/ToolsWorkflow/publish/update_readme_version.sh" README.md
 
       - name: Configure Git
