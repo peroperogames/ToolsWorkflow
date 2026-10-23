@@ -32,6 +32,23 @@ on:
         required: false
         type: string
         default: 'https://api.nuget.org/v3/index.json'
+      unity-plugin-project:
+        description: >-
+          The .csproj or .sln whose build produces the assembly the Unity package
+          ships, relative to the REPOSITORY ROOT. When set, it is rebuilt in
+          unity-plugin-configuration after the version bump and the refreshed files
+          under working-directory are committed with the version. Leave empty for a
+          package that ships no precompiled assembly.
+        required: false
+        type: string
+        default: ''
+      unity-plugin-configuration:
+        description: >-
+          The build configuration whose target copies the assembly into the package.
+          Only used when unity-plugin-project is set.
+        required: false
+        type: string
+        default: 'Unity'
       expected-package-prefix:
         description: 'Expected package name prefix (used in scripts)'
         required: false
@@ -240,6 +257,49 @@ jobs:
           # packaging and a stray file in it could end up in the tarball.
           VERSION_FILE_LIST="$RUNNER_TEMP/version-files.txt" NEW_VERSION="$NEW_VERSION" \
             bash "$RUNNER_TEMP/devops/ToolsWorkflow/publish/update_version_properties.sh"
+
+      # A package that ships a precompiled assembly keeps a second copy of the version:
+      # the one baked into that assembly when it was built. Nothing bumps it — the
+      # properties above only change the source — so a release would ship the previous
+      # build's binary, and the NuGet package built from source at release time would
+      # carry a different version than the DLL beside it in the Unity package.
+      #
+      # Building the project in the configuration whose target copies the assembly into
+      # the package refreshes it. Only files that already belong to the package are
+      # added to the commit: the packaging's own changes (a folder renamed with `~`, its
+      # `.meta` deleted) sit under the same directory and none of them may go in.
+      - name: Rebuild the assembly the package ships
+        if: ${{ inputs.unity-plugin-project != '' }}
+        working-directory: ${{ github.workspace }}
+        env:
+          PACKAGE_DIR: ${{ inputs.working-directory }}
+          PLUGIN_PROJECT: ${{ inputs.unity-plugin-project }}
+          PLUGIN_CONFIGURATION: ${{ inputs.unity-plugin-configuration }}
+        run: |
+          if ! command -v dotnet > /dev/null 2>&1; then
+            echo "::error::unity-plugin-project is set, and rebuilding it needs the .NET SDK; there is no dotnet on this runner."
+            exit 1
+          fi
+          if [ ! -e "$PLUGIN_PROJECT" ]; then
+            echo "::error::No '$PLUGIN_PROJECT' at the repository root — unity-plugin-project names the .csproj or .sln whose build produces the assembly $PACKAGE_DIR ships."
+            exit 1
+          fi
+          echo "dotnet $(dotnet --version); building $PLUGIN_PROJECT in $PLUGIN_CONFIGURATION"
+          dotnet build "$PLUGIN_PROJECT" -c "$PLUGIN_CONFIGURATION"
+
+          shopt -s nullglob
+          mapfile -t rebuilt < <(git diff --name-only --diff-filter=AM -- "$PACKAGE_DIR")
+          if [ ${#rebuilt[@]} -eq 0 ]; then
+            echo "The build changed nothing under $PACKAGE_DIR; the package's assembly already matches."
+            exit 0
+          fi
+          printf 'refreshed in the package: %s\n' "${rebuilt[@]}"
+          # Same list the properties step writes, which the commit stages.
+          list="$RUNNER_TEMP/version-files.txt"
+          touch "$list"
+          for path in "${rebuilt[@]}"; do
+            grep -qxF -- "$path" "$list" || printf '%s\n' "$path" >> "$list"
+          done
 
       - name: Configure Git
         run: |

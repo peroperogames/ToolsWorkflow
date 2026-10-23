@@ -72,7 +72,7 @@ release**, and nothing is published to the wrong one:
 | The Unity package — the tarball of `working-directory`, exactly what `npm pack` produces there | `npm pack` after the version bump | PeroNPM and npmjs (the same bytes) |
 | The README shown on the npm page | the repository's `README.md`, copied into the package just before packing | inside the Unity tarball, never in the commit |
 | The .NET package(s) | `dotnet pack` of `nuget-project` | nuget.org |
-| The shared library the Unity package ships, if it ships a precompiled one | a committed file under the package (`Unity/Plugins/…` in AccessKing), copied there by that project's own build | inside the Unity tarball only |
+| The assembly the Unity package ships, if it ships a precompiled one | rebuilt from `unity-plugin-project` at release time, copied into the package by that project's own target | inside the Unity tarball, and in the version commit |
 
 npm renders the README that is **inside the tarball**, and the tarball is the package
 directory: a repository whose README lives at its root therefore publishes a package
@@ -80,18 +80,23 @@ with an empty page. So the root README is copied into the package at release tim
 after the version commit, so it is never part of the commit, and only when the package
 does not have a README of its own (one that does keeps it).
 
-The last row is the one to watch: the publish bumps `<AssemblyVersion>` in the
-project but never rebuilds that committed assembly, so a package built from a stale
-copy ships an older binary than the NuGet package of the same version. AccessKing's
-`Core` project already has a `CopyToUnityPackage` target for this — running
+The last row is the one that used to drift: a DLL committed under the package carries
+the version it was built with, and bumping `<AssemblyVersion>` in the project changes
+nothing about a file that is already built — so the release shipped the previous
+build's binary while the NuGet package of the same version, built from source, carried
+the new one. Set `unity-plugin-project` and the publish rebuilds it in
+`unity-plugin-configuration` (`Unity` by default, the configuration whose target copies
+the assembly into the package), after the version bump and before the commit, so the
+refreshed DLL, `.pdb` and `.xml` land in the same version commit and in the tarball.
 
-```bash
-dotnet build Core/PeroTools2.AccessKing.Core.csproj -c Unity
+```yaml
+    with:
+      unity-plugin-project: Core/PeroTools2.AccessKing.Core.csproj
 ```
 
-before the release refreshes `Unity/Plugins/` (the DLL, its `.pdb` and its `.xml`),
-and the resulting files belong in the same commit as the version bump. Making the
-publish do that automatically is one input away if it turns out to be wanted.
+Only files that already belong to the package are added to the commit; the packaging's
+own changes (a folder renamed with `~`, its `.meta` deleted) sit under the same
+directory and stay out.
 
 ## The two runners
 
@@ -231,6 +236,7 @@ and `Core/…csproj` in the same commit cannot run from inside `Unity/`.
 | Resolve the publish channels (`publish`) | Validates `channels` and what each named channel needs, prints `Publishing to: …`, and hands the three flags to the other jobs as this job's outputs. |
 | Pack the NuGet packages (`publish`) | Runs before the folders are renamed: `changefoldername.sh` puts a `~` on the folders `package.json` refers to, so a project inside one would no longer be at the path the repository names. The version is passed on the command line, which is a global property and therefore wins over the properties that are only bumped later. |
 | Change folder name, Package preprocess, Update the README's version, Update the assembly version properties (`publish`) | The packaging and the version rewrite, see above. The rewrites run from the repository root so the .NET project and the repository README are reachable. |
+| Rebuild the assembly the package ships (`publish`) | Only with `unity-plugin-project`: the project is built in `unity-plugin-configuration` after the properties are bumped, so the DLL inside the package carries the release's version. The refreshed files join the version commit. |
 | Commit version update, Push changes (`publish`) | The one commit, rebased onto the branch tip so the push is a fast-forward, then the tag is moved to it. |
 | Give the package the repository's README (`publish`) | npm shows the README inside the tarball, so the repository's is copied into the package directory — after the commit, so it never lands in it, and only when the package has none of its own. |
 | Check the PeroNPM login, Publish to PeroNPM (`publish`) | `npm whoami` first, so a missing login fails here instead of after three publish attempts. |
@@ -252,6 +258,8 @@ off runs nothing at all — a NuGet-only release never sets up Node.
 | `nuget-project` | — | The `.csproj` or `.sln` the `nuget` channel packs, relative to the **repository root** — not to `working-directory`, because a package whose manifest lives in a subdirectory keeps its projects beside it, not inside it. A solution packs every project in it that is packable. |
 | `nuget-user` | — | The nuget.org profile name the trusted publishing policy belongs to. |
 | `nuget-source` | `https://api.nuget.org/v3/index.json` | The feed the `nuget` channel pushes to. |
+| `unity-plugin-project` | — | The `.csproj` or `.sln` whose build produces the assembly the Unity package ships, relative to the **repository root**. When set, it is rebuilt after the version bump and the refreshed files under `working-directory` join the version commit. Leave it empty for a package that ships no precompiled assembly. |
+| `unity-plugin-configuration` | `Unity` | The build configuration whose target copies the assembly into the package. Only used with `unity-plugin-project`. |
 | `expected-package-prefix` | `com.prpr` | Package name prefix the manifest is moved under. |
 | `node-version` | `20` | Node.js used to pack and publish to PeroNPM. The npmjs job pins its own, because trusted publishing needs a newer npm. |
 | `working-directory` | `.` | Subdirectory to work in, relative to the repository root. |
