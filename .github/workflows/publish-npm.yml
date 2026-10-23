@@ -18,6 +18,13 @@ on:
         required: false
         type: string
         default: ''
+      nuget-user:
+        description: >-
+          The nuget.org profile name the trusted publishing policy belongs to.
+          Only used when the nuget channel is named.
+        required: false
+        type: string
+        default: ''
       nuget-source:
         description: 'The NuGet feed the nuget channel pushes to'
         required: false
@@ -29,7 +36,7 @@ on:
         type: string
         default: 'com.prpr'
       node-version:
-        description: 'Node.js version used to pack and publish'
+        description: 'Node.js version used to pack and publish to PeroNPM'
         required: false
         type: string
         default: '20'
@@ -47,24 +54,42 @@ on:
         required: true   # Feishu webhook URL
       FEISHU_SECRET:
         required: true   # Feishu secret
-      # Every channel brings its own credentials, so none of the three below is
-      # required by the workflow itself: one that is `required: true` would fail a
-      # caller that publishes only to the other channels, since GitHub validates
-      # the caller's secrets before it runs anything. resolve_channels.sh refuses a
-      # channel whose credentials are missing, by name, before the build starts.
+      # PeroNPM is reached with a login that already lives on the runner, not with
+      # a secret of its own; only the registry's address comes in here. It is
+      # optional so that a caller publishing to npmjs or nuget alone need not
+      # hold it.
       NPM_URL:
         required: false  # PeroNPM registry URL — the peronpm channel
-      NPMJS_TOKEN:
-        required: false  # npm token for registry.npmjs.org — the npmjs channel
-      NUGET_API_KEY:
-        required: false  # nuget.org API key — the nuget channel
+  # The other two channels authenticate with OIDC trusted publishing, so this
+  # workflow holds no token for either registry. Two things live in the calling
+  # repository instead:
+  #
+  #   * `permissions: id-token: write` on the calling job — GitHub only issues the
+  #     OIDC token when the caller asks for it, and a called workflow cannot grant
+  #     itself permission the caller did not give.
+  #   * the trusted publisher configuration on npmjs.com / nuget.org, which names
+  #     the CALLING workflow's file (for `workflow_ref`-checked registries) rather
+  #     than this one.
+  #
+  # The `external` job prints the identity claims it publishes under, so which
+  # file to configure can be read off a run instead of guessed.
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  # Everything that needs the repository: the version bump, PeroNPM, and the two
+  # kinds of package the other registries receive. It runs on the self-hosted
+  # runners the PeroNPM login and the .NET SDK live on — npm trusted publishing
+  # does not accept self-hosted runners, which is why the other two channels are
+  # somewhere else.
   publish:
     runs-on: [build-server, unitypkg-share]
+    permissions:
+      contents: write
+    outputs:
+      npmjs: ${{ steps.channels.outputs.DO_NPMJS }}
+      nuget: ${{ steps.channels.outputs.DO_NUGET }}
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
@@ -100,15 +125,16 @@ jobs:
           git clone https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/peroperogames/ToolsWorkflow.git "$RUNNER_TEMP/devops/ToolsWorkflow"
 
       # Which registries this release goes to, decided before anything is built or
-      # committed: an unknown channel name, a missing token or a missing project
-      # stops the run here rather than after the version bump has been pushed.
+      # committed: an unknown channel name or a missing project stops the run here
+      # rather than after the version bump has been pushed. The answers travel to
+      # the other jobs as this job's outputs.
       - name: Resolve the publish channels
+        id: channels
         env:
           CHANNELS: ${{ inputs.channels }}
           NUGET_PROJECT: ${{ inputs.nuget-project }}
+          NUGET_USER: ${{ inputs.nuget-user }}
           NPM_URL: ${{ secrets.NPM_URL }}
-          NPMJS_TOKEN: ${{ secrets.NPMJS_TOKEN }}
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         run: |
           bash "$RUNNER_TEMP/devops/ToolsWorkflow/publish/resolve_channels.sh"
 
@@ -119,7 +145,7 @@ jobs:
       # project or a .props file says, so the package is the release's version even
       # though the properties are only bumped two steps later.
       - name: Pack the NuGet packages
-        if: ${{ env.DO_NUGET == 'true' }}
+        if: ${{ steps.channels.outputs.DO_NUGET == 'true' }}
         env:
           CI_COMMIT_TAG: ${{ github.ref_name }}
           NUGET_PROJECT: ${{ inputs.nuget-project }}
@@ -271,15 +297,12 @@ jobs:
            git push -f origin "$TAG"
 
       - name: Setup Node.js
-        if: ${{ env.DO_PERONPM == 'true' || env.DO_NPMJS == 'true' }}
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
 
-      - name: Check npm auth
-        if: ${{ env.DO_PERONPM == 'true' || env.DO_NPMJS == 'true' }}
-        env:
-          NPMJS_TOKEN: ${{ secrets.NPMJS_TOKEN }}
+      - name: Check the PeroNPM login
+        if: ${{ steps.channels.outputs.DO_PERONPM == 'true' }}
         run: |
           # The login lives in the job user's own ~/.npmrc, done once by hand on
           # the runner. Reading /root/.npmrc (what this step used to do) can only
@@ -292,19 +315,10 @@ jobs:
             echo "::warning::no $HOME/.npmrc — npm login has not been run for $(id -un) on this runner"
           fi
           # Fails loudly now rather than after three retries of the real publish.
-          if [ "$DO_PERONPM" = true ]; then
-            npm whoami --registry "$NPM_URL" || echo "::warning::npm whoami failed — the PeroNPM publish will fail the same way"
-          fi
-          if [ "$DO_NPMJS" = true ]; then
-            # A scratch .npmrc of its own: writing the public registry's token into
-            # ~/.npmrc would replace the PeroNPM login this runner already has.
-            NPMRC=$(bash "$RUNNER_TEMP/devops/ToolsWorkflow/publish/npmjs_auth.sh") || exit 1
-            npm whoami --userconfig "$NPMRC" --registry https://registry.npmjs.org/ \
-              || echo "::warning::npm whoami failed on registry.npmjs.org — the npmjs publish will fail the same way"
-          fi
+          npm whoami --registry "$NPM_URL" || echo "::warning::npm whoami failed — the PeroNPM publish will fail the same way"
 
       - name: Publish to PeroNPM
-        if: ${{ env.DO_PERONPM == 'true' }}
+        if: ${{ steps.channels.outputs.DO_PERONPM == 'true' }}
         run: |
           for i in {1..3}; do
             npm publish --registry "$NPM_URL" --verbose && exit 0
@@ -313,41 +327,180 @@ jobs:
           done
           exit 1
 
-      # The same tarball, to the public registry. `--userconfig` keeps the two
-      # logins apart; a scoped name has to say `--access public` explicitly or npm
-      # publishes it private and fails on a free account.
-      - name: Publish to npmjs
-        if: ${{ env.DO_NPMJS == 'true' }}
-        env:
-          NPMJS_TOKEN: ${{ secrets.NPMJS_TOKEN }}
+      # Everything this run built, in one artifact: the tarball the other registry
+      # publishes, the packages NuGet receives, and — for the first release of a
+      # package that has no trusted publisher yet — the exact bytes to publish by
+      # hand, once, rather than a second build of them.
+      - name: Collect the packages
         run: |
-          NPMRC=$(bash "$RUNNER_TEMP/devops/ToolsWorkflow/publish/npmjs_auth.sh") || exit 1
-          PACKAGE_NAME=$(grep '"name"' package.json | head -1 | sed 's/.*"name": *"\([^"]*\)".*/\1/')
-          ACCESS=()
-          case "$PACKAGE_NAME" in
-            @*) ACCESS=(--access public) ;;
+          rm -rf publish-artifacts
+          mkdir -p publish-artifacts
+          # npm will not create the destination; an old tarball left there would be
+          # uploaded as this release's.
+          rm -rf "$RUNNER_TEMP/npm"
+          mkdir -p "$RUNNER_TEMP/npm"
+          npm pack --pack-destination "$RUNNER_TEMP/npm" > /dev/null
+          cp "$RUNNER_TEMP"/npm/*.tgz publish-artifacts/
+          shopt -s nullglob
+          nupkgs=("$RUNNER_TEMP"/nuget/*.nupkg)
+          if [ ${#nupkgs[@]} -gt 0 ]; then
+            cp "${nupkgs[@]}" publish-artifacts/
+          fi
+          ls -l publish-artifacts
+
+      - name: Upload the packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: publish-packages
+          path: ${{ github.workspace }}/${{ inputs.working-directory }}/publish-artifacts/
+          if-no-files-found: error
+
+      - name: Clean up the ci_cd checkout
+        if: always() && github.actor != 'perotoolsbot[bot]'
+        run: |
+          rm -rf "$RUNNER_TEMP/devops"
+          rm -rf "$RUNNER_TEMP/npm" "$RUNNER_TEMP/nuget"
+          rm -rf publish-artifacts
+
+  # The two registries that are not ours, published from a GitHub-hosted runner:
+  # npm trusted publishing does not accept self-hosted runners, and both channels
+  # need the OIDC token this job asks for itself. No credential is passed in — npm
+  # and nuget.org exchange this job's identity for a short-lived one.
+  external:
+    needs: publish
+    if: ${{ needs.publish.outputs.npmjs == 'true' || needs.publish.outputs.nuget == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - name: Download the packages
+        uses: actions/download-artifact@v4
+        with:
+          name: publish-packages
+          path: packages
+
+      # Which repository and workflow file a trusted publisher has to name. The
+      # claims are decoded from the OIDC token this job can mint, so the answer is
+      # what the registry actually sees rather than what the workflow appears to be.
+      - name: Report the identity this job publishes under
+        run: |
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::This job has no OIDC token, so neither registry can be authenticated."
+            echo "::error::The workflow that calls this one must grant it — a called workflow cannot grant itself permission the caller did not give:"
+            echo "::error::    jobs:"
+            echo "::error::      call-publish:"
+            echo "::error::        permissions:"
+            echo "::error::          contents: write"
+            echo "::error::          id-token: write"
+            exit 1
+          fi
+          response=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org")
+          token=$(printf '%s' "$response" | jq -r .value)
+          # Only the payload is printed — the token itself is a credential and is
+          # not logged, but its claims are exactly what the registry validates.
+          payload=$(printf '%s' "$token" | cut -d. -f2 | tr '_-' '/+')
+          case $(( ${#payload} % 4 )) in
+            2) payload="${payload}==" ;;
+            3) payload="${payload}=" ;;
           esac
-          echo "publishing $PACKAGE_NAME to registry.npmjs.org"
+          printf '%s' "$payload" | base64 -d | jq '{
+            repository, repository_owner, workflow, workflow_ref, job_workflow_ref,
+            runner_environment, event_name, ref
+          }'
+          ls -l packages
+
+      - name: Setup Node.js
+        if: ${{ needs.publish.outputs.npmjs == 'true' }}
+        uses: actions/setup-node@v4
+        with:
+          # npm trusted publishing needs npm 11.5.1 or newer, which the node the
+          # self-hosted job uses does not ship. The version is checked below rather
+          # than assumed to be new enough.
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Publish to npmjs
+        if: ${{ needs.publish.outputs.npmjs == 'true' }}
+        run: |
+          # Without this token npm can only answer ENEEDAUTH, which names neither
+          # the missing permission nor the workflow that has to grant it.
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::No OIDC token in this job, so registry.npmjs.org cannot be authenticated: the workflow that calls this one must grant 'id-token: write' to the calling job."
+            exit 1
+          fi
+          # npm's trusted publishing needs npm 11.5.1 or newer; the images move, so
+          # the version is checked and raised here instead of assumed.
+          npm_version() { npm --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1; }
+          at_least() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$2" ]; }
+          current=$(npm_version)
+          echo "node $(node --version), npm ${current:-unknown}"
+          if [ -z "$current" ] || ! at_least "$current" 11.5.1; then
+            echo "npm ${current:-unknown} is older than 11.5.1; installing a newer one"
+            npm install --global npm@^11 > /dev/null 2>&1 || npm install --global npm@latest > /dev/null 2>&1 || true
+            current=$(npm_version)
+            echo "now npm ${current:-unknown}"
+          fi
+          if [ -z "$current" ] || ! at_least "$current" 11.5.1; then
+            echo "::error::npm ${current:-unknown} is still older than 11.5.1, which npm trusted publishing requires."
+            exit 1
+          fi
+
+          shopt -s nullglob
+          tarballs=(packages/*.tgz)
+          if [ ${#tarballs[@]} -ne 1 ]; then
+            echo "::error::Expected exactly one packed tarball in packages/, found ${#tarballs[@]}."
+            exit 1
+          fi
+          tarball="${tarballs[0]}"
+
+          # npm refuses a trusted publish whose package.json repository.url does not
+          # name this repository (E422), and its message talks about provenance
+          # instead of the field. Say it plainly before npm gets there.
+          repository_url=$(tar -xOf "$tarball" package/package.json 2>/dev/null | tr -d '\n' \
+            | sed -n 's/.*"repository": *{[^}]*"url": *"\([^"]*\)".*/\1/p')
+          case "$repository_url" in
+            *"github.com/${GITHUB_REPOSITORY}"*) echo "package.json repository.url: $repository_url" ;;
+            "")
+              echo "::warning::package.json has no repository.url; npm trusted publishing needs one naming https://github.com/${GITHUB_REPOSITORY}." ;;
+            *)
+              echo "::warning::package.json repository.url is '$repository_url', which does not name https://github.com/${GITHUB_REPOSITORY}; npm refuses that publish (E422)." ;;
+          esac
+
+          echo "publishing $(basename "$tarball") to registry.npmjs.org"
           for i in {1..3}; do
-            npm publish --userconfig "$NPMRC" --registry https://registry.npmjs.org/ "${ACCESS[@]}" && exit 0
+            npm publish "$tarball" --registry https://registry.npmjs.org/ && exit 0
             echo "Attempt $i failed, retrying in 5 seconds..."
             sleep 5
           done
           exit 1
 
+      # Requested right before the push: nuget.org hands out a key valid for one
+      # hour and usable once, and an early one expires before the packages arrive.
+      - name: NuGet login
+        id: nuget_login
+        if: ${{ needs.publish.outputs.nuget == 'true' }}
+        uses: NuGet/login@v1
+        with:
+          user: ${{ inputs.nuget-user }}
+
       - name: Push the NuGet packages
-        if: ${{ env.DO_NUGET == 'true' }}
+        if: ${{ needs.publish.outputs.nuget == 'true' }}
         env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          NUGET_API_KEY: ${{ steps.nuget_login.outputs.NUGET_API_KEY }}
           NUGET_SOURCE: ${{ inputs.nuget-source }}
         run: |
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "::error::nuget.org returned no API key — its trusted publishing policy must name the repository and the workflow file reported above."
+            exit 1
+          fi
           shopt -s nullglob
-          packages=("$RUNNER_TEMP"/nuget/*.nupkg)
+          packages=(packages/*.nupkg)
           # A step that pushes nothing must not report success — the pack step
           # already refuses an empty output directory, so reaching this with none
-          # means the two steps disagree about where the packages are.
+          # means the two jobs disagree about where the packages are.
           if [ ${#packages[@]} -eq 0 ]; then
-            echo "::error::There is no .nupkg in $RUNNER_TEMP/nuget to push."
+            echo "::error::There is no .nupkg in packages/ to push."
             exit 1
           fi
           for package in "${packages[@]}"; do
@@ -370,23 +523,43 @@ jobs:
             done
           done
 
+  # Only after every channel that ran came out green, and only for a `-base` tag:
+  # the variants are not releases anyone announces.
+  notify:
+    needs: [publish, external]
+    if: >-
+      ${{ !cancelled()
+          && needs.publish.result == 'success'
+          && (needs.external.result == 'success' || needs.external.result == 'skipped')
+          && endsWith(github.ref_name, '-base') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Generate token via GitHub App
+        id: generate_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PK }}
+          repositories: ToolsWorkflow
+
+      - name: Check out the notification script
+        uses: actions/checkout@v4
+        with:
+          repository: peroperogames/ToolsWorkflow
+          token: ${{ steps.generate_token.outputs.token }}
+          path: tools
+          sparse-checkout: publish
+
       - name: Send Feishu notification
-        if: success() && endsWith(github.ref_name, '-base') #  (only for -base)
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
           PROJECT_NAME: ${{ github.event.repository.name }}
           TAG: ${{ github.ref_name }}
-          GH_TOKEN: ${{ steps.generate_token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           RELEASE_NOTES=$(gh release view "$TAG" --json body --jq .body)
           README_URL="https://github.com/${{ github.repository }}/blob/${{ github.sha }}/README.md"
-          bash "$RUNNER_TEMP/devops/ToolsWorkflow/publish/feishu_webhook.sh" "$FEISHU_WEBHOOK" "$FEISHU_SECRET" "$PROJECT_NAME" "$TAG" "$RELEASE_NOTES" "$README_URL"
-
-      - name: Clean up the ci_cd checkout
-        if: always() && github.actor != 'perotoolsbot[bot]'
-        run: |
-          rm -rf "$RUNNER_TEMP/devops"
-          # the scratch npmjs login, and the packages whose push already happened
-          rm -f "$RUNNER_TEMP/npmrc-npmjs"
-          rm -rf "$RUNNER_TEMP/nuget"
+          bash tools/publish/feishu_webhook.sh "$FEISHU_WEBHOOK" "$FEISHU_SECRET" "$PROJECT_NAME" "$TAG" "$RELEASE_NOTES" "$README_URL"

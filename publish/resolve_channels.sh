@@ -1,5 +1,5 @@
 #!/bin/bash
-# Turn the `channels` input into the flags the publish steps ask about.
+# Turn the `channels` input into the flags the publish jobs ask about.
 #
 # PeroNPM is the registry these packages are read from — the one every release
 # publishes to today — so it is the default and needs nothing from the caller.
@@ -10,12 +10,18 @@
 #   channels: peronpm,npmjs
 #   channels: peronpm,npmjs,nuget
 #
-# Writes the flags to $GITHUB_ENV when it is set, to stdout otherwise, so the same
-# script is what the workflow runs and what a test can run.
+# Neither of the two other channels takes a credential: both authenticate with
+# OIDC trusted publishing, which the job exchanges for a short-lived token at
+# publish time. What they do need is known before anything is built — that is
+# what this checks.
+#
+# Writes the flags to $GITHUB_ENV and $GITHUB_OUTPUT when set, to stdout always,
+# so the same script is what the workflow runs and what a test can run.
 set -uo pipefail
 
 CHANNELS="${CHANNELS:-peronpm}"
 NUGET_PROJECT="${NUGET_PROJECT:-}"
+NUGET_USER="${NUGET_USER:-}"
 
 want_peronpm=false
 want_npmjs=false
@@ -42,14 +48,20 @@ if [ "$want_peronpm" = false ] && [ "$want_npmjs" = false ] && [ "$want_nuget" =
     exit 1
 fi
 
-if [ "$want_npmjs" = true ] && [ -z "${NPMJS_TOKEN:-}" ]; then
-    echo "Error: the npmjs channel needs the NPMJS_TOKEN secret; a release cannot publish to registry.npmjs.org without it" >&2
-    exit 1
-fi
-
 if [ "$want_peronpm" = true ] && [ -z "${NPM_URL:-}" ]; then
     echo "Error: the peronpm channel needs the NPM_URL secret (the registry URL)" >&2
     exit 1
+fi
+
+if [ "$want_npmjs" = true ]; then
+    # Publishing to registry.npmjs.org with OIDC needs two things in the calling
+    # repository which this workflow cannot arrange for it.
+    if [ -z "${GITHUB_REPOSITORY:-}" ]; then
+        echo "Error: the npmjs channel needs GITHUB_REPOSITORY to name the trusted publisher" >&2
+        exit 1
+    fi
+    echo "npmjs: publishing as OIDC trusted publisher of $GITHUB_REPOSITORY;"
+    echo "       its trusted publisher on npmjs.com must name this repository and the CALLING workflow file."
 fi
 
 if [ "$want_nuget" = true ]; then
@@ -57,8 +69,8 @@ if [ "$want_nuget" = true ]; then
         echo "Error: the nuget channel needs the nuget-project input (the .csproj or .sln to pack)" >&2
         exit 1
     fi
-    if [ -z "${NUGET_API_KEY:-}" ]; then
-        echo "Error: the nuget channel needs the NUGET_API_KEY secret" >&2
+    if [ -z "$NUGET_USER" ]; then
+        echo "Error: the nuget channel needs the nuget-user input (the nuget.org profile the trusted publishing policy belongs to)" >&2
         exit 1
     fi
 fi
@@ -76,5 +88,11 @@ DO_NUGET=$want_nuget"
 
 if [ -n "${GITHUB_ENV:-}" ]; then
     printf '%s\n' "$lines" >> "$GITHUB_ENV"
+fi
+# The other jobs are told the same three answers through the job outputs: the
+# external channels publish from a GitHub-hosted job, which never sees this one's
+# environment.
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+    printf '%s\n' "$lines" >> "$GITHUB_OUTPUT"
 fi
 printf '%s\n' "$lines"
