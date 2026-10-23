@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.118"
+VERSION = "2026-10-14.unity.119"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -892,6 +892,10 @@ RESOLVE_DECIDER_PROMPT = (
     "asking to remove or ignore it has been carried out, and that is a reason to "
     "resolve it. `changed by this pull request: no` alone does not say that, "
     "because the file may simply be untouched.\n"
+    "- `named file` lines say what the pull request does with the files the comment "
+    "names: `not among the files this pull request changes` means it does not add "
+    "them, so a request to remove one of them from the pull request is already "
+    "true; `changed by this pull request (...)` lists the file that names it.\n"
     "- `changed by this pull request: no` means the pull request no longer touches "
     "that file at all — a request to remove or revert it may have been carried out, "
     "and that is a reason to resolve it.\n"
@@ -1749,26 +1753,70 @@ def rebuild_comment_body(
     return "\n".join(lines)
 
 
-def _thread_paths(
+def _open_thread_briefs(
     gh: GitHubClient, owner: str, repo: str, number: int
-) -> "set[str]":
-    """The files the open bot threads are about (empty when they cannot be read)."""
+) -> List[Dict[str, str]]:
+    """The open bot threads, as their anchor path and first comment."""
     try:
         threads = gh.list_review_threads(owner, repo, number)
     except Exception as exc:  # noqa: BLE001 - the settle still runs without a diff
         log(f"Warning: could not list review threads: {exc}")
-        return set()
-    paths: "set[str]" = set()
+        return []
+    briefs: List[Dict[str, str]] = []
     for thread in threads:
         if thread.get("isResolved"):
             continue
         nodes = (thread.get("comments") or {}).get("nodes") or []
         if nodes and not is_bot_author(nodes[0].get("author")):
             continue
-        path = thread.get("path")
-        if path:
-            paths.add(path)
-    return paths
+        path = thread.get("path") or ""
+        body = " ".join((nodes[0].get("body") or "").split()) if nodes else ""
+        briefs.append({"path": path, "body": body})
+    return briefs
+
+
+def named_files(body: str) -> List[str]:
+    """The file names a comment writes in backticks, as bare names.
+
+    A thread writes `AndroidProject~/.project` in its title and `nativeaudio/.project`
+    in the sentence, and the pull request lists only the full paths — so the name is
+    what lets one be found from the other without guessing at a prefix.
+    """
+    names: List[str] = []
+    for token in re.findall(r"`([^`\s]+)`", body or ""):
+        name = token.rstrip("/").split("/")[-1]
+        if "." not in name or len(name) > 80 or name in names:
+            continue
+        names.append(name)
+    return names
+
+
+def _named_files_lines(body: str, changed_paths: Optional["set[str]"]) -> str:
+    """What the pull request does with the files a thread names, one line each.
+
+    Three Eclipse files are named in NativeAudio PR #1's thread; the pull request
+    removes them and updates a `.gitignore` the thread also names, and none of that
+    is about the thread's own anchor path. Without this the decider could only say
+    "I cannot confirm the other two".
+    """
+    if changed_paths is None:
+        return ""
+    by_name: Dict[str, List[str]] = {}
+    for path in changed_paths:
+        by_name.setdefault(path.split("/")[-1], []).append(path)
+    lines: List[str] = []
+    for name in named_files(body)[:6]:
+        changed = sorted(by_name.get(name) or [])
+        if changed:
+            lines.append(
+                f"  named file `{name}`: changed by this pull request "
+                f"({', '.join(changed[:3])})"
+            )
+        else:
+            lines.append(
+                f"  named file `{name}`: not among the files this pull request changes"
+            )
+    return "".join(line + "\n" for line in lines)
 
 
 def settle_scope(
@@ -1779,25 +1827,35 @@ def settle_scope(
     The diff of the files the threads are about is the code question — a concern may
     have been dealt with by a commit nobody reviewed. The second half is the one that
     was missing: whether the file is part of the pull request at all. NativeAudio PR
-    #1 asked to remove three Eclipse files from the PR; the commits did remove them,
-    so they are no longer in `list_files` — and a decider shown only "no diff for
-    this path" cannot tell "already done" from "nothing to look at", which is why the
-    thread stayed open for days. Only the threads' files are sent as a diff: a
-    285-file diff is expensive and says nothing about the one file a thread is on.
+    #1 asked to remove three Eclipse files from the pull request and add them to a
+    .gitignore; the commits did both, so the files are not in `list_files` at all and
+    a decider shown only "no diff for this path" cannot tell "already done" from
+    "nothing to look at" — it repeated the thread's own claim for days.
+
+    The diff covers the threads' own files *and* every file a thread names in its
+    comment, because a thread about `.project` also asks about `.gitignore`, and
+    the hunk that answers it is three lines long. A 285-file diff is still not sent.
     """
-    paths = _thread_paths(gh, owner, repo, number)
+    briefs = _open_thread_briefs(gh, owner, repo, number)
     try:
         files = gh.list_files(owner, repo, number)
     except Exception as exc:  # noqa: BLE001 - best-effort, never block the command
         log(f"Warning: could not list the changed files: {exc}")
         return None, None
     changed_paths = {f.get("filename") or "" for f in files}
-    if not paths:
+    if not briefs:
         return None, changed_paths
+    anchors = {b["path"] for b in briefs if b["path"]}
+    names = {name for b in briefs for name in named_files(b["body"])}
     wanted = [
-        f for f in files if (f.get("filename") or "") in paths and f.get("patch")
+        f for f in files
+        if f.get("patch")
+        and (
+            (f.get("filename") or "") in anchors
+            or (f.get("filename") or "").split("/")[-1] in names
+        )
     ]
-    gone = sorted(p for p in paths if p not in changed_paths)
+    gone = sorted(p for p in anchors if p not in changed_paths)
     if gone:
         log(
             "Settle command: thread(s) on file(s) this pull request no longer changes: "
@@ -2331,6 +2389,7 @@ def decide_resolved_threads(
             if c.get("exists") is not None
             else ""
         )
+        + _named_files_lines(c["body"], changed_paths)
         + f"  comment: {c['body']}"
         for c in candidates
     )
