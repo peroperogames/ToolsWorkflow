@@ -189,10 +189,10 @@ The words live in one registry (`COMMANDS` in `main.py`): each entry names the c
 - **Settle** — `@perotoolsbot settle` is for "I have dealt with everything; check and close it out". It re-reads the threads that are still open, decides which ones the discussion has settled, and approves once none are left — no build, no review, and no new inline comment, so asking for it cannot turn into another round of findings. It judges each thread against the code as it stands now — the diff of the files those threads are about, plus the discussion — so a fix pushed since the last review can be what closes them. Only those files: a 285-file diff is expensive to send and says nothing about the one file a thread is on. Each thread it closes gets its reason posted *inside* that thread — a reply, not a thread — and one comment reports the outcome, including the case where everything is resolved but the approval was not submitted because this commit was already approved:
 
   ```
-  🧹 **重新检查评论线程**（只处理已有线程；不新建评论，不跑构建）
-  未解决线程：38 → 0。
-  全部线程已解决，已 approve ✅
+  未解决线程 38 → 0，已 approve ✅
   ```
+
+  The comment carries the result and nothing about the command — whoever reads it asked for `settle`, so a line explaining that it posts no new comments is the bot restating the request back at them. The same rule removed the parenthetical from the rebuild heading (`🔧 **重新构建与测试**`, with no "只跑门禁，未做评审") and the description from the reports link (`完整报告：<url>`).
 
 Replying requires the GitHub App to have **`Issues: Read and write`** permission (issue comments use the Issues API, which is separate from `Pull requests`).
 

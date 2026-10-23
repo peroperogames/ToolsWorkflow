@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.114"
+VERSION = "2026-10-14.unity.115"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -1723,7 +1723,7 @@ def rebuild_comment_body(
     talking about have to be reachable from it — and by the time the review step
     writes it, the upload has already happened, so the link is the artifact's own.
     """
-    lines = ["🔧 **重新构建与测试**（只跑门禁，未做评审）", f"仓库类型：{kind_line}", ""]
+    lines = ["🔧 **重新构建与测试**", f"仓库类型：{kind_line}", ""]
     if extra_context:
         # The section as the model would see it, minus its heading: the same
         # words, from the same place.
@@ -1826,25 +1826,24 @@ def handle_settle_command(ctx: CommandContext, command: Command) -> int:
 
 
 def settle_comment_body(before: int, after: int, approved: bool) -> str:
-    """What a `settle` run says, including the part it did not do.
+    """What a `settle` run says: the result, and nothing about the command.
+
+    Whoever reads this asked for `settle`, so they know what it does — a sentence
+    explaining that it posts no new comments is not news, it is the bot restating
+    the request back at them. What they cannot know without it is what happened.
 
     "All resolved but not approved" has two causes — this commit was already
     approved, or the API refused — and neither is a failure of the command, so the
     comment says which state the pull request is in instead of pretending.
     """
-    lines = ["🧹 **重新检查评论线程**（只处理已有线程；不新建评论，不跑构建）"]
-    if before >= 0 and after >= 0:
-        lines.append(f"未解决线程：{before} → {after}。")
     if after < 0:
-        lines.append("读不到线程状态，详见 workflow 日志。")
-    elif after == 0:
+        return "读不到线程状态，详见 workflow 日志。"
+    counts = f"未解决线程 {before} → {after}，" if before >= 0 else f"未解决线程 {after}，"
+    if after == 0:
         if approved:
-            lines.append("全部线程已解决，已 approve ✅")
-        else:
-            lines.append("全部线程已解决；approve 未提交（该提交此前已批准过，或没有权限）。")
-    else:
-        lines.append(f"还有 {after} 个线程没处理完，暂不 approve。")
-    return "\n".join(lines)
+            return counts + "已 approve ✅"
+        return counts + "approve 未提交（该提交此前已批准过，或没有权限）。"
+    return counts + "暂不 approve。"
 
 
 # Every command the bot answers to. A command never reaches the intent
@@ -3571,7 +3570,7 @@ def report_link_line() -> str:
     no way to look at the files.
     """
     url = artifacts_link()
-    return f"\n完整报告（XML 与日志）：{url}" if url else ""
+    return f"\n完整报告：{url}" if url else ""
 
 
 def stage_artifact_link(
