@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.116"
+VERSION = "2026-10-14.unity.117"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -1851,20 +1851,9 @@ def settle_comment_body(before: int, after: int, outcome: "SettleOutcome") -> st
         return counts + "approve 未提交（该提交此前已批准过，或没有权限）。"
     if outcome.unknown:
         return counts + "判定失败，详见 workflow 日志。"
-    lines = [counts + "暂不 approve："]
-    for item in outcome.open[:5]:
-        path = item.get("path") or "线程"
-        line = item.get("line")
-        where = f"`{path}:{line}`" if line else f"`{path}`"
-        reason = (item.get("reason") or "").strip()
-        if not reason:
-            # The decider said nothing, so the thread's own opening line is the
-            # only honest thing left to show.
-            reason = "判定器没有说明原因；原意见：" + (item.get("body") or "")[:160]
-        lines.append(f"- {where} — {reason[:300]}")
-    if len(outcome.open) > 5:
-        lines.append(f"- … 另有 {len(outcome.open) - 5} 个")
-    return "\n".join(lines)
+    # No reasons here: they belong in the threads they are about, and that is where
+    # they are posted. This comment is about the run.
+    return counts + "暂不 approve。"
 
 
 # Every command the bot answers to. A command never reaches the intent
@@ -2169,6 +2158,23 @@ def _resolution_note(reason: str, language: str) -> str:
     )
 
 
+def _open_note(reason: str, language: str) -> str:
+    """What to post in a thread that stays open: what is still missing.
+
+    In the thread rather than in the conversation comment, because that is where the
+    concern lives and where the person who wrote it is looking. Empty when the
+    decider gave no reason — a note that says nothing is worse than none.
+    """
+    text = " ".join((reason or "").split()).strip()
+    if not text:
+        return ""
+    return (
+        f"⏳ 仍未关闭：{text}"
+        if "chinese" in resolve_language(language).lower()
+        else f"⏳ Still open: {text}"
+    )
+
+
 @dataclass
 class SettleOutcome:
     """What judging the threads produced, in the terms a comment needs.
@@ -2239,7 +2245,12 @@ def decide_resolved_threads(
                 "id": thread.get("id"),
                 "path": thread.get("path"),
                 "outdated": bool(thread.get("isOutdated")),
+                "line": thread.get("line"),
                 "body": " ".join((nodes[0].get("body") or "").split())[:600],
+                # What was said last in the thread, so a "still open" note that is
+                # the same sentence as the last one is not posted again on every
+                # settle.
+                "last": " ".join((nodes[-1].get("body") or "").split())[:600],
                 "comment_id": nodes[0].get("databaseId"),
             }
         )
@@ -2301,14 +2312,20 @@ def decide_resolved_threads(
     for c in candidates:
         tid = str(c["id"])
         if tid not in wanted or tid not in known:
+            reason = why_open.get(tid, "")
             kept_open.append(
                 {
                     "path": c.get("path"),
                     "line": c.get("line"),
-                    "reason": why_open.get(tid, ""),
+                    "reason": reason,
                     "body": c.get("body") or "",
                 }
             )
+            # Said in the thread, where the concern and its author are — not in the
+            # conversation comment, which is about the run, not about this finding.
+            note = _open_note(reason, language)
+            if note and reason not in (c.get("last") or ""):
+                _reply_in_thread(gh, owner, repo, number, c.get("comment_id"), note, c["path"])
             continue
         # Another run of this pull request may have got here first: runs used to
         # overlap freely, and each posted its own "why this is resolved" note. The
