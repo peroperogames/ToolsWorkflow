@@ -1,8 +1,28 @@
-name: Publish NPM Package (Reusable)
+name: Publish Package (Reusable)
 
 on:
   workflow_call:
     inputs:
+      channels:
+        description: >-
+          Publish channels, comma separated: peronpm (the default), npmjs, nuget.
+          PeroNPM is the registry these packages are read from, so it publishes
+          unless the caller names a list without it; npmjs and nuget are opt-in.
+        required: false
+        type: string
+        default: 'peronpm'
+      nuget-project:
+        description: >-
+          The .csproj or .sln the nuget channel packs, relative to
+          working-directory. Only used when the nuget channel is named.
+        required: false
+        type: string
+        default: ''
+      nuget-source:
+        description: 'The NuGet feed the nuget channel pushes to'
+        required: false
+        type: string
+        default: 'https://api.nuget.org/v3/index.json'
       expected-package-prefix:
         description: 'Expected package name prefix (used in scripts)'
         required: false
@@ -19,8 +39,6 @@ on:
         type: string
         default: '.'
     secrets:
-      NPM_URL:
-        required: true   # NPM registry URL
       APP_ID:
         required: true   # GitHub App ID
       APP_PK:
@@ -29,6 +47,17 @@ on:
         required: true   # Feishu webhook URL
       FEISHU_SECRET:
         required: true   # Feishu secret
+      # Every channel brings its own credentials, so none of the three below is
+      # required by the workflow itself: one that is `required: true` would fail a
+      # caller that publishes only to the other channels, since GitHub validates
+      # the caller's secrets before it runs anything. resolve_channels.sh refuses a
+      # channel whose credentials are missing, by name, before the build starts.
+      NPM_URL:
+        required: false  # PeroNPM registry URL — the peronpm channel
+      NPMJS_TOKEN:
+        required: false  # npm token for registry.npmjs.org — the npmjs channel
+      NUGET_API_KEY:
+        required: false  # nuget.org API key — the nuget channel
 
 permissions:
   contents: write
@@ -69,6 +98,56 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/devops"
           git clone https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/peroperogames/ToolsWorkflow.git "$RUNNER_TEMP/devops/ToolsWorkflow"
+
+      # Which registries this release goes to, decided before anything is built or
+      # committed: an unknown channel name, a missing token or a missing project
+      # stops the run here rather than after the version bump has been pushed.
+      - name: Resolve the publish channels
+        env:
+          CHANNELS: ${{ inputs.channels }}
+          NUGET_PROJECT: ${{ inputs.nuget-project }}
+          NPM_URL: ${{ secrets.NPM_URL }}
+          NPMJS_TOKEN: ${{ secrets.NPMJS_TOKEN }}
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          bash "$RUNNER_TEMP/devops/ToolsWorkflow/publish/resolve_channels.sh"
+
+      # Packed here, before the packaging renames anything: changefoldername.sh puts
+      # a `~` on the folders package.json refers to, and a project inside one of
+      # them would no longer be at the path the repository names. The version on the
+      # command line is the tag's, and a global property wins over whatever the
+      # project or a .props file says, so the package is the release's version even
+      # though the properties are only bumped two steps later.
+      - name: Pack the NuGet packages
+        if: ${{ env.DO_NUGET == 'true' }}
+        env:
+          CI_COMMIT_TAG: ${{ github.ref_name }}
+          NUGET_PROJECT: ${{ inputs.nuget-project }}
+        run: |
+          if ! command -v dotnet > /dev/null 2>&1; then
+            echo "::error::The nuget channel needs the .NET SDK and there is no dotnet on this runner."
+            exit 1
+          fi
+          if [ ! -e "$NUGET_PROJECT" ]; then
+            echo "::error::No '$NUGET_PROJECT' in $(pwd) — the nuget-project input names the .csproj or .sln to pack."
+            exit 1
+          fi
+          source "$RUNNER_TEMP/devops/ToolsWorkflow/publish/version_from_tag.sh"
+          NEW_VERSION=$(extract_version "$CI_COMMIT_TAG") || exit 1
+          echo "dotnet $(dotnet --version); packing $NUGET_PROJECT as $NEW_VERSION"
+          # Emptied first: a .nupkg left behind by an earlier run on this runner
+          # would be pushed as if this release had built it.
+          rm -rf "$RUNNER_TEMP/nuget"
+          mkdir -p "$RUNNER_TEMP/nuget"
+          dotnet pack "$NUGET_PROJECT" -c Release -o "$RUNNER_TEMP/nuget" \
+            -p:Version="$NEW_VERSION" -p:PackageVersion="$NEW_VERSION"
+          shopt -s nullglob
+          packages=("$RUNNER_TEMP/nuget"/*.nupkg)
+          if [ ${#packages[@]} -eq 0 ]; then
+            echo "::error::dotnet pack produced no .nupkg — is '$NUGET_PROJECT' packable (IsPackable, or is it a test project)?"
+            exit 1
+          fi
+          printf 'packed: %s\n' "${packages[@]}"
 
       - name: Change folder name
         env:
@@ -192,11 +271,15 @@ jobs:
            git push -f origin "$TAG"
 
       - name: Setup Node.js
+        if: ${{ env.DO_PERONPM == 'true' || env.DO_NPMJS == 'true' }}
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
 
       - name: Check npm auth
+        if: ${{ env.DO_PERONPM == 'true' || env.DO_NPMJS == 'true' }}
+        env:
+          NPMJS_TOKEN: ${{ secrets.NPMJS_TOKEN }}
         run: |
           # The login lives in the job user's own ~/.npmrc, done once by hand on
           # the runner. Reading /root/.npmrc (what this step used to do) can only
@@ -209,9 +292,19 @@ jobs:
             echo "::warning::no $HOME/.npmrc — npm login has not been run for $(id -un) on this runner"
           fi
           # Fails loudly now rather than after three retries of the real publish.
-          npm whoami --registry "$NPM_URL" || echo "::warning::npm whoami failed — the publish will fail the same way"
+          if [ "$DO_PERONPM" = true ]; then
+            npm whoami --registry "$NPM_URL" || echo "::warning::npm whoami failed — the PeroNPM publish will fail the same way"
+          fi
+          if [ "$DO_NPMJS" = true ]; then
+            # A scratch .npmrc of its own: writing the public registry's token into
+            # ~/.npmrc would replace the PeroNPM login this runner already has.
+            NPMRC=$(bash "$RUNNER_TEMP/devops/ToolsWorkflow/publish/npmjs_auth.sh") || exit 1
+            npm whoami --userconfig "$NPMRC" --registry https://registry.npmjs.org/ \
+              || echo "::warning::npm whoami failed on registry.npmjs.org — the npmjs publish will fail the same way"
+          fi
 
-      - name: Publish with retry
+      - name: Publish to PeroNPM
+        if: ${{ env.DO_PERONPM == 'true' }}
         run: |
           for i in {1..3}; do
             npm publish --registry "$NPM_URL" --verbose && exit 0
@@ -219,6 +312,63 @@ jobs:
             sleep 5
           done
           exit 1
+
+      # The same tarball, to the public registry. `--userconfig` keeps the two
+      # logins apart; a scoped name has to say `--access public` explicitly or npm
+      # publishes it private and fails on a free account.
+      - name: Publish to npmjs
+        if: ${{ env.DO_NPMJS == 'true' }}
+        env:
+          NPMJS_TOKEN: ${{ secrets.NPMJS_TOKEN }}
+        run: |
+          NPMRC=$(bash "$RUNNER_TEMP/devops/ToolsWorkflow/publish/npmjs_auth.sh") || exit 1
+          PACKAGE_NAME=$(grep '"name"' package.json | head -1 | sed 's/.*"name": *"\([^"]*\)".*/\1/')
+          ACCESS=()
+          case "$PACKAGE_NAME" in
+            @*) ACCESS=(--access public) ;;
+          esac
+          echo "publishing $PACKAGE_NAME to registry.npmjs.org"
+          for i in {1..3}; do
+            npm publish --userconfig "$NPMRC" --registry https://registry.npmjs.org/ "${ACCESS[@]}" && exit 0
+            echo "Attempt $i failed, retrying in 5 seconds..."
+            sleep 5
+          done
+          exit 1
+
+      - name: Push the NuGet packages
+        if: ${{ env.DO_NUGET == 'true' }}
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          NUGET_SOURCE: ${{ inputs.nuget-source }}
+        run: |
+          shopt -s nullglob
+          packages=("$RUNNER_TEMP"/nuget/*.nupkg)
+          # A step that pushes nothing must not report success — the pack step
+          # already refuses an empty output directory, so reaching this with none
+          # means the two steps disagree about where the packages are.
+          if [ ${#packages[@]} -eq 0 ]; then
+            echo "::error::There is no .nupkg in $RUNNER_TEMP/nuget to push."
+            exit 1
+          fi
+          for package in "${packages[@]}"; do
+            echo "pushing $(basename "$package") to $NUGET_SOURCE"
+            attempt=1
+            while [ "$attempt" -le 3 ]; do
+              # `--skip-duplicate` makes a re-run of the same release succeed: the
+              # version is already there and there is nothing to push.
+              if dotnet nuget push "$package" --source "$NUGET_SOURCE" \
+                   --api-key "$NUGET_API_KEY" --skip-duplicate; then
+                break
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                echo "::error::Could not push $(basename "$package") to $NUGET_SOURCE after 3 attempts."
+                exit 1
+              fi
+              echo "Attempt $attempt failed, retrying in 5 seconds..."
+              attempt=$((attempt + 1))
+              sleep 5
+            done
+          done
 
       - name: Send Feishu notification
         if: success() && endsWith(github.ref_name, '-base') #  (only for -base)
@@ -235,4 +385,8 @@ jobs:
 
       - name: Clean up the ci_cd checkout
         if: always() && github.actor != 'perotoolsbot[bot]'
-        run: rm -rf "$RUNNER_TEMP/devops"
+        run: |
+          rm -rf "$RUNNER_TEMP/devops"
+          # the scratch npmjs login, and the packages whose push already happened
+          rm -f "$RUNNER_TEMP/npmrc-npmjs"
+          rm -rf "$RUNNER_TEMP/nuget"
