@@ -82,6 +82,17 @@ jobs:
         run: |
           bash "$RUNNER_TEMP/devops/ToolsWorkflow/publish/package_preprocess.sh"
 
+# The install snippet in a README is the same fact as `package.json`, written
+      # down twice, and it goes stale silently — AccessKing's still said 0.2.5 two
+      # releases later. Rewritten here so it lands in the same commit as the bump.
+      - name: Update the README's version
+        run: |
+          PACKAGE_NAME=$(grep '"name"' package.json | head -1 | sed 's/.*"name": *"\([^"]*\)".*/\1/')
+          NEW_VERSION=$(grep '"version"' package.json | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
+          echo "package: $PACKAGE_NAME, version: $NEW_VERSION"
+          PACKAGE_NAME="$PACKAGE_NAME" NEW_VERSION="$NEW_VERSION" \
+            bash "$RUNNER_TEMP/devops/ToolsWorkflow/publish/update_readme_version.sh" README.md
+
       - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
@@ -92,6 +103,10 @@ jobs:
         run: |
           NEW_VERSION=$(grep '"version"' package.json | head -1 | sed 's/.*"version": "\(.*\)".*/\1/')
           git add package.json
+          # The README carries the same version in its install snippet; the step
+          # above rewrote it, and it belongs in this commit rather than in a second
+          # commit that says the same thing.
+          if [ -f README.md ]; then git add README.md; fi
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
