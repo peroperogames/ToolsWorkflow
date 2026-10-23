@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.121"
+VERSION = "2026-10-14.unity.122"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -2366,8 +2366,11 @@ def decide_resolved_threads(
     if fresh:
         log(f"Not judging {fresh} thread(s) this run posted itself.")
     if not candidates:
+        # An `outcome`, not a count: the caller assigns into it, and every other
+        # path out of here returns one. This one returning 0 is what took down a
+        # `settle` after it had already approved — `outcome.approved = …` on an int.
         log("No unresolved bot review threads to consider.")
-        return 0
+        return outcome
 
     # A thread whose file the pull request no longer touches may have had its request
     # carried out by removing the file — the case that guessed wrong on NativeAudio
@@ -2415,7 +2418,8 @@ def decide_resolved_threads(
         raw = ai.chat(messages, temperature=0.0)
     except Exception as exc:  # noqa: BLE001
         log(f"Warning: thread-resolution decision failed: {exc}")
-        return 0
+        outcome.unknown = True
+        return outcome
 
     data = _first_json_object(raw or "")
     if not data or not isinstance(data.get("resolved"), list):
