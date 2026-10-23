@@ -98,6 +98,18 @@ jobs:
           PACKAGE_NAME="$PACKAGE_NAME" NEW_VERSION="$NEW_VERSION" GIT_REF="$CI_COMMIT_TAG" \
             bash "$RUNNER_TEMP/devops/ToolsWorkflow/publish/update_readme_version.sh" README.md
 
+      # The same version again, in whatever assembly/package properties the
+      # repository keeps — `<Version>`, `<AssemblyVersion>`, `<FileVersion>` in a
+      # .csproj or in a shared .props. Nothing else bumps those, so they drift.
+      - name: Update the assembly version properties
+        run: |
+          NEW_VERSION=$(grep '"version"' package.json | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
+          # The list of files it changed, which the commit step stages. The
+          # runner's scratch directory, because the working tree is dirty with the
+          # packaging and a stray file in it could end up in the tarball.
+          VERSION_FILE_LIST="$RUNNER_TEMP/version-files.txt" NEW_VERSION="$NEW_VERSION" \
+            bash "$RUNNER_TEMP/devops/ToolsWorkflow/publish/update_version_properties.sh"
+
       - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
@@ -107,15 +119,22 @@ jobs:
         id: commit_version
         run: |
           NEW_VERSION=$(grep '"version"' package.json | head -1 | sed 's/.*"version": "\(.*\)".*/\1/')
-          git add package.json
-          # The README carries the same version in its install snippet; the step
-          # above rewrote it, and it belongs in this commit rather than in a second
-          # commit that says the same thing.
-          if [ -f README.md ]; then git add README.md; fi
-          if git diff --staged --quiet; then
+          # The files this bump is made of: the manifest, the README whose install
+          # snippet repeats it, and whatever assembly-version properties the
+          # previous step rewrote.
+          FILES=(package.json)
+          if [ -f README.md ]; then FILES+=(README.md); fi
+          if [ -s "$RUNNER_TEMP/version-files.txt" ]; then
+            while IFS= read -r path; do FILES+=("$path"); done < "$RUNNER_TEMP/version-files.txt"
+          fi
+          # `--only` commits exactly these paths and leaves the rest of the index
+          # alone: the packaging has already moved folders and deleted .meta files
+          # in the working tree, and a plain `git commit` would take whatever is
+          # staged with it.
+          if git diff --quiet -- "${FILES[@]}"; then
             echo "No changes to commit"
           else
-            git commit -m "chore: update package version to $NEW_VERSION."
+            git commit --only -m "chore: update package version to $NEW_VERSION." -- "${FILES[@]}"
             echo "committed=true" >> $GITHUB_ENV
           fi
 
