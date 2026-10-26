@@ -678,6 +678,10 @@ jobs:
           PROJECT_NAME: ${{ github.event.repository.name }}
           TAG: ${{ github.ref_name }}
           GH_TOKEN: ${{ github.token }}
+          # This job checks out ToolsWorkflow, not the package repository, so there is
+          # no local git repository for `gh` to infer the repository from — it fails
+          # with "not a git repository". The job knows which repository it runs for.
+          GH_REPO: ${{ github.repository }}
         run: |
           RELEASE_NOTES=$(gh release view "$TAG" --json body --jq .body)
           README_URL="https://github.com/${{ github.repository }}/blob/${{ github.sha }}/README.md"
