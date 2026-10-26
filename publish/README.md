@@ -250,6 +250,31 @@ Each `publish` step is gated on its own channel flag from the resolver; the
 `external` steps are gated on the flags the `publish` job reports. A channel that is
 off runs nothing at all — a NuGet-only release never sets up Node.
 
+## Running a release twice
+
+A release can be run more than once — the workflow is re-run from the UI, or the
+event is re-triggered — and it has to be safe, because the second run checks out the
+same pre-bump commit while the branch and the registries have already moved on.
+
+- **The version commit is skipped** when the target branch already carries that
+  version. Committing the bump again would have to rebase onto the branch, where the
+  rebuilt assembly is a *binary both sides changed*, and no rebase can resolve that;
+  the version is where it belongs, so there is nothing to push.
+- **A version the registry already has is not a failure.** npm answers
+  `E409 cannot publish over the previously published version`; the retry loop sees it,
+  reports it, and moves on, because that is precisely the state the run wanted.
+- **A re-run replaces the previous attempt's artifacts.** If the first attempt
+  uploaded `publish-packages` and the second failed before it did, the artifact is
+  gone — GitHub keeps the latest attempt's. The tarball can always be rebuilt from the
+  release tag, which is where the packaging ended up:
+
+  ```bash
+  bash publish/changefoldername.sh        # CI_PROJECT_DIR=<checkout>/Unity
+  bash publish/package_preprocess.sh      # CI_COMMIT_TAG=<tag>, in the package dir
+  cp README.md Unity/README.md            # what the publish copies in
+  (cd Unity && npm pack)
+  ```
+
 ## Inputs
 
 | Input | Default | Description |

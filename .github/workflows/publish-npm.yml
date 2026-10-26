@@ -309,13 +309,35 @@ jobs:
       # Also from the repository root: git resolves the pathspecs below against the
       # current directory, so a manifest in `Unity/` and a project at `Core/` cannot
       # both be named from inside the package directory.
+      #
+      # A release can be run more than once — the workflow re-runs, or somebody
+      # re-triggers the event — and then the branch already carries this version. The
+      # same bump committed again would have to rebase onto a branch where the rebuilt
+      # assembly is a binary both sides changed, and that rebase cannot succeed; the
+      # version is already where it belongs, so there is nothing to push.
       - name: Commit version update
         id: commit_version
         working-directory: ${{ github.workspace }}
         env:
           PACKAGE_DIR: ${{ inputs.working-directory }}
+          TARGET_HINT: ${{ github.event.release.target_commitish }}
+          TAG: ${{ github.event.release.tag_name }}
         run: |
           NEW_VERSION=$(grep '"version"' "$PACKAGE_DIR/package.json" | head -1 | sed 's/.*"version": "\(.*\)".*/\1/')
+          TARGET=$(bash "$RUNNER_TEMP/devops/ToolsWorkflow/publish/release_target_branch.sh" "$TARGET_HINT" "$TAG")
+          if [ -z "$TARGET" ]; then
+            echo "::warning::Could not tell which branch this release was cut from; committing without that check."
+          elif ! git fetch origin "$TARGET" > /dev/null 2>&1; then
+            echo "::warning::Could not fetch origin/$TARGET; committing without that check."
+          else
+            BRANCH_VERSION=$(git show "origin/$TARGET:$PACKAGE_DIR/package.json" 2>/dev/null \
+              | grep '"version"' | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
+            if [ -n "$BRANCH_VERSION" ] && [ "$BRANCH_VERSION" = "$NEW_VERSION" ]; then
+              echo "$TARGET already carries $NEW_VERSION: the version update was already pushed."
+              exit 0
+            fi
+            echo "$TARGET carries ${BRANCH_VERSION:-no version}; committing $NEW_VERSION."
+          fi
           # The files this bump is made of: the manifest, whichever READMEs carry
           # the install snippet, and whatever assembly-version properties the
           # previous step rewrote.
@@ -340,22 +362,15 @@ jobs:
         if: ${{ env.committed == 'true' }}
         env:
             TAG: ${{ github.event.release.tag_name }}
+            TARGET_HINT: ${{ github.event.release.target_commitish }}
         run: |
-          # The branch which the release was cut from, which is the one it names, and failing that the one which holds
-          # the commit which was tagged. A release published from a tag which was pushed by hand names the tag here
-          # rather than a branch, so what it names is not taken on trust.
-          TARGET="${{ github.event.release.target_commitish }}"
-          if ! git ls-remote --exit-code --heads origin "$TARGET" > /dev/null 2>&1; then
-              TAGGED=$(git rev-parse "$TAG^{commit}")
-              # The branch which points at the tagged commit, which is the branch the tag was cut from.
-              TARGET=$(git for-each-ref --format='%(refname:short) %(objectname)' refs/remotes/origin \
-                       | sed 's|^origin/||' | grep -v '^HEAD ' \
-                       | awk -v commit="$TAGGED" '$2 == commit { print $1 }' | head -1)
-             if [ -z "$TARGET" ]; then
-                TARGET=$(git branch -r --contains "$TAG" --format='%(refname:short)' | sed 's|^origin/||' | grep -v '^HEAD$' | head -1)
-             fi
-           fi
-           echo "pushing to $TARGET"
+          # The branch which the release was cut from — the one it names, and failing
+          # that the one which holds the commit which was tagged (a release published
+          # from a hand-pushed tag names the tag here, so what it names is not taken on
+          # trust). The same rule decides where the version commit goes in the step
+          # above, so it lives in one script.
+          TARGET=$(bash "$RUNNER_TEMP/devops/ToolsWorkflow/publish/release_target_branch.sh" "$TARGET_HINT" "$TAG")
+          echo "pushing to $TARGET"
 
            # The bump was committed on the tagged commit, and the branch may have
            # moved since the release was cut — the push of that commit is then a
@@ -439,8 +454,20 @@ jobs:
       - name: Publish to PeroNPM
         if: ${{ steps.channels.outputs.DO_PERONPM == 'true' }}
         run: |
+          log="$RUNNER_TEMP/npm-publish-peronpm.log"
           for i in {1..3}; do
-            npm publish --registry "$NPM_URL" --verbose && exit 0
+            if npm publish --registry "$NPM_URL" --verbose > "$log" 2>&1; then
+              cat "$log"
+              exit 0
+            fi
+            cat "$log"
+            # "cannot publish over the previously published version" is not a failure
+            # to retry — it is a release that already happened, which is what a re-run
+            # of this workflow is. The version is in the registry, which is the point.
+            if grep -qE 'E409|EPUBLISHCONFLICT|cannot publish over' "$log"; then
+              echo "$(grep '"version"' "$PWD/package.json" | head -1 | sed 's/.*"version": *"\([^"]*\)".*/This version (\1) is already in PeroNPM; nothing to publish./')"
+              exit 0
+            fi
             echo "Attempt $i failed, retrying in 5 seconds..."
             sleep 5
           done
@@ -587,8 +614,19 @@ jobs:
           esac
 
           echo "publishing $(basename "$tarball") to registry.npmjs.org"
+          log="$RUNNER_TEMP/npm-publish-npmjs.log"
           for i in {1..3}; do
-            npm publish "$tarball" --registry https://registry.npmjs.org/ && exit 0
+            if npm publish "$tarball" --registry https://registry.npmjs.org/ > "$log" 2>&1; then
+              cat "$log"
+              exit 0
+            fi
+            cat "$log"
+            # Already published is what a re-run of this workflow finds, and it is the
+            # state this step wanted to reach.
+            if grep -qE 'E409|EPUBLISHCONFLICT|cannot publish over' "$log"; then
+              echo "This version is already on registry.npmjs.org; nothing to publish."
+              exit 0
+            fi
             echo "Attempt $i failed, retrying in 5 seconds..."
             sleep 5
           done
