@@ -477,6 +477,15 @@ MIN_TEST_FRAMEWORK = "1.4.6"
 MOQ = "org.nuget.moq"
 MIN_MOQ = "4.21.0"
 
+# Newtonsoft.Json, because the packages are written against it: their code and their
+# test fixtures serialise through `Newtonsoft.Json`, and the per-PR project starts
+# from the 3D template's manifest without it. Unlike Moq it is an official Unity
+# package (`com.unity.nuget.newtonsoft-json`), so it needs no registry scope.
+# 3.2.1 is the version those packages are written against and what they are tested
+# with; a project that asks for a newer one keeps it.
+NEWTONSOFT_JSON = "com.unity.nuget.newtonsoft-json"
+MIN_NEWTONSOFT_JSON = "3.2.1"
+
 _VERSION_RE = re.compile(r"^\d+(?:\.\d+)*$")
 
 
@@ -487,8 +496,8 @@ def _version_tuple(value: str) -> Tuple[int, ...]:
 def ensure_minimum_version(project: str, package: str, minimum: str, why: str) -> None:
     """Raise a dependency to ``minimum`` when it is absent or older than that.
 
-    Shared by the two dependencies the pipeline provides for a package's tests,
-    because the rule is the same one: a plain version at or above the minimum is
+    Shared by the dependencies the pipeline provides — a test framework, Moq — because
+    the rule is the same one: a plain version at or above the minimum is
     left alone, and anything that is *not* a plain version — a ``file:``, ``git:``
     or registry reference — is the repository's deliberate choice and is not
     touched either.
@@ -546,11 +555,19 @@ def ensure_moq(project: str) -> None:
     )
 
 
+def ensure_newtonsoft_json(project: str) -> None:
+    """Give the project the Newtonsoft.Json the packages are written against."""
+    ensure_minimum_version(
+        project, NEWTONSOFT_JSON, MIN_NEWTONSOFT_JSON, "the packages are written against it"
+    )
+
+
 def prepare_manifest(project: str) -> None:
     """Everything the project's manifest needs before a package is added to it."""
     ensure_scoped_registries(project)
     ensure_test_framework(project)
     ensure_moq(project)
+    ensure_newtonsoft_json(project)
 
 
 def ensure_package(project: str, package_name: str, package_root: str) -> bool:
