@@ -14,6 +14,7 @@ The tool is fully configured through environment variables (no CLI arguments):
     OPENAI_API_BASE_URL   (optional) API base URL (default: https://api.openai.com/v1).
     REVIEW_LANGUAGE       (optional) Review output language (default: en).
     MAX_TOKENS_PER_CHUNK  (optional) Max tokens per chunk for large PRs (default: 131072).
+    AGENT_CONTEXT_TOKENS  (optional) Transcript budget before compaction (default: 200000).
     SILENT_MODE           (optional) "true"/"1" posts a comment instead of a review.
     DRY_RUN               (optional) "true"/"1" prints the review without posting.
 
@@ -60,7 +61,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-26.unity.126"
+VERSION = "2026-10-26.unity.127"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -366,6 +367,7 @@ class Config:
     prompt: str
     project_prompt_path: str
     max_tokens_per_chunk: int
+    agent_context_tokens: int
     silent: bool
     dry_run: bool
 
@@ -413,6 +415,25 @@ def load_config(require_openai: bool = True) -> Config:
         log("Warning: invalid MAX_TOKENS_PER_CHUNK; using default.")
         max_tokens_per_chunk = DEFAULT_MAX_TOKENS_PER_CHUNK
 
+    # A budget the caller may set, because what it should be depends on the bill and on
+    # the step count rather than on the model's headline window: every step re-sends the
+    # whole transcript, so this number multiplies by the steps a review takes.
+    agent_context_tokens = MAX_AGENT_CONTEXT_TOKENS
+    raw_budget = os.environ.get("AGENT_CONTEXT_TOKENS", "").strip()
+    if raw_budget:
+        try:
+            requested = int(raw_budget)
+        except ValueError:
+            log(f"Warning: invalid AGENT_CONTEXT_TOKENS {raw_budget!r}; using the default.")
+        else:
+            clamped = max(MIN_AGENT_CONTEXT_TOKENS, min(requested, MAX_AGENT_CONTEXT_CEILING))
+            if clamped != requested:
+                log(
+                    f"AGENT_CONTEXT_TOKENS {requested} is outside "
+                    f"{MIN_AGENT_CONTEXT_TOKENS}..{MAX_AGENT_CONTEXT_CEILING}; using {clamped}."
+                )
+            agent_context_tokens = clamped
+
     return Config(
         github_token=github_token,
         openai_token=openai_token,
@@ -425,6 +446,7 @@ def load_config(require_openai: bool = True) -> Config:
         # lives in the action/workflow defaults so consumers get it for free.
         project_prompt_path=os.environ.get("PROJECT_PROMPT_PATH", "").strip(),
         max_tokens_per_chunk=max_tokens_per_chunk,
+        agent_context_tokens=agent_context_tokens,
         silent=env_bool("SILENT_MODE", default=True),
         dry_run=env_bool("DRY_RUN"),
     )
@@ -2984,6 +3006,11 @@ MAX_AGENT_ITERATIONS = 64
 # shows it: 499k, 503k, 523k, 525k prompt tokens, "Context compacted" on all 22
 # steps.
 MAX_AGENT_CONTEXT_TOKENS = 200_000
+# What a caller may set it to. The floor keeps a transcript from being compacted on
+# every step, which is the failure the token budget was introduced for; the ceiling is
+# about the bill rather than the model — a 1M-token prompt is re-sent on every step.
+MIN_AGENT_CONTEXT_TOKENS = 20_000
+MAX_AGENT_CONTEXT_CEILING = 2_000_000
 # Compaction aims below the ceiling, not at it. A pass that ends exactly at the
 # limit is a pass that runs again on the very next step, which is what "compacted
 # every step" looked like — and it is indistinguishable from not compacting.
@@ -5168,7 +5195,7 @@ def run_agent_review(
         # Why the loop ended, reported when it ends without a finish.
         stop_reason = f"the {MAX_AGENT_ITERATIONS}-step budget ran out"
         for iteration in range(1, MAX_AGENT_ITERATIONS + 1):
-            compaction = compact_agent_messages(messages)
+            compaction = compact_agent_messages(messages, budget_tokens=config.agent_context_tokens)
             if compaction["stubbed"] or compaction["dropped"]:
                 log(
                     f"Context compacted: {compaction['stubbed']} tool result(s) stubbed, "
@@ -5299,7 +5326,7 @@ def run_agent_reply(
         if store:
             store.append(turns)
         for iteration in range(1, MAX_AGENT_ITERATIONS + 1):
-            compaction = compact_agent_messages(messages)
+            compaction = compact_agent_messages(messages, budget_tokens=config.agent_context_tokens)
             if compaction["stubbed"] or compaction["dropped"]:
                 log(
                     f"Context compacted: {compaction['stubbed']} tool result(s) stubbed, "

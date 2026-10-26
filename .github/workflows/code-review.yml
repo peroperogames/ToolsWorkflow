@@ -38,6 +38,14 @@ on:
         required: false
         type: string
         default: '131072'
+      agent-context-tokens:
+        description: >-
+          The transcript a review run may carry before it is compacted, in tokens.
+          A cost and latency budget rather than the model's limit — every agent step
+          re-sends the whole transcript, so this multiplies by the step count.
+        required: false
+        type: string
+        default: '200000'
       silent-mode:
         description: "Set 'true' to post a comment instead of a review. Only affects the prose-fallback path; the normal tool-driven review posts inline comments regardless."
         required: false
@@ -137,6 +145,7 @@ jobs:
           openai-max-retries: ${{ inputs.openai-max-retries }}
           review-language: ${{ inputs.review-language }}
           max-tokens-per-chunk: ${{ inputs.max-tokens-per-chunk }}
+          agent-context-tokens: ${{ inputs.agent-context-tokens }}
           silent-mode: ${{ inputs.silent-mode }}
           dry-run: ${{ inputs.dry-run }}
           state-dir: ${{ inputs.state-dir }}

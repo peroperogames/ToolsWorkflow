@@ -39,6 +39,13 @@ inputs:
     description: 'Max tokens per chunk for large PRs.'
     required: false
     default: '131072'
+  agent-context-tokens:
+    description: >-
+      The transcript a review run may carry before it is compacted, in tokens.
+      The default is a cost and latency budget, not the model's limit: every step
+      re-sends the whole transcript, so this multiplies by the step count.
+    required: false
+    default: '200000'
   silent-mode:
     description: "Set 'true' to post a comment instead of a review. Only affects the prose-fallback path."
     required: false
@@ -194,6 +201,7 @@ runs:
         OPENAI_MAX_RETRIES: ${{ inputs.openai-max-retries }}
         REVIEW_LANGUAGE: ${{ inputs.review-language }}
         MAX_TOKENS_PER_CHUNK: ${{ inputs.max-tokens-per-chunk }}
+        AGENT_CONTEXT_TOKENS: ${{ inputs.agent-context-tokens }}
         SILENT_MODE: ${{ inputs.silent-mode }}
         DRY_RUN: ${{ inputs.dry-run }}
         REVIEW_WORK_DIR: ${{ inputs.state-dir }}

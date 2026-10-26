@@ -71,6 +71,7 @@ Every setting is reachable three ways: the `with:` input when calling the reusab
 | `openai-max-retries` | `OPENAI_MAX_RETRIES` | `5` | Retry count for connection errors and 429/5xx responses. |
 | `review-language` | `REVIEW_LANGUAGE` | `cn` | Review output language — codes (`en`, `zh`, `cn`, `ja`, `ko`, `es`, `fr`, `de`, `ru`, `pt`) or full names. It applies to what the bot writes **on the pull request**; the job log is English throughout, because that is what an operator greps and a lone sentence of something else reads as a mistake. |
 | `max-tokens-per-chunk` | `MAX_TOKENS_PER_CHUNK` | `131072` | Max tokens of diff per review call. |
+| `agent-context-tokens` | `AGENT_CONTEXT_TOKENS` | `200000` | The transcript a review run may carry before it is compacted, in tokens. A cost and latency budget, not the model's window — see [the budget](#the-budget-is-in-tokens-and-the-ratio-is-not-four-characters). Clamped to 20 000…2 000 000. |
 | `silent-mode` | `SILENT_MODE` | `true` | Post a comment instead of a review. Set to `0`/`false` to post a review with `APPROVE`/`REQUEST_CHANGES`. Only affects the prose-fallback path — the normal tool-driven review posts inline comments regardless. |
 | `dry-run` | `DRY_RUN` | `false` | Print the review without posting anything. Useful for trying the bot out on a pull request. |
 | `state-dir` | `REVIEW_WORK_DIR` | `<tmp>/ai-code-review` | Root for the per-PR working directories. Each PR owns exactly one, named `<repo>-PR<number>`, holding its agent session and its Unity project. (`REVIEW_STATE_DIR` is still read as the older name for this setting.) |
@@ -689,6 +690,8 @@ Context compacted: 45 tool result(s) stubbed, 93 earlier message(s) dropped, 290
 ```
 
 That leaves ~10 further steps before the next compaction instead of one, which is what "compacted" is supposed to mean.
+
+**200k is a bill, not the model's window.** DeepSeek's own spec is a 1M-token input window, so 200k is deliberately conservative: every agent step re-sends the whole transcript, and a review takes tens of steps, so the budget multiplies by the step count — a run that sat at 600k tokens would pay for ~5× the input of one that sits at 120k, on every step, and it would be slower to start each step for the same reason. What it buys is the case the budget exists for: a transcript that stays small enough that compaction fires once in a while (leaving headroom to keep working) instead of on every step, which is the AccessKing log above. It is also well above what a run actually uses — PeroSerde PR #6 peaked at 49k tokens over 64 steps. The number is a knob (`agent-context-tokens` / `AGENT_CONTEXT_TOKENS`, clamped to 20 000…2 000 000) because the right value depends on the repository's diffs and on what a review is allowed to cost, not on the model's headline.*
 
 **A run is handed only the tail of the session.** The session is every earlier run of the pull request, kept so a run can continue instead of starting over — and it was handed over in full, trimmed only once the transcript crossed 200k tokens. A one-line push then paid for every file the previous ten pushes had read, on every step of its own run. `MAX_AGENT_HISTORY_TOKENS` bounds what a run is *handed* to 40k tokens, newest turns first, with a note naming what was left out:
 
