@@ -195,16 +195,20 @@ class AIClient:
             if not content and not calls:
                 content = message.get("reasoning_content") or ""
 
-            # Why the answer ended matters to the caller: `length` means the model
-            # was cut off by its own output limit, which looks like a malformed
-            # answer to anything that parses `content` — a JSON object that stops
-            # mid-string is "invalid" only from the outside.
+            # `length` means the model was cut off by its own output limit, which
+            # looks like a malformed answer to anything that parses `content` — a JSON
+            # object that stops mid-string is "invalid" only from the outside.
+            # `tool_calls` is the normal end of a tool-using step and says nothing
+            # about the answer: a review that logs "the answer was cut off" on every
+            # step of a 54-step run reads like 54 failures that never happened.
             finish = message.get("finish_reason") or choices[0].get("finish_reason") or ""
-            if finish and finish != "stop":
+            if finish == "length":
                 print(
-                    f"  Finish reason: {finish} — the answer was cut off.",
+                    "  Finish reason: length — the answer was cut off by the output limit.",
                     file=sys.stderr,
                 )
+            elif finish and finish not in ("stop", "tool_calls"):
+                print(f"  Finish reason: {finish}", file=sys.stderr)
 
             usage = data.get("usage")
             if usage:

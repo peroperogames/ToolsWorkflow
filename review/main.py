@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-26.unity.125"
+VERSION = "2026-10-26.unity.126"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -115,8 +115,18 @@ MAX_CONVERSATION_ENTRY_CHARS = 2000
 # each request huge and slow. ~20k chars ≈ 5k tokens.
 MAX_CONVERSATION_CHARS = 20000
 
-# Cap on a single read_file result, for the same reason.
+# read_file returns a window of this many lines, and at most MAX_READ_FILE_CHARS
+# characters of it. It used to return the first 8000 characters of a file and nothing
+# else — no offset, so a file longer than that could never be read to its end, and a
+# model that needed the rest asked for the same path again and got the same 8000
+# characters again, for as many steps as the budget allowed (PeroSerde PR #6 spent 54
+# steps reading and re-reading the same files, 5 changed files and no verdict).
+READ_FILE_LINES = 200
 MAX_READ_FILE_CHARS = 8000
+# And a review only gets so many reads. PeroSerde PR #6 spent all 64 of its steps
+# reading — 0 comments posted, no verdict, 29 minutes — and nothing in the loop said
+# "stop reading and say something". The step budget alone is a wall, not a pace.
+MAX_READ_FILE_CALLS = 40
 
 
 # Minimal fallback used only when prompt.md is empty.
@@ -3017,12 +3027,25 @@ REVIEW_TOOLS: List[Dict[str, Any]] = [
         "function": {
             "name": "read_file",
             "description": (
-                "Read the full current content of a file in this pull request's "
-                "branch. Use it when the diff alone is not enough to judge a change."
+                "Read a file in this pull request's branch, in windows of "
+                f"{READ_FILE_LINES} lines. Use it when the diff alone is not enough to "
+                "judge a change. The answer says which lines of how many you got; ask "
+                "again with `offset` for the rest. A window you were already given is "
+                "not sent twice."
             ),
             "parameters": {
                 "type": "object",
-                "properties": {"path": {"type": "string", "description": "File path as shown in the diff."}},
+                "properties": {
+                    "path": {"type": "string", "description": "File path as shown in the diff."},
+                    "offset": {
+                        "type": "integer",
+                        "description": "First line to return, 1-based. Default 1.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": f"Lines to return. Default and maximum {READ_FILE_LINES}.",
+                    },
+                },
                 "required": ["path"],
             },
         },
@@ -3422,21 +3445,74 @@ class ToolContext:
     # Ids of the comments this run posted, in order. The retirement pass runs
     # right after the review and must not resolve a thread from this very list.
     posted_ids: List[int] = field(default_factory=list)
+    # (path, first line, last line) windows already handed to the model. A repeat is
+    # answered with "you have it" instead of the same 8k characters, which is both
+    # cheaper and the way out of a read-forever loop.
+    read_windows: "set[Tuple[str, int, int]]" = field(default_factory=set)
+    # How many reads this run has spent, against MAX_READ_FILE_CALLS.
+    read_calls: int = 0
 
 
 def _tool_read_file(args: Dict[str, Any], ctx: ToolContext) -> str:
     path = args.get("path")
     if not path:
         return "error: 'path' is required"
+    if ctx.read_calls >= MAX_READ_FILE_CALLS:
+        return (
+            f"error: this run has spent its {MAX_READ_FILE_CALLS} reads. Post the "
+            "findings you have with post_inline_comment and call finish(verdict) "
+            "now — a review that reads until the step budget runs out posts nothing "
+            "at all."
+        )
+    ctx.read_calls += 1
     try:
         content = ctx.gh.get_file_content(ctx.owner, ctx.repo, path, ref=ctx.heads)
     except Exception as exc:  # noqa: BLE001
         return f"error: could not read {path}: {exc}"
-    # Bounded: every read is re-sent on each later agent step, so a few whole
-    # files add up fast. 8k chars is plenty to judge the code around a change.
-    if len(content) > MAX_READ_FILE_CHARS:
-        return content[:MAX_READ_FILE_CHARS] + "\n... (truncated)"
-    return content
+
+    lines = content.splitlines()
+    total = len(lines)
+    try:
+        start = int(args.get("offset") or 1)
+    except (TypeError, ValueError):
+        start = 1
+    try:
+        limit = int(args.get("limit") or READ_FILE_LINES)
+    except (TypeError, ValueError):
+        limit = READ_FILE_LINES
+    start = max(1, start)
+    if limit <= 0:
+        limit = READ_FILE_LINES
+    limit = min(limit, READ_FILE_LINES)
+    if start > total:
+        return f"{path} has {total} line(s); offset {start} is past its end."
+
+    end = min(total, start + limit - 1)
+    window = "\n".join(lines[start - 1 : end])
+    # Bounded: every window is re-sent on each later agent step, so a few whole files
+    # add up fast.
+    if len(window) > MAX_READ_FILE_CHARS:
+        window = window[:MAX_READ_FILE_CHARS] + "\n... (window cut at the character limit)"
+
+    # A window already handed over is not sent again. Asking for the same file twice
+    # is the shape of a loop — the model is told it has it, and how to ask for another
+    # part.
+    key = (path, start, end)
+    if key in ctx.read_windows:
+        return (
+            f"{path}: lines {start}-{end} of {total} — you already have this window in "
+            "the conversation above. Ask for a different range with `offset`, or work "
+            "with what you have."
+        )
+    ctx.read_windows.add(key)
+
+    header = f"{path}: lines {start}-{end} of {total}"
+    if end < total:
+        header += f" (ask again with offset={end + 1} for the rest)"
+    if ctx.read_calls >= MAX_READ_FILE_CALLS * 3 // 4:
+        # The pace has to be visible before it runs out, not announced at the wall.
+        header += f" [{ctx.read_calls} of {MAX_READ_FILE_CALLS} reads used]"
+    return f"{header}\n{window}"
 
 
 def _same_finding(a: str, b: str) -> bool:
@@ -3618,6 +3694,27 @@ TOOL_HANDLERS = {
     "resolve_thread": _tool_resolve_thread,
     "finish": _tool_finish,
 }
+
+
+def _tool_call_label(call: Dict[str, Any]) -> str:
+    """One step-log entry for a call: the name, and what it is about.
+
+    A log line of bare tool names says nothing about a run that spent 54 steps
+    reading — the arguments are what show whether it was advancing or going in
+    circles, and they cost one short line each.
+    """
+    fn = call.get("function") or {}
+    name = fn.get("name") or "?"
+    try:
+        args = json.loads(fn.get("arguments") or "{}")
+    except ValueError:
+        args = {}
+    if not isinstance(args, dict):
+        return name
+    topic = args.get("path") or args.get("thread_id") or args.get("threadId") or ""
+    if name == "read_file" and args.get("offset"):
+        topic = f"{topic}@{args['offset']}"
+    return f"{name}({topic})" if topic else name
 
 
 def execute_tool(name: str, args: Dict[str, Any], ctx: ToolContext) -> str:
@@ -5091,6 +5188,20 @@ def run_agent_review(
                         ),
                     }
                 )
+            elif iteration == max(2, MAX_AGENT_ITERATIONS * 3 // 4):
+                # The budget has to be a pace, not only a wall. A run that spends all
+                # of it reading ends with no verdict and nothing posted, which is the
+                # worst outcome available — worse than a review that stopped early.
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "You have used three quarters of the step budget. Post the "
+                            "findings you have and call finish(verdict) soon; another "
+                            "file is another step you may not have."
+                        ),
+                    }
+                )
             reply = ai.chat_message(messages, tools=REVIEW_TOOLS)
             calls = reply.get("tool_calls") or []
             if not calls:
@@ -5101,7 +5212,7 @@ def run_agent_review(
                 stop_reason = "the model stopped calling tools"
                 break
 
-            log(f"Agent step {iteration}: {', '.join(c.get('function', {}).get('name', '?') for c in calls)}")
+            log(f"Agent step {iteration}: {', '.join(_tool_call_label(c) for c in calls)}")
             narration = _echoed_narration(reply.get("content") or "")
             messages.append(
                 {"role": "assistant", "content": narration, "tool_calls": calls}
