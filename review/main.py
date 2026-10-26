@@ -61,7 +61,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-26.unity.127"
+VERSION = "2026-10-26.unity.128"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -862,7 +862,11 @@ def build_diff_text(
             lines.append(annotate_diff(patch))
             lines.append("```")
         else:
-            lines.append("_(no textual patch available)_")
+            # Named for what it is: a model that reads "no textual patch available" as
+            # "something is hidden here" posts "the binary cannot be reviewed" on every
+            # pull request that regenerates an assembly, which is the repository's
+            # release shape rather than a finding (see the prompt).
+            lines.append("_(binary or oversized file: the diff carries no text for it)_")
         lines.append("")
     return "\n".join(lines)
 
@@ -3494,6 +3498,13 @@ def _tool_read_file(args: Dict[str, Any], ctx: ToolContext) -> str:
     ctx.read_calls += 1
     try:
         content = ctx.gh.get_file_content(ctx.owner, ctx.repo, path, ref=ctx.heads)
+    except UnicodeDecodeError:
+        # An assembly, a .pdb, an image: there is no text to hand over, and the model
+        # asking for one is answered with that rather than a codec error.
+        return (
+            f"{path} is a binary file: there is no text to read, and nothing about it "
+            "can be judged here. Review the source beside it instead."
+        )
     except Exception as exc:  # noqa: BLE001
         return f"error: could not read {path}: {exc}"
 
