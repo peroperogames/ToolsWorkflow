@@ -60,7 +60,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-14.unity.123"
+VERSION = "2026-10-26.unity.124"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -914,8 +914,8 @@ RESOLVE_DECIDER_PROMPT = (
     "did not make — AccessKing PR #3 has a note reading 「作者认为该警告无意义（'??' "
     "左操作数永不为 null 属于防御性写法的误报），不处理。」 in reply to an author who "
     "wrote only \"non sense.\"\n"
-    "- The `open` reason is read by the person who asked why the pull request was "
-    "not approved: name what the code still lacks, not that it was reviewed."
+    "- The `open` reason goes to the run log, nowhere else: name what the code still "
+    "lacks, not that it was reviewed. Nothing is posted into a thread that stays open."
 )
 
 INCREMENTAL_DIRECTIVE = (
@@ -1915,13 +1915,12 @@ def handle_settle_command(ctx: CommandContext, command: Command) -> int:
 
 
 def settle_comment_body(before: int, after: int, outcome: "SettleOutcome") -> str:
-    """What a `settle` run says: the result, why, and nothing about the command.
+    """What a `settle` run says: the result, and nothing about the command.
 
     Whoever reads this asked for `settle`, so they know what it does — a sentence
     explaining that it posts no new comments is not news, it is the bot restating
-    the request back at them. What they cannot know without it is what happened,
-    and *why the pull request is still unapproved*: a thread that stayed open with
-    no sentence about it is the one thing this command used to leave out.
+    the request back at them. What they cannot know without it is what happened, and
+    whether the pull request is now approved.
 
     "All resolved but not approved" has two causes — this commit was already
     approved, or the API refused — and neither is a failure of the command, so the
@@ -1936,8 +1935,8 @@ def settle_comment_body(before: int, after: int, outcome: "SettleOutcome") -> st
         return counts + "approve 未提交（该提交此前已批准过，或没有权限）。"
     if outcome.unknown:
         return counts + "判定失败，详见 workflow 日志。"
-    # No reasons here: they belong in the threads they are about, and that is where
-    # they are posted. This comment is about the run.
+    # Just the count: which thread stayed open is visible on the pull request, and
+    # why is in the run log. Nothing is posted into a thread that stays open.
     return counts + "暂不 approve。"
 
 
@@ -2265,30 +2264,13 @@ def _file_exists_at(
     return None
 
 
-def _open_note(reason: str, language: str) -> str:
-    """What to post in a thread that stays open: what is still missing.
-
-    In the thread rather than in the conversation comment, because that is where the
-    concern lives and where the person who wrote it is looking. Empty when the
-    decider gave no reason — a note that says nothing is worse than none.
-    """
-    text = " ".join((reason or "").split()).strip()
-    if not text:
-        return ""
-    return (
-        f"⏳ 仍未关闭：{text}"
-        if "chinese" in resolve_language(language).lower()
-        else f"⏳ Still open: {text}"
-    )
-
-
 @dataclass
 class SettleOutcome:
     """What judging the threads produced, in the terms a comment needs.
 
     ``open`` is the part that used to be lost: a thread left alone because the code
-    still does not fix it, with the decider's sentence about what is missing — the
-    one thing the person who asked "why was this not approved?" needs.
+    still does not fix it, with the decider's sentence about what is missing. That
+    sentence is logged; nothing is posted into a thread that stays open.
     """
 
     resolved: int = 0
@@ -2355,10 +2337,6 @@ def decide_resolved_threads(
                 "outdated": bool(thread.get("isOutdated")),
                 "line": thread.get("line"),
                 "body": " ".join((nodes[0].get("body") or "").split())[:600],
-                # What was said last in the thread, so a "still open" note that is
-                # the same sentence as the last one is not posted again on every
-                # settle.
-                "last": " ".join((nodes[-1].get("body") or "").split())[:600],
                 "comment_id": nodes[0].get("databaseId"),
             }
         )
@@ -2434,8 +2412,9 @@ def decide_resolved_threads(
         elif isinstance(item, dict) and item.get("id"):
             wanted[str(item["id"])] = str(item.get("reason") or "").strip()
 
-    # What the decider said about the ones it is leaving open: the reason a thread
-    # stays open is the thing the person asking for a settle wants to know.
+    # What the decider said about the ones it is leaving open. It is logged, not
+    # posted: a thread left open is already visible as an open thread, and the run
+    # log is where "what is still missing" is wanted when reading back a settle.
     why_open: Dict[str, str] = {}
     for item in data.get("open") or []:
         if isinstance(item, dict) and item.get("id"):
@@ -2458,11 +2437,6 @@ def decide_resolved_threads(
                     "body": c.get("body") or "",
                 }
             )
-            # Said in the thread, where the concern and its author are — not in the
-            # conversation comment, which is about the run, not about this finding.
-            note = _open_note(reason, language)
-            if note and reason not in (c.get("last") or ""):
-                _reply_in_thread(gh, owner, repo, number, c.get("comment_id"), note, c["path"])
             continue
         # Another run of this pull request may have got here first: runs used to
         # overlap freely, and each posted its own "why this is resolved" note. The
