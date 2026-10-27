@@ -1,0 +1,68 @@
+name: token probe (temporary)
+
+# One-off diagnostic, to be deleted as soon as it has answered its question:
+# does the PeroToolsBot installation token actually have access to
+# peroperogames/RhythmAce-Neo, whose clone and API reads 404 while the workflow
+# token works? Dispatched by hand, prints what the App can see, deletes itself.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint the same token the review workflow mints
+        id: token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PK }}
+          repositories: RhythmAce-Neo, ToolsWorkflow
+
+      - name: What the App token can see
+        env:
+          APP_TOKEN: ${{ steps.token.outputs.token }}
+          WORKFLOW_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          echo "== the repositories this installation token is scoped to =="
+          gh api --paginate /installation/repositories --jq '.repositories[].full_name' | head -50 || true
+          echo
+          echo "== contains RhythmAce-Neo? =="
+          gh api --paginate /installation/repositories --jq '.repositories[].full_name' | grep -x 'peroperogames/RhythmAce-Neo' && echo YES || echo NO
+          echo
+          echo "== repo metadata, as the App =="
+          curl -sS -o /dev/null -w 'GET /repos/.../RhythmAce-Neo -> %{http_code}\n' \
+            -H "Authorization: Bearer $APP_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/peroperogames/RhythmAce-Neo
+          echo "== pull request #36, as the App =="
+          curl -sS -o /dev/null -w 'GET /pulls/36 -> %{http_code}\n' \
+            -H "Authorization: Bearer $APP_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/peroperogames/RhythmAce-Neo/pulls/36
+          echo
+          echo "== the same two, as the workflow token =="
+          curl -sS -o /dev/null -w 'GET /repos -> %{http_code}\n' \
+            -H "Authorization: Bearer $WORKFLOW_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/peroperogames/RhythmAce-Neo
+          curl -sS -o /dev/null -w 'GET /pulls/36 -> %{http_code}\n' \
+            -H "Authorization: Bearer $WORKFLOW_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/peroperogames/RhythmAce-Neo/pulls/36
+          echo
+          echo "== git, as the App =="
+          GIT_TERMINAL_PROMPT=0 git ls-remote "https://x-access-token:${APP_TOKEN}@github.com/peroperogames/RhythmAce-Neo.git" HEAD \
+            && echo "ls-remote OK" || echo "ls-remote FAILED"
+          echo
+          echo "== git, as the workflow token =="
+          GIT_TERMINAL_PROMPT=0 git ls-remote "https://x-access-token:${WORKFLOW_TOKEN}@github.com/peroperogames/RhythmAce-Neo.git" HEAD \
+            && echo "ls-remote OK" || echo "ls-remote FAILED"
+          echo
+          echo "== the installation itself =="
+          gh api /orgs/peroperogames/installations --jq '.installations[] | select(.app_slug=="perotoolsbot") | "selection=\(.repository_selection) id=\(.id) updated=\(.updated_at)"'
