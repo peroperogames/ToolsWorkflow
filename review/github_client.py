@@ -173,8 +173,35 @@ class GitHubClient:
         return value if isinstance(value, bool) else None
 
     def get_pull_request(self, owner: str, repo: str, number: int) -> Dict[str, Any]:
-        """Fetch metadata for a single pull request."""
-        return self._request("GET", f"/repos/{owner}/{repo}/pulls/{number}")
+        """Fetch metadata for a single pull request.
+
+        A 404 is retried once. It happens for a token that can plainly read the
+        repository — RhythmAce-Neo #36 answered 200 for this call in one stage and
+        404 for the same call five seconds later in the next — and that is not worth
+        failing a run over. When it persists, the error says what the usual cause is:
+        "Not Found" for a pull request that is visibly open reads like the pipeline's
+        own bug, and the answer (the App installation is missing the repository) is
+        also what breaks the clone.
+        """
+        path = f"/repos/{owner}/{repo}/pulls/{number}"
+        try:
+            return self._request("GET", path)
+        except RuntimeError as exc:
+            if "(404)" not in str(exc):
+                raise
+            time.sleep(1)
+        try:
+            return self._request("GET", path)
+        except RuntimeError as exc:
+            if "(404)" not in str(exc):
+                raise
+            raise RuntimeError(
+                f"{str(exc).strip()} — and again after a retry. A 404 here for a pull "
+                "request that exists usually means the GitHub App's installation does "
+                "not include this repository: the API can still answer for a repository "
+                "the git side refuses, and that is also what makes the clone say "
+                "'Repository not found'. Check the App's repository access."
+            ) from exc
 
     def list_files(self, owner: str, repo: str, number: int) -> List[Dict[str, Any]]:
         """List the files changed by a pull request (paginated)."""

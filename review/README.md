@@ -287,6 +287,14 @@ The checks stage did not run for this one; running the build, the tests and the 
 
 `main.py all` runs the three in order in one process. That is what a manual run on the runner wants, and it is the fallback if the split ever has to be undone. `main.py <stage>` alone is the other half of the same idea: with a PR already checked out, `python3 main.py static` re-runs just the analysis against the same clone.
 
+### When the clone fails, the stage fails
+
+A review cannot look at code it does not have, so a failed clone stops the checks stage with the cause spelled out rather than continuing as "repository kind: no C# or Unity content" — which is what it used to do, writing a state that said there was nothing to check. That state reached the later stages as a pull request read that 404'd with nothing else in the message, so the run looked like the pipeline's own bug.
+
+RhythmAce-Neo #36 is the case: its App token could read the repository's API — `200` on `/repos`, `/pulls/36` and `/contents/README.md` — while git refused the clone with `Repository not found`. One-off probes with that same token had `git ls-remote` working for `AccessKing` and for `ToolsWorkflow` and failing for that one repository, which points at the App's repository access rather than at the credential or the network: the installation answers the API for the repository and does not grant it to git. Re-granting it (org Settings → GitHub Apps → the App → Configure) is the fix, and the stage's error now says so.
+
+A pull request read that 404s is also retried once before it is reported: the same call answered `200` in one stage and `404` five seconds later in the next, which is not worth failing a run over. When it persists, the error says what the usual cause is.
+
 ### One directory per pull request
 
 A pull request owns exactly one directory on the runner, named `<repo>-PR<number>` (e.g. `ToolsWorkflow-PR42`) under `<state-dir>/<owner>/`. Everything a review of it needs lives inside:

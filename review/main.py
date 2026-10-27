@@ -61,7 +61,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-26.unity.128"
+VERSION = "2026-10-27.unity.129"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3373,7 +3373,25 @@ def run_review_checks(
     staging = pr_workspace.clone_pr_head(
         owner, repo, number, pr.get("head", {}).get("sha", ""), config.github_token
     )
-    kind = repo_kind.detect(staging) if staging else repo_kind.Kind(repo_kind.KIND_OTHER)
+    if not staging:
+        # A review of nothing is not a review. This used to continue as "repository
+        # kind: no C# or Unity content" and write a state saying there was nothing to
+        # check, so the run looked green until a later stage failed with a bare 404 —
+        # which is what RhythmAce-Neo #36 did when the App token could read that
+        # repository's API (200 on /repos, /pulls, /contents) while git refused it
+        # ("Repository not found"). Nothing below this point can work without the
+        # code, so it stops here and says what to look at.
+        raise RuntimeError(
+            f"Could not clone {owner}/{repo}. A review has nothing to look at without "
+            "the code, so this stage stops. The most likely cause is the GitHub App's "
+            "access to the repository: an installation that can read the API but not "
+            "the git data answers 'Repository not found' exactly like this — check the "
+            "App's repository access (org Settings → GitHub Apps → the App → "
+            "Configure), including for a repository added after the App was installed. "
+            "A network failure on the runner is the other cause, and the line above "
+            "says which one it was."
+        )
+    kind = repo_kind.detect(staging)
 
     # The Unity project directory is the PR's directory, and the CLI will not lay
     # one out where a path already exists — so for a package the project is
