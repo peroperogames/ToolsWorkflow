@@ -61,7 +61,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-27.unity.129"
+VERSION = "2026-10-27.unity.130"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -5069,6 +5069,29 @@ def compact_agent_messages(
     return report
 
 
+def compact_for_step(
+    messages: List[Dict[str, Any]], budget_tokens: int, floor_tokens: int = 0
+) -> Tuple[Optional[Dict[str, int]], int]:
+    """Compact before one agent step, unless it provably cannot help.
+
+    A pull request's diff is part of the first request and cannot be compacted away,
+    so on a big one the transcript is over the budget before the model has said
+    anything: RhythmAce-Neo #36 changed 164 files, arrived at ~265k tokens against a
+    200k budget, and ran the passes on every one of its six steps to free 3k each
+    time. ``floor_tokens`` is what a failed attempt achieved; the next attempt is
+    skipped until the transcript has grown a quarter past it, which is the point at
+    which there is something new to compact.
+
+    Returns ``(report_or_None, floor_tokens)``.
+    """
+    if floor_tokens and messages_tokens(messages) < floor_tokens * 5 // 4:
+        return None, floor_tokens
+    report = compact_agent_messages(messages, budget_tokens=budget_tokens)
+    if report["after"] > budget_tokens:
+        return report, report["after"]
+    return report, 0
+
+
 def limit_handed_history(
     messages: List[Dict[str, Any]],
     history_end: int,
@@ -5224,8 +5247,11 @@ def run_agent_review(
         # Why the loop ended, reported when it ends without a finish.
         stop_reason = f"the {MAX_AGENT_ITERATIONS}-step budget ran out"
         for iteration in range(1, MAX_AGENT_ITERATIONS + 1):
-            compaction = compact_agent_messages(messages, budget_tokens=config.agent_context_tokens)
-            if compaction["stubbed"] or compaction["dropped"]:
+            compaction_floor = 0
+            compaction, compaction_floor = compact_for_step(
+                messages, config.agent_context_tokens, compaction_floor
+            )
+            if compaction and (compaction["stubbed"] or compaction["dropped"]):
                 log(
                     f"Context compacted: {compaction['stubbed']} tool result(s) stubbed, "
                     f"{compaction['dropped']} earlier message(s) dropped, "
@@ -5355,8 +5381,11 @@ def run_agent_reply(
         if store:
             store.append(turns)
         for iteration in range(1, MAX_AGENT_ITERATIONS + 1):
-            compaction = compact_agent_messages(messages, budget_tokens=config.agent_context_tokens)
-            if compaction["stubbed"] or compaction["dropped"]:
+            compaction_floor = 0
+            compaction, compaction_floor = compact_for_step(
+                messages, config.agent_context_tokens, compaction_floor
+            )
+            if compaction and (compaction["stubbed"] or compaction["dropped"]):
                 log(
                     f"Context compacted: {compaction['stubbed']} tool result(s) stubbed, "
                     f"{compaction['dropped']} earlier message(s) dropped, "
