@@ -1,11 +1,10 @@
 name: token probe (temporary)
 
-# One-off diagnostic, deleted as soon as it answers: does the PeroToolsBot
-# installation token actually reach peroperogames/RhythmAce-Neo? Its API reads
-# return 200 while `git ls-remote` says "Repository not found", and the review
-# pipeline's clone fails the same way. Two tokens are minted — one scoped to the
-# two repositories by name, one scoped to the whole installation — so the answer
-# says whether the name narrowing or the installation is at fault.
+# One-off diagnostic, deleted as soon as it answers: the App token can read
+# RhythmAce-Neo's API (200 on /repos, /pulls/36, /contents) but `git ls-remote`
+# answers "Repository not found", and the review pipeline's clone fails the same
+# way. This mints one token scoped to three repositories and asks git about each,
+# so the answer says whether it is that repository or the token everywhere.
 
 on:
   workflow_dispatch:
@@ -17,49 +16,27 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: Token scoped to the repositories by name
-        id: named
+      - name: One token, three repositories
+        id: token
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PK }}
-          repositories: RhythmAce-Neo, ToolsWorkflow
+          repositories: AccessKing, RhythmAce-Neo, ToolsWorkflow
 
-      - name: Token scoped to whatever the installation has
-        id: whole
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PK }}
-
-      - name: Compare what each token can reach
+      - name: Ask git about each of them
         env:
-          NAMED: ${{ steps.named.outputs.token }}
-          WHOLE: ${{ steps.whole.outputs.token }}
+          TOKEN: ${{ steps.token.outputs.token }}
         run: |
-          probe() {
-            name="$1"; token="$2"
-            echo "########## $name"
-            echo "-- repositories the token is scoped to"
-            curl -sS -H "Authorization: Bearer $token" -H "Accept: application/vnd.github+json" \
-              https://api.github.com/installation/repositories \
-              | jq -r '"total_count=\(.total_count)", (.repositories[]?.full_name)' | head -12
-            echo "-- repo metadata"
-            curl -sS -o /dev/null -w '  /repos -> %{http_code}\n' \
-              -H "Authorization: Bearer $token" -H "Accept: application/vnd.github+json" \
-              https://api.github.com/repos/peroperogames/RhythmAce-Neo
-            echo "-- pull request #36"
-            curl -sS -o /dev/null -w '  /pulls/36 -> %{http_code}\n' \
-              -H "Authorization: Bearer $token" -H "Accept: application/vnd.github+json" \
-              https://api.github.com/repos/peroperogames/RhythmAce-Neo/pulls/36
-            echo "-- a file's contents"
-            curl -sS -o /dev/null -w '  /contents/README.md -> %{http_code}\n' \
-              -H "Authorization: Bearer $token" -H "Accept: application/vnd.github+json" \
-              https://api.github.com/repos/peroperogames/RhythmAce-Neo/contents/README.md
-            echo "-- git ls-remote"
+          echo "-- repositories the token is scoped to"
+          curl -sS -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+            https://api.github.com/installation/repositories \
+            | jq -r '"total_count=\(.total_count)", (.repositories[]?.full_name)'
+          for repo in AccessKing RhythmAce-Neo ToolsWorkflow; do
+            echo "-- $repo"
+            curl -sS -o /dev/null -w "   /repos -> %{http_code}\n" \
+              -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/peroperogames/$repo"
             GIT_TERMINAL_PROMPT=0 git ls-remote \
-              "https://x-access-token:${token}@github.com/peroperogames/RhythmAce-Neo.git" HEAD 2>&1 | tail -3
-            echo
-          }
-          probe "scoped by repository name" "$NAMED"
-          probe "whole installation" "$WHOLE"
+              "https://x-access-token:${TOKEN}@github.com/peroperogames/$repo.git" HEAD 2>&1 | tail -2
+          done
