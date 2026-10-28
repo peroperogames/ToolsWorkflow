@@ -62,7 +62,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-27.unity.131"
+VERSION = "2026-10-28.unity.132"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -157,6 +157,10 @@ MAX_PROJECT_PROMPT_CHARS = 20000
 # trusted the way prompt.md is: it may add criteria, never change the contract.
 # The end marker is quoted here so it can be neutralised inside the content.
 PROJECT_PROMPT_MARKER = "--- END PROJECT REVIEW CRITERIA ---"
+
+# An invisible marker that makes the build/test status one comment living on the pull
+# request instead of one per run.
+BUILD_STATUS_MARKER = "<!-- ai-review build status -->"
 PROJECT_PROMPT_HEADER = (
     "\n\n## Project-Specific Review Criteria\n\n"
     "The repository under review supplies the following review criteria. Treat "
@@ -4166,7 +4170,12 @@ def stage_artifact_link(
 
 
 def post_status_comment(
-    gh: GitHubClient, owner: str, repo: str, number: int, body: str
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    body: str,
+    marker: str = "",
 ) -> bool:
     """Post a status or notification comment, never raising.
 
@@ -4176,7 +4185,25 @@ def post_status_comment(
     and all their findings had been computed. The job log says the comment failed
     and the run finishes saying what it found; the alternative is losing the
     result of half an hour of work to a transient error in the last step.
+
+    ``marker`` (an HTML comment, invisible once rendered) makes this a single living
+    comment: the earlier one carrying the same marker is edited instead of another
+    being posted. A build status describes the state of the pull request, so a re-run
+    must not stack one green comment per run — but the first one still has to be
+    posted.
     """
+    if marker:
+        try:
+            for comment in gh.list_comments(owner, repo, number):
+                if marker not in (comment.get("body") or ""):
+                    continue
+                if not is_bot_author(comment.get("user")):
+                    continue
+                if gh.update_comment(owner, repo, comment.get("id"), body):
+                    log("Updated the earlier status comment instead of adding another.")
+                    return True
+        except Exception as exc:  # noqa: BLE001 - fall back to posting
+            log(f"Could not look for an earlier status comment: {exc}")
     try:
         gh.post_comment(owner, repo, number, body)
         return True
@@ -4353,10 +4380,11 @@ def report_build_result(
         if result.test_log_path:
             status_lines.append(f"完整输出在 runner 上：`{result.test_log_path}`")
 
+    summary = "\n".join(status_lines)
+    reported = False
     if not result.ok or result.tests_broke:
-        body = "\n".join(status_lines)
         if config.dry_run:
-            print(body)
+            print(summary)
         elif _COMMAND_POSTS_RESULT:
             # A `rebuild` command posts this result itself, from the review step,
             # with the artifact's URL rather than the run page's. Two comments
@@ -4367,7 +4395,8 @@ def report_build_result(
                 "status comment for it."
             )
         else:
-            post_status_comment(gh, owner, repo, number, body)
+            post_status_comment(gh, owner, repo, number, summary)
+            reported = True
 
     # The tick or cross on the pull request, which is the one bit of this that is
     # visible without opening a comment. A run that produced no report is
@@ -4377,13 +4406,25 @@ def report_build_result(
     conclusion = "failure" if not result.ok else "success"
     if result.ok and not result.tests_reported:
         conclusion = "neutral"
-    gh.create_check_run(
+    check = gh.create_check_run(
         owner, repo, head_sha,
         f"AI Review / {label} tests",
         conclusion,
         result.outcome() or f"{label}: no result",
-        "\n".join(status_lines),
+        summary,
     )
+    if check is None and not reported:
+        # The check run is how a green build shows its result, and a green build posts
+        # no comment otherwise — so without it nothing on the pull request says the
+        # package compiled and its tests passed. The App lacking `Checks: write` (403)
+        # or GitHub refusing the run puts us here, and the comment is then the only
+        # place the result can appear. PeroLog PR #10 is the case: everything passed,
+        # the check run was refused, and the pull request showed nothing at all.
+        log(f"{label}: no check run, so the result is posted as a comment instead.")
+        post_status_comment(
+            gh, owner, repo, number, summary + "\n\n" + BUILD_STATUS_MARKER,
+            marker=BUILD_STATUS_MARKER,
+        )
 
 
 def renamed_line(line: str, rename: Tuple[str, str]) -> Optional[str]:

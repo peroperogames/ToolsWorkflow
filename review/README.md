@@ -669,6 +669,12 @@ Every finding is anchored by the changed line's text rather than a line number, 
 
 If solutions were available but `inspectcode` produced no report for any of them — a broken toolchain, a solution it cannot build — the PR gets **one** note saying the static analysis did not run, rather than silence that looks like a clean pass. It is posted once per PR, not once per push. A repository with no solution at all says nothing: there was nothing to analyse.
 
+### A green build says so somewhere
+
+A build that compiled and whose tests passed posts no comment — the approval and the tick are the report — and the tick comes from a **check run**, which needs the App to hold `Checks: write`. PeroLog PR #10 is what a run without it looked like: both suites passed, `GitHub refused the check run — the App needs the 'Checks: write' permission for it; the comment still carries the result` went into the log, and the pull request showed nothing at all, because a green build posts no comment either. The sentence was a promise nothing kept.
+
+Two things are true now. The App should be given `Checks: write` (org Settings → GitHub Apps → the App → Permissions), which is where the tick and the per-platform summary belong. And when the check run cannot be created, the summary is posted as a status comment instead — one living comment, carrying `<!-- ai-review build status -->` so a re-run edits it rather than stacking another green comment on every run. A comment by somebody else is never edited, marker or not.
+
 ### There is no summary
 
 Every finding is a `post_inline_comment` call. There is deliberately **no overall summary and no review body** — the bot only ever speaks through inline comments and the approval.
