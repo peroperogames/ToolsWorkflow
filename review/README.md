@@ -703,6 +703,22 @@ That leaves ~10 further steps before the next compaction instead of one, which i
 
 **When the first request is bigger than the budget, compaction says so once.** A pull request's diff is part of the first request and cannot be compacted away, so a big one arrives over budget before the model has said anything: RhythmAce-Neo #36 changed 164 files, started at ~265k tokens against a 200k budget, and ran the three passes on all six of its steps to free 3k each time. `compact_for_step` records what a failed attempt reached and skips the next ones until the transcript has grown a quarter past it — the point at which there is new content to compact — while the warning above names the size and says the request is that large on its own. Raising `agent-context-tokens` for such a repository, or splitting the review of a 164-file pull request, is the real answer; this only stops pretending the passes did something.
 
+### A big diff is reviewed in slices, not carried through every step
+
+Above `MAP_REDUCE_OVER_TOKENS` (60k tokens of diff) the diff stops being part of the agent's request at all. It is cut into slices (`chunk_files`), each slice is reviewed by its own worker call — four at a time, no tools, JSON out — and the agent that posts the review is handed **the findings instead of the diff**.
+
+The workers only find; the agent is the only thing that posts. A worker returns `{path, quote, body}` with the quote copied verbatim from its slice, and anything it names outside that slice is dropped by name. Two workers reporting the same thing are merged once by the same `_same_finding` the posting tool uses, and the agent is told to post every finding that is neither a duplicate nor already covered by a resolved thread — so a finding that goes missing is visible in the log rather than silently gone:
+
+```
+Map: 113 file(s) in 6 slice(s), 4 at a time.
+Map: 31 finding(s) from 6 slice(s), 9 duplicate(s) merged, 22 to report.
+Findings: 22 from the slice reviewers, 20 inline comment(s) posted in total.
+```
+
+Why it is worth the machinery: the diff used to be part of the first request and was re-sent on every step. RhythmAce-Neo #36 (164 files, 113 of them C#) arrived at ~265k tokens and paid that again on each of its six steps — about 1.6M input tokens to review 164 files. In slices the diff is sent once, each worker's context is one slice, and the agent's is a few thousand tokens of findings.
+
+The trade is deliberate: a worker cannot see a problem that spans two slices. It is given every changed path and the pull request's own description, it can add a `notes` sentence about something outside its slice, and the agent keeps `read_file` and `get_file_diff` — but the agent is the only one that can raise a cross-slice finding, and that is where the judgement lives anyway.
+
 **200k is a bill, not the model's window.** DeepSeek's own spec is a 1M-token input window, so 200k is deliberately conservative: every agent step re-sends the whole transcript, and a review takes tens of steps, so the budget multiplies by the step count — a run that sat at 600k tokens would pay for ~5× the input of one that sits at 120k, on every step, and it would be slower to start each step for the same reason. What it buys is the case the budget exists for: a transcript that stays small enough that compaction fires once in a while (leaving headroom to keep working) instead of on every step, which is the AccessKing log above. It is also well above what a run actually uses — PeroSerde PR #6 peaked at 49k tokens over 64 steps. The number is a knob (`agent-context-tokens` / `AGENT_CONTEXT_TOKENS`, clamped to 20 000…2 000 000) because the right value depends on the repository's diffs and on what a review is allowed to cost, not on the model's headline.*
 
 **A run is handed only the tail of the session.** The session is every earlier run of the pull request, kept so a run can continue instead of starting over — and it was handed over in full, trimmed only once the transcript crossed 200k tokens. A one-line push then paid for every file the previous ten pushes had read, on every step of its own run. `MAX_AGENT_HISTORY_TOKENS` bounds what a run is *handed* to 40k tokens, newest turns first, with a note naming what was left out:

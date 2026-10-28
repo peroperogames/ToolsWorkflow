@@ -31,6 +31,7 @@ import os
 import re
 import shutil
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,7 +62,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-27.unity.130"
+VERSION = "2026-10-27.unity.131"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -128,6 +129,17 @@ MAX_READ_FILE_CHARS = 8000
 # reading — 0 comments posted, no verdict, 29 minutes — and nothing in the loop said
 # "stop reading and say something". The step budget alone is a wall, not a pace.
 MAX_READ_FILE_CALLS = 40
+
+# A pull request whose diff is bigger than this is reviewed by workers in parallel,
+# each with one slice of it, and the agent that posts the review gets their findings
+# instead of the diff. Otherwise the diff is part of the first request and is re-sent
+# on every step: RhythmAce-Neo #36 changed 164 files and arrived at ~265k tokens,
+# which was paid again on each of its six steps (~1.6M input tokens) to review 113 C#
+# files. A worker sees its slice once, and the agent sees the findings.
+MAP_REDUCE_OVER_TOKENS = 60_000
+MAP_WORKER_CONCURRENCY = 4
+MAP_WORKER_MAX_FINDINGS = 8
+MAP_MAX_FINDINGS = 60
 
 
 # Minimal fallback used only when prompt.md is empty.
@@ -909,6 +921,193 @@ def review_files(
         {"role": "user", "content": diff_text},
     ]
     return ai.chat(messages)
+
+
+MAP_WORKER_PROMPT = (
+    "You are reviewing one slice of a pull request's diff. Another reviewer reads the "
+    "rest of it; only the files shown below are yours, and only they can be reported "
+    "on.\n"
+    "Report real problems only — a bug, a correctness or security flaw, a resource "
+    "that is not released, a test that asserts the wrong thing. Not style, not naming, "
+    "not praise.\n"
+    'Reply with ONLY a JSON object: {"findings": [{"path": "<a file from the slice>", '
+    '"quote": "<the offending line, copied verbatim from the diff below>", '
+    '"body": "<what is wrong and the concrete fix>"}], "notes": "<one sentence about a '
+    'problem that involves files outside this slice, or empty>"}\n'
+    "Rules:\n"
+    f"- At most {MAP_WORKER_MAX_FINDINGS} findings: the ones you are surest of.\n"
+    "- `quote` must be copied character for character from the diff below, without the "
+    "leading `+`, `-` or space and without line numbers. Pick the line the problem is "
+    "on; if it is about a range, pick the first line of it.\n"
+    "- A finding that is not about one line — a missing test, a design concern — is "
+    "anchored on the closest changed line of the file it is about.\n"
+    "- Say nothing rather than guessing: {\"findings\": []} is a complete answer."
+)
+
+MAP_FINDINGS_HEADER = (
+    "## Findings from the per-slice reviewers\n\n"
+    "The diff is not in this request. It was bigger than one review should carry, so it "
+    "was read in slices in parallel and this is what those reviewers found.\n\n"
+    "Post them with `post_inline_comment` — one call per finding, passing the `quote` "
+    "exactly as it is given here — unless it duplicates something you have already "
+    "posted or a resolved thread already dealt with. Do not drop one because you would "
+    "have phrased it differently: if a finding is wrong, say why in your own comment "
+    "instead of dropping it silently. `read_file` and `get_file_diff` are available for "
+    "checking anything you are unsure of. Then call `finish(verdict)`.\n"
+)
+
+
+def diff_tokens(files: List[Dict[str, Any]]) -> int:
+    """How much of the budget the diff alone would take."""
+    return sum(estimate_tokens(f.get("patch") or "") for f in files)
+
+
+def _worker_client(ai: AIClient) -> AIClient:
+    """A client for one worker thread.
+
+    ``requests.Session`` is not documented as thread-safe, and the workers run at the
+    same time, so each gets its own rather than sharing the review's.
+    """
+    return AIClient(
+        ai.token,
+        ai.model,
+        ai.base_url,
+        ai.connect_timeout,
+        ai.max_retries,
+        ai.fallback_model,
+    )
+
+
+def _map_slice(
+    ai: AIClient,
+    pr: Dict[str, Any],
+    group: List[Dict[str, Any]],
+    all_files: List[Dict[str, Any]],
+    threads: str,
+) -> List[Dict[str, str]]:
+    """One worker: review this slice and return its findings."""
+    paths = {f.get("filename", "") for f in group}
+    prompt = [MAP_WORKER_PROMPT]
+    title = (pr.get("title") or "").strip()
+    body = (pr.get("body") or "").strip()[:1500]
+    if title or body:
+        prompt.append(f"## The pull request\n\n{title}\n\n{body}")
+    if threads:
+        prompt.append(f"## Threads already open on this pull request\n\n{threads}")
+    prompt.append(
+        "## The slice to review\n\n" + build_diff_text(pr, group, all_files)
+    )
+    try:
+        raw = _worker_client(ai).chat(
+            [
+                {"role": "system", "content": MAP_WORKER_PROMPT},
+                {"role": "user", "content": "\n\n".join(prompt[1:])},
+            ],
+            temperature=0.0,
+        )
+    except Exception as exc:  # noqa: BLE001 - one slice must not sink the review
+        log(f"Warning: a slice reviewer failed: {exc}")
+        return []
+
+    data = _first_json_object(raw or "")
+    if not isinstance(data, dict):
+        return []
+    found: List[Dict[str, str]] = []
+    for item in data.get("findings") or []:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        quote = str(item.get("quote") or "").strip()
+        body_text = str(item.get("body") or "").strip()
+        if not body_text or not quote:
+            continue
+        # A finding the worker cannot anchor in its own slice is a finding it imagined
+        # a file for; the agent can still raise it itself.
+        if path not in paths:
+            log(f"Ignored a finding for {path or '(no path)'}: not in that slice.")
+            continue
+        found.append({"path": path, "quote": quote[:400], "body": body_text[:1200]})
+        if len(found) >= MAP_WORKER_MAX_FINDINGS:
+            break
+    return found
+
+
+def _merge_findings(
+    findings: List[Dict[str, str]],
+) -> Tuple[List[Dict[str, str]], int]:
+    """Drop the same finding reported twice, and cap how many reach the agent."""
+    kept: List[Dict[str, str]] = []
+    duplicates = 0
+    for finding in findings:
+        same = False
+        for other in kept:
+            if other["path"] != finding["path"]:
+                continue
+            if _same_finding(other["body"], finding["body"]) or (
+                other["quote"] == finding["quote"]
+            ):
+                same = True
+                break
+        if same:
+            duplicates += 1
+            continue
+        kept.append(finding)
+        if len(kept) >= MAP_MAX_FINDINGS:
+            break
+    return kept, duplicates
+
+
+def review_file_groups(
+    ai: AIClient,
+    pr: Dict[str, Any],
+    files: List[Dict[str, Any]],
+    all_files: Optional[List[Dict[str, Any]]],
+    threads: str,
+    max_tokens_per_slice: int,
+    concurrency: int = MAP_WORKER_CONCURRENCY,
+) -> Tuple[List[Dict[str, str]], Dict[str, int]]:
+    """Review the diff in slices, in parallel, and hand back what was found.
+
+    Returns ``(findings, stats)``. Nothing is posted here: the findings go to the
+    agent that posts the review, which is the one place that knows the threads and the
+    one place a duplicate can be recognised.
+    """
+    groups = chunk_files(files, max_tokens_per_slice)
+    stats = {"groups": len(groups), "raw": 0, "duplicates": 0, "kept": 0}
+    log(
+        f"Map: {len(files)} file(s) in {len(groups)} slice(s), "
+        f"{min(concurrency, len(groups))} at a time."
+    )
+    collected: List[Dict[str, str]] = []
+    with ThreadPoolExecutor(max_workers=max(1, min(concurrency, len(groups)))) as pool:
+        for found in pool.map(
+            lambda group: _map_slice(ai, pr, group, all_files or files, threads),
+            groups,
+        ):
+            collected.extend(found)
+    stats["raw"] = len(collected)
+    kept, duplicates = _merge_findings(collected)
+    stats["duplicates"] = duplicates
+    stats["kept"] = len(kept)
+    log(
+        f"Map: {stats['raw']} finding(s) from {len(groups)} slice(s), "
+        f"{duplicates} duplicate(s) merged, {len(kept)} to report."
+    )
+    return kept, stats
+
+
+def findings_block(findings: List[Dict[str, str]]) -> str:
+    """The findings, rendered for the agent that posts them."""
+    if not findings:
+        return MAP_FINDINGS_HEADER + "\nNo finding survived the slices.\n"
+    lines = [MAP_FINDINGS_HEADER]
+    for index, finding in enumerate(findings, 1):
+        quote = " ".join(finding["quote"].split())
+        body = " ".join(finding["body"].split())
+        lines.append(f"### {index}. {finding['path']}\n")
+        lines.append(f"quote: `{quote}`\n")
+        lines.append(f"{body}\n")
+    return "\n".join(lines)
 
 
 RESOLVE_DECIDER_PROMPT = (
@@ -6058,15 +6257,41 @@ def stage_review(
     # Preferred path: the model drives the review with tools. The session
     # supplies the conversation and receives this run's turns and every loop
     # step, so the next run continues instead of starting over.
+    #
+    # A diff too big to carry through every step is read in slices instead: each worker
+    # sees its slice once, and the agent is handed what they found, so the diff itself
+    # is never re-sent. The threads, the findings and the verdict work the same way,
+    # and the agent is still the only thing that posts.
+    threads = threads_briefing(gh, owner, repo, number)
+    map_findings: List[Dict[str, str]] = []
+    turns_files = files
+    diff_size = diff_tokens(files)
+    if diff_size > MAP_REDUCE_OVER_TOKENS and len(files) > 1:
+        log(
+            f"Map: the diff is about {diff_size // 1000}k tokens, over the "
+            f"{MAP_REDUCE_OVER_TOKENS // 1000}k one agent is asked to carry."
+        )
+        map_findings, _ = review_file_groups(
+            ai, pr, files, files, threads, config.max_tokens_per_chunk
+        )
+        extra_context = "\n\n".join(
+            part for part in (extra_context, findings_block(map_findings)) if part
+        )
+        turns_files = []
     turns = build_review_turns(
-        gh, owner, repo, pr, files, payload, records, entries, stored,
+        gh, owner, repo, pr, turns_files, payload, records, entries, stored,
         incremental, extra_context=extra_context,
-        threads=threads_briefing(gh, owner, repo, number),
+        threads=threads,
     )
     ctx = run_agent_review(
         ai, gh, owner, repo, number, pr, files, system_prompt, records, turns, config,
         block_approve=build_blocked, block_reason=no_approve_reason,
     )
+    if map_findings and ctx is not None:
+        log(
+            f"Findings: {len(map_findings)} from the slice reviewers, "
+            f"{ctx.inline_posted} inline comment(s) posted in total."
+        )
     if ctx is not None:
         # Every review retires what an earlier round raised and the code has
         # since dealt with: a push is judged against its own diff, a review of
