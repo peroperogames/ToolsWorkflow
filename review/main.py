@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-29.unity.134"
+VERSION = "2026-10-29.unity.135"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -1030,6 +1030,12 @@ def _map_slice(
 
     data = _first_json_object(raw or "")
     if not isinstance(data, dict):
+        # Said, because a slice that returns nothing looks exactly like a slice that
+        # found nothing, and the two call for different fixes. RhythmAce-Neo #65 had a
+        # 33-file slice spend 59k output tokens and report nothing; the log could not
+        # say whether that was "nothing to report" or an answer that would not parse.
+        preview = " ".join((raw or "").split())[:200]
+        log(f"Map: a slice reviewer answered without usable JSON: {preview!r}")
         return []
     found: List[Dict[str, str]] = []
     for item in data.get("findings") or []:
