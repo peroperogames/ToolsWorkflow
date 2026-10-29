@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-29.unity.136"
+VERSION = "2026-10-29.unity.137"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -154,6 +154,11 @@ MAP_SLICE_TOKENS = 40_000
 # it was cancelled by hand.
 MAP_WORKER_TIMEOUT_SECONDS = 600
 MAP_DEADLINE_SECONDS = 1_500
+# A worker's own loop: how many steps it may take and how many files it may read.
+# Small on purpose — the slice is a slice, and a worker that reads a dozen files is
+# doing the review the agent should be doing, in a context nobody bounded.
+MAP_WORKER_STEPS = 6
+MAP_WORKER_READS = 8
 
 
 # Minimal fallback used only when prompt.md is empty.
@@ -943,24 +948,86 @@ def review_files(
 
 MAP_WORKER_PROMPT = (
     "You are reviewing one slice of a pull request's diff. Another reviewer reads the "
-    "rest of it; only the files shown below are yours, and only they can be reported "
+    "rest of it; only the files in this slice are yours, and only they can be reported "
     "on.\n"
     "Report real problems only — a bug, a correctness or security flaw, a resource "
     "that is not released, a test that asserts the wrong thing. Not style, not naming, "
     "not praise.\n"
-    'Reply with ONLY a JSON object: {"findings": [{"path": "<a file from the slice>", '
-    '"quote": "<the offending line, copied verbatim from the diff below>", '
-    '"body": "<what is wrong and the concrete fix>"}], "notes": "<one sentence about a '
-    'problem that involves files outside this slice, or empty>"}\n'
-    "Rules:\n"
-    f"- At most {MAP_WORKER_MAX_FINDINGS} findings: the ones you are surest of.\n"
-    "- `quote` must be copied character for character from the diff below, without the "
-    "leading `+`, `-` or space and without line numbers. Pick the line the problem is "
-    "on; if it is about a range, pick the first line of it.\n"
+    "You have `read_file` and `get_file_diff` for the files in this slice, because a "
+    "changed line often cannot be judged without the code around it — use them when the "
+    "diff alone leaves you unsure. You have a handful of reads, so read what matters "
+    "and then report.\n"
+    f"When you are done, call `report_findings` with at most {MAP_WORKER_MAX_FINDINGS} "
+    "findings: the ones you are surest of. Rules for each one:\n"
+    "- `path` is a file in this slice.\n"
+    "- `quote` is copied character for character from the diff, without the leading "
+    "`+`, `-` or space and without line numbers. Pick the line the problem is on; if it "
+    "is about a range, pick the first line of it.\n"
     "- A finding that is not about one line — a missing test, a design concern — is "
     "anchored on the closest changed line of the file it is about.\n"
-    "- Say nothing rather than guessing: {\"findings\": []} is a complete answer."
+    "- `body` says what is wrong and the concrete fix.\n"
+    "Say nothing rather than guessing: calling `report_findings` with an empty list is "
+    "a complete answer, and so is answering with `{\"findings\": []}` in prose."
 )
+
+MAP_WORKER_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": (
+                "Read a file from this slice, in windows of "
+                f"{READ_FILE_LINES} lines. Ask again with `offset` for the rest."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "A file in this slice."},
+                    "offset": {"type": "integer", "description": "First line, 1-based."},
+                    "limit": {"type": "integer", "description": "Lines to return."},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_file_diff",
+            "description": "One file's diff from this slice, with absolute line numbers.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "report_findings",
+            "description": "Hand back what you found. Call this once, when done.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "findings": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"},
+                                "quote": {"type": "string"},
+                                "body": {"type": "string"},
+                            },
+                            "required": ["path", "quote", "body"],
+                        },
+                    },
+                },
+                "required": ["findings"],
+            },
+        },
+    },
+]
 
 MAP_FINDINGS_HEADER = (
     "## Findings from the per-slice reviewers\n\n"
@@ -997,48 +1064,50 @@ def _worker_client(ai: AIClient) -> AIClient:
     )
 
 
-def _map_slice(
-    ai: AIClient,
-    pr: Dict[str, Any],
-    group: List[Dict[str, Any]],
-    all_files: List[Dict[str, Any]],
-    threads: str,
-) -> List[Dict[str, str]]:
-    """One worker: review this slice and return its findings."""
-    paths = {f.get("filename", "") for f in group}
-    prompt = [MAP_WORKER_PROMPT]
-    title = (pr.get("title") or "").strip()
-    body = (pr.get("body") or "").strip()[:1500]
-    if title or body:
-        prompt.append(f"## The pull request\n\n{title}\n\n{body}")
-    if threads:
-        prompt.append(f"## Threads already open on this pull request\n\n{threads}")
-    prompt.append(
-        "## The slice to review\n\n" + build_diff_text(pr, group, all_files)
-    )
-    try:
-        raw = _worker_client(ai).chat(
-            [
-                {"role": "system", "content": MAP_WORKER_PROMPT},
-                {"role": "user", "content": "\n\n".join(prompt[1:])},
-            ],
-            temperature=0.0,
-        )
-    except Exception as exc:  # noqa: BLE001 - one slice must not sink the review
-        log(f"Warning: a slice reviewer failed: {exc}")
-        return []
+class _SliceTools:
+    """What a worker may do: read and diff the files of its own slice.
 
-    data = _first_json_object(raw or "")
-    if not isinstance(data, dict):
-        # Said, because a slice that returns nothing looks exactly like a slice that
-        # found nothing, and the two call for different fixes. RhythmAce-Neo #65 had a
-        # 33-file slice spend 59k output tokens and report nothing; the log could not
-        # say whether that was "nothing to report" or an answer that would not parse.
-        preview = " ".join((raw or "").split())[:200]
-        log(f"Map: a slice reviewer answered without usable JSON: {preview!r}")
-        return []
+    Deliberately not a `ToolContext`: the worker's hands have to be smaller than the
+    agent's. These are the attributes `_tool_read_file` and `_tool_get_file_diff` read,
+    so the window logic, the character cap and the binary-file answer are the same as
+    the agent's — the difference is which files exist for it and how many reads it has.
+    """
+
+    def __init__(self, gh: Any, owner: str, repo: str, heads: str, group: List[Dict[str, Any]]):
+        self.gh = gh
+        self.owner = owner
+        self.repo = repo
+        self.heads = heads
+        self.files = group
+        self.paths = {f.get("filename", "") for f in group}
+        self.read_windows: set = set()
+        self.read_calls = 0
+
+    def run(self, name: str, args: Dict[str, Any]) -> str:
+        path = str(args.get("path") or "")
+        if path not in self.paths:
+            return (
+                f"error: {path or '(no path)'} is not in this slice. You may only read "
+                "the files listed above."
+            )
+        if name == "get_file_diff":
+            return _tool_get_file_diff(args, self)
+        if self.read_calls >= MAP_WORKER_READS:
+            return (
+                f"error: this slice has spent its {MAP_WORKER_READS} reads. Report what "
+                "you have with report_findings."
+            )
+        # `_tool_read_file` counts the read itself; counting here too would spend two
+        # of the worker's reads per call.
+        return _tool_read_file(args, self)
+
+
+def _validated_findings(items: Any, paths: set) -> List[Dict[str, str]]:
+    """The findings a worker handed back, and only the ones that can be posted."""
     found: List[Dict[str, str]] = []
-    for item in data.get("findings") or []:
+    if not isinstance(items, list):
+        return found
+    for item in items:
         if not isinstance(item, dict):
             continue
         path = str(item.get("path") or "").strip()
@@ -1055,6 +1124,89 @@ def _map_slice(
         if len(found) >= MAP_WORKER_MAX_FINDINGS:
             break
     return found
+
+
+def _map_slice(
+    ai: AIClient,
+    pr: Dict[str, Any],
+    group: List[Dict[str, Any]],
+    all_files: List[Dict[str, Any]],
+    threads: str,
+    gh: Any = None,
+    owner: str = "",
+    repo: str = "",
+    heads: str = "",
+) -> List[Dict[str, str]]:
+    """One worker: review this slice, reading it when the diff is not enough."""
+    paths = {f.get("filename", "") for f in group}
+    prompt = [MAP_WORKER_PROMPT]
+    title = (pr.get("title") or "").strip()
+    body = (pr.get("body") or "").strip()[:1500]
+    if title or body:
+        prompt.append(f"## The pull request\n\n{title}\n\n{body}")
+    if threads:
+        prompt.append(f"## Threads already open on this pull request\n\n{threads}")
+    prompt.append(
+        "## The slice to review\n\n" + build_diff_text(pr, group, all_files)
+    )
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": MAP_WORKER_PROMPT},
+        {"role": "user", "content": "\n\n".join(prompt[1:])},
+    ]
+    tools = _SliceTools(gh, owner, repo, heads, group) if gh is not None else None
+    try:
+        client = _worker_client(ai)
+        for step in range(1, MAP_WORKER_STEPS + 1):
+            if step == MAP_WORKER_STEPS:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "Last step: call report_findings with what you have now.",
+                    }
+                )
+            reply = (
+                client.chat_message(messages, tools=MAP_WORKER_TOOLS, temperature=0.0)
+                if tools is not None
+                else {"content": client.chat(messages, temperature=0.0), "tool_calls": []}
+            )
+            calls = reply.get("tool_calls") or []
+            if not calls:
+                # Prose, as before: the JSON may still be in it.
+                data = _first_json_object(reply.get("content") or "")
+                if isinstance(data, dict):
+                    return _validated_findings(data.get("findings"), paths)
+                preview = " ".join((reply.get("content") or "").split())[:200]
+                log(f"Map: a slice reviewer answered without usable JSON: {preview!r}")
+                return []
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": _echoed_narration(reply.get("content") or ""),
+                    "tool_calls": calls,
+                }
+            )
+            for call in calls:
+                fn = call.get("function") or {}
+                name = fn.get("name") or ""
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except ValueError:
+                    args = {}
+                if not isinstance(args, dict):
+                    args = {}
+                if name == "report_findings":
+                    return _validated_findings(args.get("findings"), paths)
+                result = tools.run(name, args) if tools is not None else (
+                    "error: this reviewer has no tools"
+                )
+                messages.append(
+                    {"role": "tool", "tool_call_id": call.get("id"), "content": result}
+                )
+    except Exception as exc:  # noqa: BLE001 - one slice must not sink the review
+        log(f"Warning: a slice reviewer failed: {exc}")
+        return []
+    log("Map: a slice reviewer ran out of steps without reporting.")
+    return []
 
 
 def _merge_findings(
@@ -1091,6 +1243,10 @@ def review_file_groups(
     max_tokens_per_slice: int,
     concurrency: int = MAP_WORKER_CONCURRENCY,
     deadline_seconds: int = MAP_DEADLINE_SECONDS,
+    gh: Any = None,
+    owner: str = "",
+    repo: str = "",
+    heads: str = "",
 ) -> Tuple[List[Dict[str, str]], Dict[str, int]]:
     """Review the diff in slices, in parallel, and hand back what was found.
 
@@ -1112,7 +1268,10 @@ def review_file_groups(
         futures = {}
         for index, group in enumerate(groups, 1):
             futures[
-                pool.submit(_map_slice, ai, pr, group, all_files or files, threads)
+                pool.submit(
+                    _map_slice, ai, pr, group, all_files or files, threads,
+                    gh, owner, repo, heads,
+                )
             ] = (index, len(group))
         try:
             for future in as_completed(futures, timeout=deadline_seconds):
@@ -4461,13 +4620,16 @@ def report_build_result(
         result.outcome() or f"{label}: no result",
         summary,
     )
-    if check is None and not reported:
+    if check is None and not reported and not _COMMAND_POSTS_RESULT:
         # The check run is how a green build shows its result, and a green build posts
         # no comment otherwise — so without it nothing on the pull request says the
         # package compiled and its tests passed. The App lacking `Checks: write` (403)
         # or GitHub refusing the run puts us here, and the comment is then the only
         # place the result can appear. PeroLog PR #10 is the case: everything passed,
         # the check run was refused, and the pull request showed nothing at all.
+        #
+        # A rebuild is the exception: its reply is the report, and it carries the
+        # result already.
         log(f"{label}: no check run, so the result is posted as a comment instead.")
         post_status_comment(
             gh, owner, repo, number, summary + "\n\n" + BUILD_STATUS_MARKER,
@@ -6449,7 +6611,8 @@ def stage_review(
             f"{MAP_REDUCE_OVER_TOKENS // 1000}k one agent is asked to carry."
         )
         map_findings, _ = review_file_groups(
-            ai, pr, files, files, threads, MAP_SLICE_TOKENS
+            ai, pr, files, files, threads, MAP_SLICE_TOKENS,
+            gh=gh, owner=owner, repo=repo, heads=pr.get("head", {}).get("sha", ""),
         )
         extra_context = "\n\n".join(
             part for part in (extra_context, findings_block(map_findings)) if part
