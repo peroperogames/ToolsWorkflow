@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-29.unity.137"
+VERSION = "2026-10-29.unity.138"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -180,6 +180,9 @@ PROJECT_PROMPT_MARKER = "--- END PROJECT REVIEW CRITERIA ---"
 # An invisible marker that makes the build/test status one comment living on the pull
 # request instead of one per run.
 BUILD_STATUS_MARKER = "<!-- ai-review build status -->"
+# ... and the same for 'a review ran and found nothing', which otherwise leaves
+# no trace on the pull request when the approval it asks for is withheld.
+CLEAN_VERDICT_MARKER = "<!-- ai-review clean verdict -->"
 PROJECT_PROMPT_HEADER = (
     "\n\n## Project-Specific Review Criteria\n\n"
     "The repository under review supplies the following review criteria. Treat "
@@ -2627,6 +2630,14 @@ def settle_threads_and_approve(
         pr.get("head", {}).get("sha", ""),
         "所有遗留问题已解决 ✅",
     )
+    if outcome.approved:
+        # An earlier clean review may have said, in a comment, that it could not
+        # approve. The approval makes that sentence wrong.
+        update_standing_comment(
+            gh, owner, repo, number,
+            clean_verdict_body(language, 0, approved=True),
+            CLEAN_VERDICT_MARKER,
+        )
     return outcome
 
 
@@ -4376,6 +4387,44 @@ def stage_artifact_link(
     return 0
 
 
+def standing_comment_id(
+    gh: GitHubClient, owner: str, repo: str, number: int, marker: str
+) -> Any:
+    """The id of this bot's comment carrying ``marker``, or None.
+
+    A status that describes the current state of a pull request must not stack one
+    copy per run, so the marker in the body is how the next run finds the copy it is
+    about to replace.
+    """
+    try:
+        for comment in gh.list_comments(owner, repo, number):
+            if marker in (comment.get("body") or "") and is_bot_author(
+                comment.get("user")
+            ):
+                return comment.get("id")
+    except Exception as exc:  # noqa: BLE001 - best effort
+        log(f"Could not look for an earlier status comment: {exc}")
+    return None
+
+
+def update_standing_comment(
+    gh: GitHubClient, owner: str, repo: str, number: int, body: str, marker: str
+) -> bool:
+    """Rewrite the comment carrying ``marker``, and post nothing when there is none.
+
+    The difference from `post_status_comment` is what happens on a pull request that
+    has never had the comment: here, nothing. Used where the comment is a statement
+    that has since become wrong, and the only fix is to correct it in place.
+    """
+    existing = standing_comment_id(gh, owner, repo, number, marker)
+    if existing is None:
+        return False
+    if gh.update_comment(owner, repo, existing, body):
+        log("Updated the standing comment.")
+        return True
+    return False
+
+
 def post_status_comment(
     gh: GitHubClient,
     owner: str,
@@ -4400,17 +4449,10 @@ def post_status_comment(
     posted.
     """
     if marker:
-        try:
-            for comment in gh.list_comments(owner, repo, number):
-                if marker not in (comment.get("body") or ""):
-                    continue
-                if not is_bot_author(comment.get("user")):
-                    continue
-                if gh.update_comment(owner, repo, comment.get("id"), body):
-                    log("Updated the earlier status comment instead of adding another.")
-                    return True
-        except Exception as exc:  # noqa: BLE001 - fall back to posting
-            log(f"Could not look for an earlier status comment: {exc}")
+        existing = standing_comment_id(gh, owner, repo, number, marker)
+        if existing is not None and gh.update_comment(owner, repo, existing, body):
+            log("Updated the earlier status comment instead of adding another.")
+            return True
     try:
         gh.post_comment(owner, repo, number, body)
         return True
@@ -6057,6 +6099,35 @@ def approve_if_clean(
     return True
 
 
+def clean_verdict_body(language: str, remaining: int, approved: bool) -> str:
+    """What a review that found nothing says when it cannot show an approval.
+
+    No reason per thread: which ones are open is on the pull request itself, and this
+    comment is one line saying the review ran.
+    """
+    chinese = "chinese" in resolve_language(language).lower()
+    if approved:
+        head = "本次审查没有发现新问题，已批准。" if chinese else (
+            "This review found nothing new, and it is approved."
+        )
+        return head + "\n\n" + CLEAN_VERDICT_MARKER
+    if chinese:
+        head = "本次审查没有发现新问题。"
+        tail = (
+            f"还有 {remaining} 个审查线程未解决，所以没有批准。"
+            if remaining > 0
+            else "没有批准；运行日志里有原因。"
+        )
+    else:
+        head = "This review found nothing new."
+        tail = (
+            f"{remaining} review thread(s) are still open, so it was not approved."
+            if remaining > 0
+            else "It was not approved; the job log says why."
+        )
+    return f"{head}\n\n{tail}\n\n{CLEAN_VERDICT_MARKER}"
+
+
 def act_on_clean_verdict(
     gh: GitHubClient, owner: str, repo: str, number: int, ctx: ToolContext
 ) -> None:
@@ -6067,6 +6138,29 @@ def act_on_clean_verdict(
     head_sha = ctx.pr.get("head", {}).get("sha", "")
     if approve_if_clean(gh, owner, repo, number, head_sha, "审查通过，无遗留问题 ✅"):
         ctx.approved = True
+        # A previous run may have said here that it could not approve. That sentence
+        # is now wrong, and this is the one place that knows it.
+        update_standing_comment(
+            gh, owner, repo, number,
+            clean_verdict_body(ctx.config.language, 0, approved=True),
+            CLEAN_VERDICT_MARKER,
+        )
+        return
+    if already_approved(gh, owner, repo, number, head_sha) or ctx.inline_posted:
+        # The pull request already shows the outcome: an approval on this commit, or
+        # the findings themselves.
+        return
+    remaining = unresolved_bot_thread_count(gh, owner, repo, number)
+    log(
+        "Nothing to report and no approval to show it by"
+        + (f" ({remaining} thread(s) open)" if remaining > 0 else "")
+        + "; saying so as a comment."
+    )
+    post_status_comment(
+        gh, owner, repo, number,
+        clean_verdict_body(ctx.config.language, max(remaining, 0), approved=False),
+        marker=CLEAN_VERDICT_MARKER,
+    )
 
 
 # --------------------------------------------------------------------------- #

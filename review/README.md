@@ -692,13 +692,21 @@ A build that compiled and whose tests passed posts no comment — the approval a
 
 Two things are true now. The App should be given `Checks: write` (org Settings → GitHub Apps → the App → Permissions), which is where the tick and the per-platform summary belong. And when the check run cannot be created, the summary is posted as a status comment instead — one living comment, carrying `<!-- ai-review build status -->` so a re-run edits it rather than stacking another green comment on every run. A comment by somebody else is never edited, marker or not.
 
+### A clean review that cannot approve says so
+
+A review that finds nothing ends in an approval, and the approval is the report — unless it cannot be given. Unresolved threads of the bot's own withhold it, and RhythmAce-Neo #80 is what that left behind: 14 agent steps, 0 inline comments, `verdict=approve`, `approved=no`, and the pull request showed no sign that a review had run at all. A clean run had nowhere to put its result.
+
+So a clean verdict that cannot approve posts one line — `本次审查没有发现新问题。还有 3 个审查线程未解决，所以没有批准。`, in the review's language — carrying `<!-- ai-review clean verdict -->` so a later run edits it instead of adding another. It names the count and no reasons: which threads are open is on the pull request already.
+
+The comment is corrected rather than left behind. When a later run approves — this review resolving what was left, or the settle step doing it — the standing comment is rewritten to say so, and a pull request never keeps a sentence that has stopped being true. A first approval has no such comment to correct, and posts none; a clean verdict that did post inside comments leaves it alone, because the findings are the report then.
+
 ### There is no summary
 
 Every finding is a `post_inline_comment` call. There is deliberately **no overall summary and no review body** — the bot only ever speaks through inline comments and the approval.
 
 A finding that is not about a particular line — missing tests, a missing changelog or documentation entry, a design or process concern — is anchored to the closest changed line it relates to rather than dropped. A finding that is never attached to a line is a finding that never reaches the pull request.
 
-Praise is not a finding. A comment that only compliments a change — however technically detailed — is never posted; the approval is the only positive signal, so a clean PR stays silent.
+Praise is not a finding. A comment that only compliments a change — however technically detailed — is never posted; the approval is the only positive signal, so a clean pull request posts nothing. The one exception is a clean review that cannot approve at all: that one line above is the only way its result reaches the pull request.
 
 **A committed assembly is not a finding either.** These packages ship precompiled binaries inside the Unity package — a `Plugins/*.dll` beside its `.pdb`, `.xml` and `.meta` — and the publish pipeline rebuilds them from source at release time. A mixed pull request (source plus the assembly it produces) therefore used to collect the same comment every time: "the DLL cannot be verified from the diff, confirm it was built from this source, a `.pdb` should not be in version control". None of that is actionable, and the pipeline was inviting it — a file with no text diff was shown to the model as `_(no textual patch available)_`, which reads like something hidden rather than something that simply has no text. It is now `_(binary or oversized file: the diff carries no text for it)_`, `read_file` on one answers "this is a binary file … review the source beside it instead", and the prompt says to leave the artifact alone and comment only when the diff shows a concrete contradiction (the file it is generated from was deleted, the manifest version it is named for moved).
 
