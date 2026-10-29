@@ -49,7 +49,7 @@ change to keep publishing to PeroNPM alone.
     with:
       channels: peronpm,npmjs,nuget
       nuget-project: Core/PeroTools2.AccessKing.Core.csproj
-      nuget-user: perotools
+      nuget-user: Peropero
 ```
 
 The two extra channels are opt-in and stay opt-in: publishing to somebody else's
@@ -281,7 +281,7 @@ same pre-bump commit while the branch and the registries have already moved on.
 | --- | --- | --- |
 | `channels` | `peronpm` | Comma-separated list of `peronpm`, `npmjs`, `nuget`. |
 | `nuget-project` | — | The `.csproj` or `.sln` the `nuget` channel packs, relative to the **repository root** — not to `working-directory`, because a package whose manifest lives in a subdirectory keeps its projects beside it, not inside it. A solution packs every project in it that is packable. |
-| `nuget-user` | — | The nuget.org profile name the trusted publishing policy belongs to. |
+| `nuget-user` | — | The nuget.org profile name the trusted publishing policy belongs to — the last path segment of `nuget.org/profiles/<name>`, not the package's owner display or the account's e-mail. `Peropero`, not `perotools`: a name with no profile there fails the login step, after the release has already packed. |
 | `nuget-source` | `https://api.nuget.org/v3/index.json` | The feed the `nuget` channel pushes to. |
 | `unity-plugin-project` | — | The `.csproj` or `.sln` whose build produces the assembly the Unity package ships, relative to the **repository root**. When set, it is rebuilt after the version bump and the refreshed files under `working-directory` join the version commit. Leave it empty for a package that ships no precompiled assembly. |
 | `unity-plugin-configuration` | `Unity` | The build configuration whose target copies the assembly into the package. Only used with `unity-plugin-project`. |
