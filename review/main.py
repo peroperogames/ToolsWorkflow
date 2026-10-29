@@ -62,7 +62,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-28.unity.132"
+VERSION = "2026-10-29.unity.133"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -140,6 +140,11 @@ MAP_REDUCE_OVER_TOKENS = 60_000
 MAP_WORKER_CONCURRENCY = 4
 MAP_WORKER_MAX_FINDINGS = 8
 MAP_MAX_FINDINGS = 60
+# One worker's slice. This is deliberately much smaller than MAX_TOKENS_PER_CHUNK:
+# that is the ceiling for a single request on the fallback path, and using it here is
+# how a 107k-token diff became one slice — a worker reading the whole thing, which is
+# the thing the slices exist to avoid. Four of these fit a 160k diff.
+MAP_SLICE_TOKENS = 40_000
 
 
 # Minimal fallback used only when prompt.md is empty.
@@ -6313,7 +6318,7 @@ def stage_review(
             f"{MAP_REDUCE_OVER_TOKENS // 1000}k one agent is asked to carry."
         )
         map_findings, _ = review_file_groups(
-            ai, pr, files, files, threads, config.max_tokens_per_chunk
+            ai, pr, files, files, threads, MAP_SLICE_TOKENS
         )
         extra_context = "\n\n".join(
             part for part in (extra_context, findings_block(map_findings)) if part
