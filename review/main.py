@@ -31,7 +31,9 @@ import os
 import re
 import shutil
 import sys
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-29.unity.133"
+VERSION = "2026-10-29.unity.134"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -145,6 +147,13 @@ MAP_MAX_FINDINGS = 60
 # how a 107k-token diff became one slice — a worker reading the whole thing, which is
 # the thing the slices exist to avoid. Four of these fit a 160k diff.
 MAP_SLICE_TOKENS = 40_000
+# A worker's model call is allowed this long, and the stage as a whole this long.
+# The review's own calls are unbounded on purpose (a slow answer is not a failure),
+# but a worker is different: it runs in parallel with a review waiting behind it, and
+# one call that never came back held RhythmAce-Neo #65's review open for 2h25m until
+# it was cancelled by hand.
+MAP_WORKER_TIMEOUT_SECONDS = 600
+MAP_DEADLINE_SECONDS = 1_500
 
 
 # Minimal fallback used only when prompt.md is empty.
@@ -984,6 +993,7 @@ def _worker_client(ai: AIClient) -> AIClient:
         ai.connect_timeout,
         ai.max_retries,
         ai.fallback_model,
+        read_timeout=MAP_WORKER_TIMEOUT_SECONDS,
     )
 
 
@@ -1074,6 +1084,7 @@ def review_file_groups(
     threads: str,
     max_tokens_per_slice: int,
     concurrency: int = MAP_WORKER_CONCURRENCY,
+    deadline_seconds: int = MAP_DEADLINE_SECONDS,
 ) -> Tuple[List[Dict[str, str]], Dict[str, int]]:
     """Review the diff in slices, in parallel, and hand back what was found.
 
@@ -1088,12 +1099,38 @@ def review_file_groups(
         f"{min(concurrency, len(groups))} at a time."
     )
     collected: List[Dict[str, str]] = []
-    with ThreadPoolExecutor(max_workers=max(1, min(concurrency, len(groups)))) as pool:
-        for found in pool.map(
-            lambda group: _map_slice(ai, pr, group, all_files or files, threads),
-            groups,
-        ):
-            collected.extend(found)
+    total = len(groups)
+    pool = ThreadPoolExecutor(max_workers=max(1, min(concurrency, total)))
+    started = time.monotonic()
+    try:
+        futures = {}
+        for index, group in enumerate(groups, 1):
+            futures[
+                pool.submit(_map_slice, ai, pr, group, all_files or files, threads)
+            ] = (index, len(group))
+        try:
+            for future in as_completed(futures, timeout=deadline_seconds):
+                index, files_in_slice = futures[future]
+                try:
+                    found = future.result()
+                except Exception as exc:  # noqa: BLE001 - one slice, not the review
+                    log(f"Map: slice {index}/{total} failed: {exc}")
+                    continue
+                collected.extend(found)
+                log(
+                    f"Map: slice {index}/{total} ({files_in_slice} file(s)) returned "
+                    f"{len(found)} finding(s) after {time.monotonic() - started:.0f}s."
+                )
+        except (TimeoutError, FuturesTimeout):
+            # Said, then carried on with what did come back: a review of most of a
+            # pull request beats a review that never starts.
+            log(
+                f"Map: {len(futures)} slice(s) started, {len(collected)} finding(s) in "
+                f"hand after {deadline_seconds}s — the rest are abandoned. A worker's "
+                f"call is bounded at {MAP_WORKER_TIMEOUT_SECONDS}s; the stage at this."
+            )
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     stats["raw"] = len(collected)
     kept, duplicates = _merge_findings(collected)
     stats["duplicates"] = duplicates

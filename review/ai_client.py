@@ -28,6 +28,7 @@ class AIClient:
         connect_timeout: int = 15,
         max_retries: int = 5,
         fallback_model: Optional[str] = None,
+        read_timeout: Optional[int] = None,
     ) -> None:
         self.token = token
         self.model = model
@@ -36,6 +37,11 @@ class AIClient:
         # is its own business — a slow answer is not a failure, so the read
         # timeout is left open and no fallback/retry is triggered by it.
         self.connect_timeout = int(os.environ.get("OPENAI_TIMEOUT", connect_timeout))
+        # None keeps the review's own behaviour: however long the model takes, that is
+        # its business. A caller that cannot afford to wait forever — the map stage's
+        # workers, which run in parallel and have a review waiting behind them — passes
+        # a number, and the request then raises ReadTimeout like any other failure.
+        self.read_timeout = read_timeout
         self.max_retries = int(os.environ.get("OPENAI_MAX_RETRIES", max_retries))
         self.fallback_model = (
             fallback_model or os.environ.get("OPENAI_API_MODEL_FALLBACK", "")
@@ -127,7 +133,7 @@ class AIClient:
             try:
                 # (connect, read): read is None — wait for the model indefinitely.
                 resp = self.session.post(
-                    url, json=payload, timeout=(self.connect_timeout, None)
+                    url, json=payload, timeout=(self.connect_timeout, self.read_timeout)
                 )
             except requests.ConnectionError as exc:
                 # Connection-level failure only: refused, reset, DNS, TLS, or the
