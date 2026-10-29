@@ -669,6 +669,23 @@ Every finding is anchored by the changed line's text rather than a line number, 
 
 If solutions were available but `inspectcode` produced no report for any of them — a broken toolchain, a solution it cannot build — the PR gets **one** note saying the static analysis did not run, rather than silence that looks like a clean pass. It is posted once per PR, not once per push. A repository with no solution at all says nothing: there was nothing to analyse.
 
+### One inspection is one comment
+
+ReSharper reports per line, and posting per finding turns a single problem into a column of threads: RhythmAce-Neo #65 finished with 43 open threads, 19 of them the same "captured variable is disposed by a using statement" on one test file, four the same redundant type argument, two the same redundant `RoutingStrategies.Bubble`. A thread list like that is not read, and `settle` cannot resolve it either — the code really has not changed.
+
+`group_resharper_comments` posts **one comment per (file, inspection)** instead, anchored on the first affected line and listing the others:
+
+```
+⚠️ **ReSharper**: Captured variable is disposed by a using statement.
+
+同一检查在本文件的 19 处触发：
+- L84
+- L96
+… 另 0 处
+```
+
+A single finding is written exactly as before, and a naming finding keeps its own comment because it carries a suggestion that edits the one line it is anchored to. The body still starts with the same `tag **ReSharper**: message` head, so the "already raised" check recognises a group an earlier push posted — a group's line list moves as the code moves, so that check compares the head, not the whole body.
+
 ### A green build says so somewhere
 
 A build that compiled and whose tests passed posts no comment — the approval and the tick are the report — and the tick comes from a **check run**, which needs the App to hold `Checks: write`. PeroLog PR #10 is what a run without it looked like: both suites passed, `GitHub refused the check run — the App needs the 'Checks: write' permission for it; the comment still carries the result` went into the log, and the pull request showed nothing at all, because a green build posts no comment either. The sentence was a promise nothing kept.

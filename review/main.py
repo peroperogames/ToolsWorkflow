@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-29.unity.135"
+VERSION = "2026-10-29.unity.136"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -4741,6 +4741,70 @@ def existing_resharper_findings(
     return seen
 
 
+RESHARPER_GROUP_LIST_LIMIT = 20
+
+
+def group_resharper_comments(
+    candidates: List[Dict[str, Any]], already: set
+) -> Tuple[List[Dict[str, Any]], int]:
+    """One comment per (file, inspection), listing the lines it fires on.
+
+    ReSharper reports per line, and posting per finding turns one problem into
+    nineteen threads — which is what RhythmAce-Neo #65 looked like, and what makes the
+    thread list a place nobody reads. The body still starts with the same
+    ``tag **ReSharper**: message`` head, so an open thread from an earlier push is
+    recognised and the group is not raised again. A single finding is unchanged.
+
+    ``candidates`` are ``{path, line, quote, head, key}``; returns the comments to post
+    and how many findings were folded into a group.
+    """
+    groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    for candidate in candidates:
+        groups.setdefault((candidate["path"], candidate["key"]), []).append(candidate)
+
+    comments: List[Dict[str, Any]] = []
+    collapsed = 0
+    for (path, _key), group in groups.items():
+        group.sort(key=lambda item: item["line"])
+        first = group[0]
+        if len(group) == 1:
+            comments.append(
+                {
+                    "path": path,
+                    "line": first["line"],
+                    "quote": first["quote"],
+                    "side": "RIGHT",
+                    "body": first["head"],
+                }
+            )
+            continue
+        if any(
+            raised_path == path and _normalized(first["head"]) in raised_body
+            for raised_path, raised_body in already
+        ):
+            # Already said, on this file, by an earlier push — a group's line list
+            # changes as the code moves, so the exact-body check above cannot see it.
+            continue
+        listed = "\n".join(f"- L{item['line']}" for item in group[:RESHARPER_GROUP_LIST_LIMIT])
+        if len(group) > RESHARPER_GROUP_LIST_LIMIT:
+            listed += f"\n- … 另 {len(group) - RESHARPER_GROUP_LIST_LIMIT} 处"
+        body = (
+            f"{first['head']}\n\n"
+            f"同一检查在本文件的 {len(group)} 处触发：\n{listed}"
+        )
+        collapsed += len(group) - 1
+        comments.append(
+            {
+                "path": path,
+                "line": first["line"],
+                "quote": first["quote"],
+                "side": "RIGHT",
+                "body": body,
+            }
+        )
+    return comments, collapsed
+
+
 def run_static_analysis(
     gh: GitHubClient,
     owner: str,
@@ -4938,6 +5002,7 @@ def run_static_analysis(
         declarations.setdefault(rename[0], set()).add(site)
 
     raw: List[Dict[str, Any]] = []
+    candidates: List[Dict[str, Any]] = []
     seen: set = set()
     repeated = 0
     for issue in issues:
@@ -4946,6 +5011,8 @@ def run_static_analysis(
         matched = path if path in patches else next(
             (fn for fn in patches if path.endswith(fn) or fn.endswith(path)), None
         )
+        if not matched:
+            continue
         key = (matched, issue["line"], issue["message"])
         if key in seen:
             continue
@@ -4958,17 +5025,38 @@ def run_static_analysis(
         if (matched, _normalized(body)) in already:
             repeated += 1
             continue
-        replacement = renamed_line(quote, rename) if rename else None
-        if replacement is not None:
-            proposals[(matched, issue["line"], body)] = (quote, replacement, rename[0])
-        raw.append(
+        if rename:
+            # A naming finding carries a suggestion, and a suggestion edits exactly
+            # the one line it is anchored to: its own comment, never a group.
+            replacement = renamed_line(quote, rename)
+            if replacement is not None:
+                proposals[(matched, issue["line"], body)] = (quote, replacement, rename[0])
+            raw.append(
+                {
+                    "path": matched,
+                    "line": issue["line"],
+                    "quote": quote,
+                    "side": "RIGHT",
+                    "body": body,
+                }
+            )
+            continue
+        candidates.append(
             {
                 "path": matched,
                 "line": issue["line"],
                 "quote": quote,
-                "side": "RIGHT",
-                "body": body,
+                "head": body,
+                "key": issue.get("type") or issue["message"],
             }
+        )
+
+    grouped, collapsed = group_resharper_comments(candidates, already)
+    raw.extend(grouped)
+    if collapsed:
+        log(
+            f"ReSharper: {collapsed + len(grouped)} finding(s) posted as "
+            f"{len(grouped)} comment(s) — {collapsed} of the same inspection folded in."
         )
     if repeated:
         log(f"ReSharper: {repeated} finding(s) skipped — already raised in an open thread.")
