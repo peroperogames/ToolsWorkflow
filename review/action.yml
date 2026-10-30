@@ -161,9 +161,16 @@ runs:
     # hidden files unless `include-hidden-files` is true, so a hidden directory
     # is searched and reported as "No files were found with the provided path"
     # even with eight report files in it.
+    #
+    # A refused upload is not a failed review. GitHub answers with "Artifact
+    # storage quota has been hit" once the account's storage is full — the review
+    # itself has already run and its result is already on the pull request — and a
+    # red job for that reads as "the review broke". The step's own log says what
+    # went missing, and the comment keeps the run page it already pointed at.
     - name: Upload the reports
       id: upload-reports
       if: always() && github.event.action != 'closed'
+      continue-on-error: true
       uses: actions/upload-artifact@v4
       with:
         name: ai-review-reports-${{ github.run_id }}-${{ github.run_attempt }}
