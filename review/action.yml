@@ -195,8 +195,15 @@ runs:
         REVIEW_ARTIFACT_URL: ${{ steps.upload-reports.outputs.artifact-url }}
       run: python3 "$GITHUB_ACTION_PATH/main.py" artifact-link
 
+    # The review is the reason the run happened, so nothing short of a cancelled
+    # run may skip it. It was gated on the steps before it succeeding, and that is
+    # how the artifact upload cost a whole review: RhythmAce-Neo #89, the upload
+    # refused with "Artifact storage quota has been hit", and this step logged
+    # `outcome=skipped` while the build and the analysis had already run. The job
+    # still ends failed when an earlier step did, so running the review here hides
+    # nothing.
     - name: Review and settle the threads
-      if: github.event.action != 'closed'
+      if: "!cancelled() && github.event.action != 'closed'"
       shell: bash
       env:
         GITHUB_TOKEN: ${{ inputs.github-token }}
