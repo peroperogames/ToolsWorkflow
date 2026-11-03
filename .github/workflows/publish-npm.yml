@@ -473,10 +473,16 @@ jobs:
           done
           exit 1
 
-      # Everything this run built, in one artifact: the tarball the other registry
-      # publishes, the packages NuGet receives, and — for the first release of a
-      # package that has no trusted publisher yet — the exact bytes to publish by
-      # hand, once, rather than a second build of them.
+      # Everything the registries outside PeroNPM receive, in one artifact: the
+      # tarball the `external` job publishes to npmjs — the second runner cannot see
+      # this one's disk, and it publishes these exact bytes rather than a second build
+      # — and the packages NuGet receives.
+      #
+      # Nothing in a PeroNPM-only release reads them. That tarball went to the registry
+      # from the package directory already, so collecting and uploading it would be
+      # paperwork nobody opens, and an upload that can fail (the account's artifact
+      # quota is an account-level condition, not a fact about this release) would fail
+      # a release that succeeded. Both steps are gated on a channel that needs them.
       #
       # Staged in `$RUNNER_TEMP` rather than beside the package: this job's steps run
       # in `working-directory`, and the upload step needs an absolute path. Building
@@ -485,6 +491,7 @@ jobs:
       # refuses with "Relative pathing '.' and '..' is not allowed" — a release that
       # had already published to PeroNPM, failing on where it keeps its paperwork.
       - name: Collect the packages
+        if: ${{ steps.channels.outputs.DO_NPMJS == 'true' || steps.channels.outputs.DO_NUGET == 'true' }}
         run: |
           rm -rf "$RUNNER_TEMP/publish-artifacts"
           mkdir -p "$RUNNER_TEMP/publish-artifacts"
@@ -501,12 +508,11 @@ jobs:
           fi
           ls -l "$RUNNER_TEMP/publish-artifacts"
 
-      # The artifact is what the `external` job publishes. When neither npmjs nor
-      # nuget is on, nothing reads it, and a refused upload — the account's storage
-      # quota, today — must not fail a release that has already published to PeroNPM.
+      # Needed by the `external` job, so it runs only then — and it is fatal then,
+      # because without these files that job has nothing to publish.
       - name: Upload the packages
         id: upload-packages
-        continue-on-error: ${{ steps.channels.outputs.DO_NPMJS != 'true' && steps.channels.outputs.DO_NUGET != 'true' }}
+        if: ${{ steps.channels.outputs.DO_NPMJS == 'true' || steps.channels.outputs.DO_NUGET == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: publish-packages
