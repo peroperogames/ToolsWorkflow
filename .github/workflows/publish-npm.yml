@@ -477,28 +477,40 @@ jobs:
       # publishes, the packages NuGet receives, and — for the first release of a
       # package that has no trusted publisher yet — the exact bytes to publish by
       # hand, once, rather than a second build of them.
+      #
+      # Staged in `$RUNNER_TEMP` rather than beside the package: this job's steps run
+      # in `working-directory`, and the upload step needs an absolute path. Building
+      # one from the expression gave `/…/ResourcesManager/./publish-artifacts/` for
+      # every caller that leaves `working-directory` at `.`, which upload-artifact
+      # refuses with "Relative pathing '.' and '..' is not allowed" — a release that
+      # had already published to PeroNPM, failing on where it keeps its paperwork.
       - name: Collect the packages
         run: |
-          rm -rf publish-artifacts
-          mkdir -p publish-artifacts
+          rm -rf "$RUNNER_TEMP/publish-artifacts"
+          mkdir -p "$RUNNER_TEMP/publish-artifacts"
           # npm will not create the destination; an old tarball left there would be
           # uploaded as this release's.
           rm -rf "$RUNNER_TEMP/npm"
           mkdir -p "$RUNNER_TEMP/npm"
           npm pack --pack-destination "$RUNNER_TEMP/npm" > /dev/null
-          cp "$RUNNER_TEMP"/npm/*.tgz publish-artifacts/
+          cp "$RUNNER_TEMP"/npm/*.tgz "$RUNNER_TEMP/publish-artifacts/"
           shopt -s nullglob
           nupkgs=("$RUNNER_TEMP"/nuget/*.nupkg)
           if [ ${#nupkgs[@]} -gt 0 ]; then
-            cp "${nupkgs[@]}" publish-artifacts/
+            cp "${nupkgs[@]}" "$RUNNER_TEMP/publish-artifacts/"
           fi
-          ls -l publish-artifacts
+          ls -l "$RUNNER_TEMP/publish-artifacts"
 
+      # The artifact is what the `external` job publishes. When neither npmjs nor
+      # nuget is on, nothing reads it, and a refused upload — the account's storage
+      # quota, today — must not fail a release that has already published to PeroNPM.
       - name: Upload the packages
+        id: upload-packages
+        continue-on-error: ${{ steps.channels.outputs.DO_NPMJS != 'true' && steps.channels.outputs.DO_NUGET != 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: publish-packages
-          path: ${{ github.workspace }}/${{ inputs.working-directory }}/publish-artifacts/
+          path: ${{ runner.temp }}/publish-artifacts/
           if-no-files-found: error
 
       - name: Clean up the ci_cd checkout
@@ -506,7 +518,7 @@ jobs:
         run: |
           rm -rf "$RUNNER_TEMP/devops"
           rm -rf "$RUNNER_TEMP/npm" "$RUNNER_TEMP/nuget"
-          rm -rf publish-artifacts
+          rm -rf "$RUNNER_TEMP/publish-artifacts"
 
   # The two registries that are not ours, published from a GitHub-hosted runner:
   # npm trusted publishing does not accept self-hosted runners, and both channels
