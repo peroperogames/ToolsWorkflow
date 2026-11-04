@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-10-29.unity.138"
+VERSION = "2026-11-04.unity.139"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -177,9 +177,19 @@ MAX_PROJECT_PROMPT_CHARS = 20000
 # The end marker is quoted here so it can be neutralised inside the content.
 PROJECT_PROMPT_MARKER = "--- END PROJECT REVIEW CRITERIA ---"
 
-# An invisible marker that makes the build/test status one comment living on the pull
-# request instead of one per run.
-BUILD_STATUS_MARKER = "<!-- ai-review build status -->"
+# An invisible marker that makes one gate's status one comment living on the pull
+# request instead of one per run. It carries the label, because a repository can be a
+# .NET solution and a UPM package at the same time — PeroSerde is both — and each gate
+# posts its own result. With a single marker the second gate edited the first gate's
+# comment out of existence: PeroSerde #9's Unity result, platform table and all,
+# survived only in that comment's edit history, and the pull request showed ".NET:
+# 编译通过" as if the package had never been tested.
+BUILD_STATUS_MARKER = "<!-- ai-review build status"
+
+
+def build_status_marker(label: str) -> str:
+    """The marker that keeps one label's result in one comment."""
+    return f"{BUILD_STATUS_MARKER}: {label} -->"
 # ... and the same for 'a review ran and found nothing', which otherwise leaves
 # no trace on the pull request when the approval it asks for is withheld.
 CLEAN_VERDICT_MARKER = "<!-- ai-review clean verdict -->"
@@ -4672,10 +4682,11 @@ def report_build_result(
         #
         # A rebuild is the exception: its reply is the report, and it carries the
         # result already.
+        marker = build_status_marker(label)
         log(f"{label}: no check run, so the result is posted as a comment instead.")
         post_status_comment(
-            gh, owner, repo, number, summary + "\n\n" + BUILD_STATUS_MARKER,
-            marker=BUILD_STATUS_MARKER,
+            gh, owner, repo, number, summary + "\n\n" + marker,
+            marker=marker,
         )
 
 
