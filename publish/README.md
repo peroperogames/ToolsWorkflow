@@ -52,6 +52,15 @@ change to keep publishing to PeroNPM alone.
       nuget-user: Peropero
 ```
 
+**The first release of a new npm package needs one token, once.** npm attaches a
+trusted publisher to a package, so a package that does not exist has nothing to
+trust — and a tokenless publish cannot create one. `NPMJS_BOOTSTRAP_TOKEN` (repo
+secret, granular token with publish rights) is read only after the trusted publish
+has failed: it creates the package once, the step says so in the log, and every
+release after that goes through OIDC. Delete the secret after that first release. A
+`0.0.0` placeholder version is the other way to create the package, and it stays in
+the version history forever — which is why this exists.
+
 The two extra channels are opt-in and stay opt-in: publishing to somebody else's
 registry cannot be taken back. A channel name that is not in the table above fails
 the run before anything is built — publishing to PeroNPM because `npmjs` was
@@ -294,6 +303,7 @@ same pre-bump commit while the branch and the registries have already moved on.
 | `APP_ID`, `APP_PK` | yes | The `PeroToolsBot` GitHub App, used for the token that clones this repository and pushes the version commit. |
 | `FEISHU_WEBHOOK`, `FEISHU_SECRET` | yes | The notification for `-base` releases. |
 | `NPM_URL` | only for `peronpm` | The PeroNPM registry URL. |
+| `NPMJS_BOOTSTRAP_TOKEN` | no | A granular npm token, used only to create a package that does not exist on npmjs yet. Delete it after that release. |
 
 There is no `NPMJS_TOKEN` and no `NUGET_API_KEY`: both registries are authenticated
 with the job's own OIDC identity, which cannot leak and needs no rotation.

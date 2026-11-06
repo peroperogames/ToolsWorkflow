@@ -79,6 +79,13 @@ on:
       # hold it.
       NPM_URL:
         required: false  # PeroNPM registry URL — the peronpm channel
+      # Optional, and only for the FIRST release of a package that is not on
+      # npmjs yet: npm attaches a trusted publisher to a package, so there is
+      # nothing to trust until the package exists. A granular token with publish
+      # rights creates it once; every release after that uses OIDC, and the secret
+      # is deleted.
+      NPMJS_BOOTSTRAP_TOKEN:
+        required: false
   # The other two channels authenticate with OIDC trusted publishing, so this
   # workflow holds no token for either registry. Two things live in the calling
   # repository instead:
@@ -586,6 +593,8 @@ jobs:
 
       - name: Publish to npmjs
         if: ${{ needs.publish.outputs.npmjs == 'true' }}
+        env:
+          NPMJS_BOOTSTRAP_TOKEN: ${{ secrets.NPMJS_BOOTSTRAP_TOKEN }}
         run: |
           # Without this token npm can only answer ENEEDAUTH, which names neither
           # the missing permission nor the workflow that has to grant it.
@@ -648,6 +657,29 @@ jobs:
             echo "Attempt $i failed, retrying in 5 seconds..."
             sleep 5
           done
+
+          # The first publish of a package that does not exist cannot use OIDC: a
+          # trusted publisher is attached to a package, so there is nothing to
+          # trust yet. One token creates it, once — every release after that is
+          # OIDC, and the secret is meant to be deleted right after this one.
+          if [ -n "${NPMJS_BOOTSTRAP_TOKEN:-}" ]; then
+            echo "::warning::The trusted publish did not go through. Creating the package once with NPMJS_BOOTSTRAP_TOKEN; delete that secret after this release."
+            userconfig="$RUNNER_TEMP/npm-bootstrap.npmrc"
+            printf '//registry.npmjs.org/:_authToken=%s\n' "$NPMJS_BOOTSTRAP_TOKEN" > "$userconfig"
+            if npm publish "$tarball" --registry https://registry.npmjs.org/ --userconfig "$userconfig" > "$log" 2>&1; then
+              rm -f "$userconfig"
+              cat "$log"
+              echo "The package now exists on registry.npmjs.org. Every later release publishes through OIDC; delete NPMJS_BOOTSTRAP_TOKEN."
+              exit 0
+            fi
+            rm -f "$userconfig"
+            cat "$log"
+            if grep -qE 'E409|EPUBLISHCONFLICT|cannot publish over' "$log"; then
+              echo "This version is already on registry.npmjs.org; nothing to publish."
+              exit 0
+            fi
+            echo "::error::The bootstrap publish failed as well — the token may not be allowed to create this package."
+          fi
           exit 1
 
       # Requested right before the push: nuget.org hands out a key valid for one
