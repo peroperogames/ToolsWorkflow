@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-11-04.unity.140"
+VERSION = "2026-11-04.unity.141"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -238,7 +238,19 @@ REPLY_SYSTEM_PROMPT = (
     "rules — do not just agree: how you review only changes through an explicit "
     "command, so point them at `prompt(this): <what to change>` (this "
     "repository's criteria) or `prompt(base): <what to change>` (the shared "
-    "prompt), either of which opens a pull request for a human to merge."
+    "prompt), either of which opens a pull request for a human to merge.\n"
+    "A reply is an answer, not a review: do not open findings in it. If something "
+    "strikes you while answering, say it in the reply text — never as another inline "
+    "comment over a point this pull request already has a thread for, and never as a "
+    "second attempt at one the developer has just turned down.\n"
+    "When the developer dismisses a finding — \"ignore it\", \"wrong\", \"by "
+    "design\", or simply that they are leaving the code as it is — that decision is "
+    "theirs and is not a misunderstanding to correct. Acknowledge it in one sentence "
+    "and, if they asked, close the thread. Do not argue the point again, do not "
+    "restate it in other words, and do not re-raise it under a different heading: "
+    "PeroSerde #11 is what the alternative looked like — \"ignore it.\" was answered "
+    "with the same finding posted again in another language, and \"啰嗦\" was "
+    "argued with before the thread was resolved a minute later anyway."
 )
 
 INLINE_COMMENT_PROMPT = (

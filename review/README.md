@@ -146,6 +146,10 @@ The bot answers comments in two places, which arrive as two different events:
 
 Comments on non-PR issues, bot comments, and comments that address neither the bot nor one of its threads are ignored. When the trigger came from an inline thread, the bot replies inside that same thread. If the model decides a comment needs no answer, it stays silent — nothing is posted, and the reason it gives is printed in the run log (`Ignored the comment: …`).
 
+**A reply is an answer, not a review.** It does not open findings: anything that strikes the model while answering goes into the reply text, never into another inline comment over a point the pull request already has a thread for.
+
+**A dismissal is the author's decision.** When they answer a finding with "ignore it", "by design", "wrong", or simply that they are leaving the code as it is, that is the end of it: one sentence acknowledging the decision, and the thread is closed if they asked for that. The finding is not argued again, restated in other words, or re-raised under a different heading — PeroSerde #11 is what the alternative looked like: "ignore it." was answered with the same finding posted again in another language, and "啰嗦" with "但第二条不受影响…", a minute before the thread was resolved anyway.
+
 #### Special commands
 
 Some things a comment can ask for are too consequential to guess at, so they are **commands**: `@perotoolsbot` followed by one of the words below, matched on the word right after the mention so "reviews are noisy" is not a command. A command never reaches the intent classifier — that is what makes it deterministic. Everything else (questions, discussion, a request phrased some other way) still does, exactly as before.
