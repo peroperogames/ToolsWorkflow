@@ -314,6 +314,53 @@ class GitHubClient:
             "POST", f"/repos/{owner}/{repo}/pulls/{number}/comments", json=payload
         )
 
+    def create_pending_review(
+        self, owner: str, repo: str, number: int, commit_id: str
+    ) -> Dict[str, Any]:
+        """Start a review that stays pending until it is submitted.
+
+        A review created without an `event` is a draft: comments added to it are
+        invisible on the pull request until it is submitted, which is what lets a
+        run that posts findings one model step at a time reach the author as one
+        review. GitHub allows **one** pending review per user per pull request, so
+        a create can fail with "User can only have one pending review per pull
+        request" — see `_pending_review` in main.py, which reuses the leftover.
+        """
+        payload: Dict[str, Any] = {"commit_id": commit_id} if commit_id else {}
+        return self._request(
+            "POST", f"/repos/{owner}/{repo}/pulls/{number}/reviews", json=payload
+        )
+
+    def add_review_comment(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        review_id: Any,
+        comment: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Add one inline comment to a review that is still pending."""
+        return self._request(
+            "POST",
+            f"/repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}/comments",
+            json=dict(comment),
+        )
+
+    def submit_review(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        review_id: Any,
+        event: str = "COMMENT",
+    ) -> Dict[str, Any]:
+        """Submit a pending review, which is when its comments become visible."""
+        return self._request(
+            "POST",
+            f"/repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}/events",
+            json={"event": event},
+        )
+
     def compare(
         self, owner: str, repo: str, base: str, head: str
     ) -> List[Dict[str, Any]]:

@@ -747,6 +747,14 @@ That leaves ~10 further steps before the next compaction instead of one, which i
 
 **When the first request is bigger than the budget, compaction says so once.** A pull request's diff is part of the first request and cannot be compacted away, so a big one arrives over budget before the model has said anything: RhythmAce-Neo #36 changed 164 files, started at ~265k tokens against a 200k budget, and ran the three passes on all six of its steps to free 3k each time. `compact_for_step` records what a failed attempt reached and skips the next ones until the transcript has grown a quarter past it — the point at which there is new content to compact — while the warning above names the size and says the request is that large on its own. Raising `agent-context-tokens` for such a repository, or splitting the review of a 164-file pull request, is the real answer; this only stops pretending the passes did something.
 
+### One review, not one per comment
+
+Every finding used to be a `post_inline_comment` call, and every call created its own review: RhythmAce-Neo #65 finished with fifteen COMMENTED reviews for fifteen comments, each with its own notification and timeline entry, and a run that died halfway left half of them posted — which reads as a review that changed its mind.
+
+A run now writes into **one pending review** and submits it at the end. `post_inline_comment` adds to the pending review, so nothing is visible on the pull request while the model is still deciding what to say; the review is submitted once, when the run finishes. The ReSharper batch goes through the same code, so its fifteen findings are one review too.
+
+GitHub allows **one pending review per user per pull request** — a second create is refused with `User can only have one pending review per pull request` — so a pending review left behind by a run that died is reused by the next run rather than fought with, and what that run found is delivered with it. When the review cannot be started, or GitHub refuses the submit, the comments are posted one by one as before: six reviews is worse than one, and a lost review is worse than six.
+
 ### A big diff is reviewed in slices, not carried through every step
 
 Above `MAP_REDUCE_OVER_TOKENS` (60k tokens of diff) the diff stops being part of the agent's request at all. It is cut into slices (`chunk_files`), each slice is reviewed by its own worker call — four at a time, with read access to the files of its own slice and JSON out — and the agent that posts the review is handed **the findings instead of the diff**.

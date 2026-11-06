@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-11-04.unity.141"
+VERSION = "2026-11-04.unity.142"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -1811,6 +1811,152 @@ def post_inline_comments(
             log(f"Warning: inline comment failed ({c.get('path')}:{c.get('line')}): {exc}")
     log(f"Posted {posted}/{len(comments)} inline comment(s).")
     return posted
+
+
+def _existing_pending_review(
+    gh: GitHubClient, owner: str, repo: str, number: int
+) -> Any:
+    """The pending review an earlier run of this bot left behind, if any.
+
+    A run that dies between its first comment and its submit leaves one, and GitHub
+    allows only one pending review per user per pull request: without finding it,
+    every later run would fail to start a review of its own. Reusing it also
+    delivers what that run found.
+    """
+    try:
+        for review in gh.list_reviews(owner, repo, number):
+            if (review.get("state") or "").upper() != "PENDING":
+                continue
+            if is_bot_author(review.get("user")):
+                return review.get("id")
+    except Exception as exc:  # noqa: BLE001 - best effort
+        log(f"Could not look for an earlier pending review: {exc}")
+    return None
+
+
+def _pending_review(
+    gh: GitHubClient, owner: str, repo: str, number: int, commit_id: str
+) -> Any:
+    """The pull request's pending review, started on its first comment."""
+    existing = _existing_pending_review(gh, owner, repo, number)
+    if existing is not None:
+        log("Reusing the pending review an earlier run left on this pull request.")
+        return existing
+    try:
+        review = gh.create_pending_review(owner, repo, number, commit_id)
+    except Exception as exc:  # noqa: BLE001 - post them the old way instead
+        log(f"Warning: could not start a pending review ({exc}).")
+        return None
+    return (review or {}).get("id") if isinstance(review, dict) else None
+
+
+def add_comments_to_pending_review(
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    commit_id: str,
+    comments: List[Dict[str, Any]],
+    review_id: Any = None,
+) -> "Tuple[Any, List[Dict[str, Any]]]":
+    """Write comments into one pending review, invisible until it is submitted.
+
+    Nothing appears on the pull request before that, which is the whole point: a
+    review that says six things is one review, not six — one notification, one
+    timeline entry, and nothing half-posted if the run dies.
+
+    Returns the review's id and the comments actually added. The id is None when
+    there is no review to add to (it could not be started, or there is no commit to
+    anchor to), and the caller posts them the old way instead.
+
+    ``review_id`` is the review an agent run already opened: without it every
+    comment would look the review up again — one listing per comment, and, worse,
+    a second create if GitHub's listing lagged behind the first.
+    """
+    added: List[Dict[str, Any]] = []
+    if not comments:
+        return None, added
+    if not commit_id:
+        log("Warning: no commit id available; skipping inline comments.")
+        return None, added
+    if review_id is None:
+        review_id = _pending_review(gh, owner, repo, number, commit_id)
+    if review_id is None:
+        return None, added
+    for comment in comments:
+        try:
+            gh.add_review_comment(owner, repo, number, review_id, comment)
+            added.append(comment)
+        except Exception as exc:  # noqa: BLE001 - one bad comment, not the review
+            log(
+                "Warning: could not add the comment "
+                f"({comment.get('path')}:{comment.get('line')}): {exc}"
+            )
+    log(f"Added {len(added)}/{len(comments)} comment(s) to the pending review.")
+    return review_id, added
+
+
+def submit_pending_review(
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    commit_id: str,
+    review_id: Any,
+    comments: List[Dict[str, Any]],
+    posted_ids: Optional[List[int]] = None,
+) -> int:
+    """Submit the review, and remember which comments it posted.
+
+    The ids matter twice over: they are what the log reports, and the retirement
+    pass that runs next must not resolve a thread from this run's own findings.
+    GitHub answers with them; when it does not, they are read back from the pull
+    request.
+
+    A refused submit falls back to posting the comments one by one. Six comments as
+    six reviews is the shape this avoids — but a lost review is worse than a noisy
+    one.
+    """
+    if review_id is None:
+        return 0
+    try:
+        submitted = gh.submit_review(owner, repo, number, review_id, "COMMENT")
+    except Exception as exc:  # noqa: BLE001 - never lose the findings
+        log(
+            f"Warning: could not submit the review ({exc}); posting its comments "
+            "one by one instead."
+        )
+        return post_inline_comments(
+            gh, owner, repo, number, commit_id, comments, posted_ids=posted_ids
+        )
+    found = (submitted or {}).get("comments") or []
+    if not found:
+        try:
+            found = [
+                comment
+                for comment in gh.list_review_comments(owner, repo, number)
+                if comment.get("pull_request_review_id") == review_id
+            ]
+        except Exception as exc:  # noqa: BLE001 - best effort
+            log(f"Warning: could not read the submitted review's comments: {exc}")
+    for comment in found:
+        comment_id = (comment or {}).get("id")
+        if posted_ids is not None and isinstance(comment_id, int):
+            posted_ids.append(comment_id)
+    log(f"Submitted one review carrying {len(comments)} inline comment(s).")
+    return len(comments)
+
+
+def submit_this_run_review(ctx: "ToolContext") -> int:
+    """Submit the review a run was writing into, and forget it."""
+    review_id, comments = ctx.pending_review_id, ctx.pending_comments
+    ctx.pending_review_id, ctx.pending_comments = None, []
+    if review_id is None:
+        return 0
+    return submit_pending_review(
+        ctx.gh, ctx.owner, ctx.repo, ctx.number, ctx.heads, review_id, comments,
+        ctx.posted_ids,
+    )
 
 
 def index_diff_lines(patch: str) -> List[Dict[str, Any]]:
@@ -3937,6 +4083,11 @@ class ToolContext:
     # Ids of the comments this run posted, in order. The retirement pass runs
     # right after the review and must not resolve a thread from this very list.
     posted_ids: List[int] = field(default_factory=list)
+    # The review this run's inline comments are collected into, and the comments
+    # themselves — kept so that a submit which GitHub refuses can still post them
+    # one by one instead of losing the run's findings.
+    pending_review_id: Any = None
+    pending_comments: List[Dict[str, Any]] = field(default_factory=list)
     # (path, first line, last line) windows already handed to the model. A repeat is
     # answered with "you have it" instead of the same 8k characters, which is both
     # cheaper and the way out of a read-forever loop.
@@ -4053,10 +4204,19 @@ def _tool_post_inline_comment(args: Dict[str, Any], ctx: ToolContext) -> str:
     if ctx.config.dry_run:
         ctx.inline_posted += 1
         return f"dry-run: would post on {normalized[0]['path']}:{normalized[0]['line']}"
-    posted = post_inline_comments(
+    review_id, added = add_comments_to_pending_review(
         ctx.gh, ctx.owner, ctx.repo, ctx.number, ctx.heads, normalized,
-        posted_ids=ctx.posted_ids,
+        review_id=ctx.pending_review_id,
     )
+    if review_id is None:
+        posted = post_inline_comments(
+            ctx.gh, ctx.owner, ctx.repo, ctx.number, ctx.heads, normalized,
+            posted_ids=ctx.posted_ids,
+        )
+    else:
+        ctx.pending_review_id = review_id
+        ctx.pending_comments.extend(added)
+        posted = len(added)
     if not posted:
         return "error: GitHub rejected the comment"
     ctx.inline_posted += posted
@@ -5335,8 +5495,17 @@ def run_static_analysis(
         for c in normalized:
             print(f"[static] {c['path']}:{c['line']} {c['body']}")
         return len(normalized)
-    return post_inline_comments(
-        gh, owner, repo, number, pr.get("head", {}).get("sha", ""), normalized
+    # One review, not one per finding: the batch is written into a pending review
+    # and submitted once, so a pull request with fifteen inspection findings still
+    # gets one review from the run.
+    heads = pr.get("head", {}).get("sha", "")
+    review_id, added = add_comments_to_pending_review(
+        gh, owner, repo, number, heads, normalized
+    )
+    if review_id is None:
+        return post_inline_comments(gh, owner, repo, number, heads, normalized)
+    return submit_pending_review(
+        gh, owner, repo, number, heads, review_id, added
     )
 
 
@@ -5940,6 +6109,10 @@ def run_agent_review(
             f"({ctx.inline_posted} inline comment(s), no verdict, nothing approved)."
         )
 
+    # One review, not one comment: everything this run added is still pending, and
+    # this is where the author finally sees it.
+    submit_this_run_review(ctx)
+
     # The model is not reliably willing to approve on its own, so act on the
     # verdict it declared at finish: anything still open blocks the approval.
     if not ctx.approved and ctx.verdict == "approve" and not ctx.block_approve:
@@ -6002,6 +6175,7 @@ def run_agent_reply(
                 # Tools were used earlier and the model now answered in prose
                 # instead of calling finish — that text is the reply.
                 ctx.reply_text = (answer.get("content") or "").strip()
+                submit_this_run_review(ctx)
                 return ctx
 
             log(
@@ -6038,6 +6212,7 @@ def run_agent_reply(
             if ctx.finish_requested:
                 break
 
+    submit_this_run_review(ctx)
     return ctx
 
 
