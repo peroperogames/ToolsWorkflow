@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-11-04.unity.142"
+VERSION = "2026-11-04.unity.143"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -1813,41 +1813,103 @@ def post_inline_comments(
     return posted
 
 
-def _existing_pending_review(
+def _pending_reviews(
     gh: GitHubClient, owner: str, repo: str, number: int
-) -> Any:
-    """The pending review an earlier run of this bot left behind, if any.
-
-    A run that dies between its first comment and its submit leaves one, and GitHub
-    allows only one pending review per user per pull request: without finding it,
-    every later run would fail to start a review of its own. Reusing it also
-    delivers what that run found.
-    """
+) -> List[Dict[str, Any]]:
+    """The bot's pending reviews on this pull request, oldest first as GitHub lists them."""
     try:
-        for review in gh.list_reviews(owner, repo, number):
-            if (review.get("state") or "").upper() != "PENDING":
-                continue
-            if is_bot_author(review.get("user")):
-                return review.get("id")
+        return [
+            review
+            for review in gh.list_reviews(owner, repo, number)
+            if (review.get("state") or "").upper() == "PENDING"
+            and is_bot_author(review.get("user"))
+        ]
     except Exception as exc:  # noqa: BLE001 - best effort
-        log(f"Could not look for an earlier pending review: {exc}")
-    return None
+        log(f"Could not look for a pending review: {exc}")
+        return []
+
+
+def _delete_pending_review(
+    gh: GitHubClient, owner: str, repo: str, number: int, review_id: Any
+) -> None:
+    """Throw a pending review away, comments and all."""
+    if review_id is None:
+        return
+    try:
+        gh.delete_review(owner, repo, number, review_id)
+        log(f"Deleted the pending review {review_id}.")
+    except Exception as exc:  # noqa: BLE001 - best effort
+        log(f"Warning: could not delete the pending review {review_id}: {exc}")
+
+
+def clear_stale_pending_reviews(
+    gh: GitHubClient, owner: str, repo: str, number: int, head_sha: str
+) -> int:
+    """Delete pending reviews this bot left behind for an older commit.
+
+    A pending review carries a commit, and its comments are validated against that
+    commit's diff: a review opened before the head moved rejects every comment with
+    "404 Not Found", and while it exists GitHub refuses both a new review and an
+    approval (422). RhythmAce-Neo #108 is exactly that — a review from an earlier
+    push, 64 steps of retries, nothing posted, no approval — so a run starts by
+    clearing what it cannot use.
+    """
+    removed = 0
+    for review in _pending_reviews(gh, owner, repo, number):
+        if review.get("commit_id") == head_sha:
+            continue
+        _delete_pending_review(gh, owner, repo, number, review.get("id"))
+        removed += 1
+    if removed:
+        log(
+            f"Cleared {removed} pending review(s) left on an older commit; "
+            "this run starts its own."
+        )
+    return removed
 
 
 def _pending_review(
     gh: GitHubClient, owner: str, repo: str, number: int, commit_id: str
 ) -> Any:
-    """The pull request's pending review, started on its first comment."""
-    existing = _existing_pending_review(gh, owner, repo, number)
-    if existing is not None:
-        log("Reusing the pending review an earlier run left on this pull request.")
-        return existing
+    """The pull request's pending review for this commit, started on its first comment."""
+    for review in _pending_reviews(gh, owner, repo, number):
+        if review.get("commit_id") == commit_id:
+            log("Reusing the pending review an earlier run left for this commit.")
+            return review.get("id")
+        # An older commit's review: its comments are validated against that commit,
+        # so it would refuse every one of ours. GitHub allows only one pending
+        # review per user, so it has to go before a new one can exist.
+        _delete_pending_review(gh, owner, repo, number, review.get("id"))
     try:
         review = gh.create_pending_review(owner, repo, number, commit_id)
     except Exception as exc:  # noqa: BLE001 - post them the old way instead
         log(f"Warning: could not start a pending review ({exc}).")
         return None
     return (review or {}).get("id") if isinstance(review, dict) else None
+
+
+def _post_comment_directly(
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    commit_id: str,
+    comment: Dict[str, Any],
+    posted_ids: Optional[List[int]] = None,
+) -> bool:
+    """Post one comment on its own — the path a review that cannot take it falls back to."""
+    try:
+        created = gh.post_review_comment(owner, repo, number, commit_id, comment)
+    except Exception as exc:  # noqa: BLE001
+        log(
+            "Warning: could not post the comment "
+            f"({comment.get('path')}:{comment.get('line')}): {exc}"
+        )
+        return False
+    comment_id = (created or {}).get("id")
+    if posted_ids is not None and isinstance(comment_id, int):
+        posted_ids.append(comment_id)
+    return True
 
 
 def add_comments_to_pending_review(
@@ -1858,42 +1920,61 @@ def add_comments_to_pending_review(
     commit_id: str,
     comments: List[Dict[str, Any]],
     review_id: Any = None,
-) -> "Tuple[Any, List[Dict[str, Any]]]":
+    posted_ids: Optional[List[int]] = None,
+) -> "Tuple[Any, List[Dict[str, Any]], int]":
     """Write comments into one pending review, invisible until it is submitted.
 
     Nothing appears on the pull request before that, which is the whole point: a
     review that says six things is one review, not six — one notification, one
     timeline entry, and nothing half-posted if the run dies.
 
-    Returns the review's id and the comments actually added. The id is None when
-    there is no review to add to (it could not be started, or there is no commit to
-    anchor to), and the caller posts them the old way instead.
-
-    ``review_id`` is the review an agent run already opened: without it every
-    comment would look the review up again — one listing per comment, and, worse,
-    a second create if GitHub's listing lagged behind the first.
+    Returns ``(review_id, in_review, posted_directly)``. ``review_id`` is None when
+    the review refused the comments and the rest went out one by one; a comment is
+    never dropped because the carrier failed, and the caller stops trying the
+    carrier instead of retrying it on every finding — a review that says 404 to
+    every comment is a review that will say 404 to the next one too.
     """
-    added: List[Dict[str, Any]] = []
+    in_review: List[Dict[str, Any]] = []
+    direct = 0
     if not comments:
-        return None, added
+        return review_id, in_review, direct
     if not commit_id:
         log("Warning: no commit id available; skipping inline comments.")
-        return None, added
+        return None, in_review, direct
     if review_id is None:
         review_id = _pending_review(gh, owner, repo, number, commit_id)
     if review_id is None:
-        return None, added
+        for comment in comments:
+            if _post_comment_directly(
+                gh, owner, repo, number, commit_id, comment, posted_ids
+            ):
+                direct += 1
+        return None, in_review, direct
     for comment in comments:
+        if review_id is None:
+            if _post_comment_directly(
+                gh, owner, repo, number, commit_id, comment, posted_ids
+            ):
+                direct += 1
+            continue
         try:
             gh.add_review_comment(owner, repo, number, review_id, comment)
-            added.append(comment)
-        except Exception as exc:  # noqa: BLE001 - one bad comment, not the review
+            in_review.append(comment)
+        except Exception as exc:  # noqa: BLE001 - one bad comment, or a dead review
             log(
                 "Warning: could not add the comment "
                 f"({comment.get('path')}:{comment.get('line')}): {exc}"
             )
-    log(f"Added {len(added)}/{len(comments)} comment(s) to the pending review.")
-    return review_id, added
+            review_id = None
+            if _post_comment_directly(
+                gh, owner, repo, number, commit_id, comment, posted_ids
+            ):
+                direct += 1
+    if in_review:
+        log(f"Added {len(in_review)}/{len(comments)} comment(s) to the pending review.")
+    if direct:
+        log(f"Posted {direct} comment(s) directly instead.")
+    return review_id, in_review, direct
 
 
 def submit_pending_review(
@@ -1945,6 +2026,22 @@ def submit_pending_review(
             posted_ids.append(comment_id)
     log(f"Submitted one review carrying {len(comments)} inline comment(s).")
     return len(comments)
+
+
+def _abandon_pending_review(ctx: "ToolContext") -> None:
+    """Deliver what an unusable review already holds, then stop using it."""
+    review_id, comments = ctx.pending_review_id, ctx.pending_comments
+    ctx.pending_review_id, ctx.pending_comments = None, []
+    ctx.pending_broken = True
+    if review_id is None:
+        return
+    if not comments:
+        _delete_pending_review(ctx.gh, ctx.owner, ctx.repo, ctx.number, review_id)
+        return
+    submit_pending_review(
+        ctx.gh, ctx.owner, ctx.repo, ctx.number, ctx.heads, review_id, comments,
+        ctx.posted_ids,
+    )
 
 
 def submit_this_run_review(ctx: "ToolContext") -> int:
@@ -4088,6 +4185,9 @@ class ToolContext:
     # one by one instead of losing the run's findings.
     pending_review_id: Any = None
     pending_comments: List[Dict[str, Any]] = field(default_factory=list)
+    # The pending review refused a comment and was abandoned: the rest of the run
+    # posts directly rather than retrying a carrier that has already said no.
+    pending_broken: bool = False
     # (path, first line, last line) windows already handed to the model. A repeat is
     # answered with "you have it" instead of the same 8k characters, which is both
     # cheaper and the way out of a read-forever loop.
@@ -4200,23 +4300,30 @@ def _tool_post_inline_comment(args: Dict[str, Any], ctx: ToolContext) -> str:
             "error: could not locate that line in the diff. Copy `quote` verbatim "
             "from the diff, without the +/- marker or line-number prefix."
         )
-    ctx.posted_comments.append(key)
     if ctx.config.dry_run:
+        ctx.posted_comments.append(key)
         ctx.inline_posted += 1
         return f"dry-run: would post on {normalized[0]['path']}:{normalized[0]['line']}"
-    review_id, added = add_comments_to_pending_review(
-        ctx.gh, ctx.owner, ctx.repo, ctx.number, ctx.heads, normalized,
-        review_id=ctx.pending_review_id,
-    )
-    if review_id is None:
+    if ctx.pending_broken:
         posted = post_inline_comments(
             ctx.gh, ctx.owner, ctx.repo, ctx.number, ctx.heads, normalized,
             posted_ids=ctx.posted_ids,
         )
     else:
+        review_id, added, direct = add_comments_to_pending_review(
+            ctx.gh, ctx.owner, ctx.repo, ctx.number, ctx.heads, normalized,
+            review_id=ctx.pending_review_id, posted_ids=ctx.posted_ids,
+        )
         ctx.pending_review_id = review_id
         ctx.pending_comments.extend(added)
-        posted = len(added)
+        posted = len(added) + direct
+        if review_id is None:
+            _abandon_pending_review(ctx)
+    if posted:
+        # Only a comment that reached the pull request counts as said: recording the
+        # key for one that failed makes the model's retry look like a duplicate, and
+        # the run then rephrases the same finding instead of moving on.
+        ctx.posted_comments.append(key)
     if not posted:
         return "error: GitHub rejected the comment"
     ctx.inline_posted += posted
@@ -5499,14 +5606,12 @@ def run_static_analysis(
     # and submitted once, so a pull request with fifteen inspection findings still
     # gets one review from the run.
     heads = pr.get("head", {}).get("sha", "")
-    review_id, added = add_comments_to_pending_review(
+    review_id, in_review, direct = add_comments_to_pending_review(
         gh, owner, repo, number, heads, normalized
     )
-    if review_id is None:
-        return post_inline_comments(gh, owner, repo, number, heads, normalized)
-    return submit_pending_review(
-        gh, owner, repo, number, heads, review_id, added
-    )
+    if review_id is not None and in_review:
+        submit_pending_review(gh, owner, repo, number, heads, review_id, in_review)
+    return len(in_review) + direct
 
 
 def _line_text(patch: str, line: int) -> str:
@@ -6010,6 +6115,9 @@ def run_agent_review(
         block_approve=block_approve,
     )
     messages = agent_messages(system_prompt, session_records, turns)
+    clear_stale_pending_reviews(
+        gh, owner, repo, number, pr.get("head", {}).get("sha", "")
+    )
 
     # Exclusive access to the session for the whole run; another job for the
     # same PR keeps working, just without persistence.
@@ -6152,6 +6260,9 @@ def run_agent_reply(
         config=config, heads=pr.get("head", {}).get("sha", ""),
     )
     messages = agent_messages(system_prompt, session_records, turns)
+    clear_stale_pending_reviews(
+        gh, owner, repo, number, pr.get("head", {}).get("sha", "")
+    )
 
     with session.hold(owner, repo, number) as store:
         if store:

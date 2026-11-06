@@ -361,6 +361,15 @@ class GitHubClient:
             json={"event": event},
         )
 
+    def delete_review(
+        self, owner: str, repo: str, number: int, review_id: Any
+    ) -> Any:
+        """Delete a review — only a PENDING one; a submitted review is history."""
+        return self._request(
+            "DELETE",
+            f"/repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}",
+        )
+
     def compare(
         self, owner: str, repo: str, base: str, head: str
     ) -> List[Dict[str, Any]]:

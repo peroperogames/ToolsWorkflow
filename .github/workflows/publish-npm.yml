@@ -626,6 +626,12 @@ jobs:
             exit 1
           fi
           tarball="${tarballs[0]}"
+          # Absolute, because `npm publish packages/x.tgz` is not a path to npm: a bare
+          # `a/b` is the GitHub shorthand, so it runs
+          # `git ls-remote ssh://git@github.com/packages/x.tgz.git` and fails with
+          # "Permission denied (publickey)". PeroSerde's 0.2.0 release is what that
+          # looked like — a tarball sitting right there, and npm talking to git.
+          tarball="$(pwd)/${tarball}"
 
           # npm refuses a trusted publish whose package.json repository.url does not
           # name this repository (E422), and its message talks about provenance
