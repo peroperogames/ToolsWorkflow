@@ -107,7 +107,13 @@ class GitHubClient:
         if resp.status_code >= 400:
             detail = ""
             try:
-                detail = resp.json().get("message", "")
+                body = resp.json()
+                detail = body.get("message", "")
+                # "Validation Failed" alone says nothing: the reason is in `errors`,
+                # and a comment GitHub rejects cannot be repaired without it.
+                errors = body.get("errors")
+                if errors:
+                    detail = f"{detail} {errors}" if detail else str(errors)
             except ValueError:
                 detail = resp.text
             raise RuntimeError(
@@ -312,53 +318,6 @@ class GitHubClient:
         payload = {"commit_id": commit_id, **comment}
         return self._request(
             "POST", f"/repos/{owner}/{repo}/pulls/{number}/comments", json=payload
-        )
-
-    def create_pending_review(
-        self, owner: str, repo: str, number: int, commit_id: str
-    ) -> Dict[str, Any]:
-        """Start a review that stays pending until it is submitted.
-
-        A review created without an `event` is a draft: comments added to it are
-        invisible on the pull request until it is submitted, which is what lets a
-        run that posts findings one model step at a time reach the author as one
-        review. GitHub allows **one** pending review per user per pull request, so
-        a create can fail with "User can only have one pending review per pull
-        request" — see `_pending_review` in main.py, which reuses the leftover.
-        """
-        payload: Dict[str, Any] = {"commit_id": commit_id} if commit_id else {}
-        return self._request(
-            "POST", f"/repos/{owner}/{repo}/pulls/{number}/reviews", json=payload
-        )
-
-    def add_review_comment(
-        self,
-        owner: str,
-        repo: str,
-        number: int,
-        review_id: Any,
-        comment: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Add one inline comment to a review that is still pending."""
-        return self._request(
-            "POST",
-            f"/repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}/comments",
-            json=dict(comment),
-        )
-
-    def submit_review(
-        self,
-        owner: str,
-        repo: str,
-        number: int,
-        review_id: Any,
-        event: str = "COMMENT",
-    ) -> Dict[str, Any]:
-        """Submit a pending review, which is when its comments become visible."""
-        return self._request(
-            "POST",
-            f"/repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}/events",
-            json={"event": event},
         )
 
     def delete_review(
