@@ -1,0 +1,10 @@
+name: Publish Self-Test
+on:
+  workflow_dispatch:
+jobs:
+  call:
+    uses: ./.github/workflows/publish-npm.yml
+    permissions:
+      contents: write
+      id-token: write
+    secrets: inherit
