@@ -225,6 +225,14 @@ on:
     types: [created]
 ```
 
+### The caller has to be on the default branch
+
+`issue_comment` is one of the events GitHub only runs from **the repository's default branch**. A comment on the pull request — `@perotoolsbot settle`, `@perotoolsbot review` — is an issue comment, so a repository whose caller exists only on a feature or release branch gets *no run at all*: not a failed one, not a skipped one, nothing in the Actions tab.
+
+`pull_request` and `pull_request_review_comment` are not restricted that way, which is what makes the failure look arbitrary: replies inside an inline thread keep working, while a top-level comment on the same pull request silently does nothing. The repair is to have the caller on the default branch; other branches may keep their own copy.
+
+SQLite.net is the case that exposed it. Its default branch `main` held only `build.yml`, while `review.yml` sat on `peropero`, the branch its pull requests merge into. Every inline reply ran; `@perotoolsbot settle` on PR #1 produced no run and therefore no comment, and the settle never happened.
+
 ## Review pipeline
 
 The work is grouped into three steps of one job — `checks` (5–7), `static` (8) and `review` (1–4, 9–10) — which is why the numbering here does not follow the step order: the session and the prompts are only needed by the step that talks to the model. See [Three stages, one job](#three-stages-one-job) for what the split buys and the one ordering rule it must not break.
