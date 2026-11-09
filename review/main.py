@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-11-04.unity.144"
+VERSION = "2026-11-04.unity.145"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -243,6 +243,14 @@ REPLY_SYSTEM_PROMPT = (
     "strikes you while answering, say it in the reply text — never as another inline "
     "comment over a point this pull request already has a thread for, and never as a "
     "second attempt at one the developer has just turned down.\n"
+    "When the developer asks you to approve the pull request, call `approve` — not a "
+    "sentence about what you are allowed to do. It approves when nothing is open and "
+    "says what stopped it otherwise. Never explain a refusal with a permission, a "
+    "role or a capability you cannot see: this bot's writes are the pipeline's, and "
+    "the reply that said it had no approval rights went out a minute before the bot "
+    "approved that pull request.\n"
+    "Do not state the build or test status unless this run was given it — \"the "
+    "tests pass\" is a fact about a run, not about the code.\n"
     "When the developer dismisses a finding — \"ignore it\", \"wrong\", \"by "
     "design\", or simply that they are leaving the code as it is — that decision is "
     "theirs and is not a misunderstanding to correct. Acknowledge it in one sentence "
@@ -3754,6 +3762,21 @@ REPLY_TOOLS.append(
     {
         "type": "function",
         "function": {
+            "name": "approve",
+            "description": (
+                "Approve the pull request when the developer asks for it. It goes "
+                "through only if no review thread is open and this commit is not "
+                "approved already; the answer says which one stopped it."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    }
+)
+
+REPLY_TOOLS.append(
+    {
+        "type": "function",
+        "function": {
             "name": "finish",
             "description": (
                 "Finish the reply. Always call it last, whether or not you used "
@@ -4258,6 +4281,42 @@ def _tool_resolve_thread(args: Dict[str, Any], ctx: ToolContext) -> str:
     return "resolved, with the reason posted in the thread"
 
 
+def _tool_approve(args: Dict[str, Any], ctx: ToolContext) -> str:
+    """Approve the pull request, or say exactly what is in the way.
+
+    The approval goes through the same gate as the pipeline's own: nothing may be
+    left open, and a commit that is already approved is not approved again. What it
+    never does is explain a refusal with a permission it cannot see — the reply that
+    prompted this said the bot had no write access, one minute before the bot
+    approved the very same pull request.
+    """
+    if ctx.approved:
+        return "approved: this run already submitted the approval."
+    if ctx.config.dry_run:
+        return "dry-run: would approve."
+    head_sha = ctx.pr.get("head", {}).get("sha", "")
+    if approve_if_clean(
+        ctx.gh, ctx.owner, ctx.repo, ctx.number, head_sha, "审查通过，无遗留问题 ✅"
+    ):
+        ctx.approved = True
+        # A standing comment saying "could not approve" is now wrong.
+        update_standing_comment(
+            ctx.gh, ctx.owner, ctx.repo, ctx.number,
+            clean_verdict_body(ctx.config.language, 0, approved=True),
+            CLEAN_VERDICT_MARKER,
+        )
+        return "approved: the pull request is approved."
+    if already_approved(ctx.gh, ctx.owner, ctx.repo, ctx.number, head_sha):
+        return "nothing to do: this commit already carries an approval."
+    remaining = unresolved_bot_thread_count(ctx.gh, ctx.owner, ctx.repo, ctx.number)
+    if remaining > 0:
+        return (
+            f"not approved: {remaining} review thread(s) are still open. Resolve "
+            "them with resolve_thread, or ask the author to, and ask again."
+        )
+    return "not approved: GitHub refused the approval; the run log says why."
+
+
 def _tool_finish_reply(args: Dict[str, Any], ctx: ToolContext) -> str:
     reply = (args.get("reply") or "").strip()
     reason = (args.get("reason") or "").strip()
@@ -4305,6 +4364,7 @@ TOOL_HANDLERS = {
     "list_threads": _tool_list_threads,
     "resolve_thread": _tool_resolve_thread,
     "finish": _tool_finish,
+    "approve": _tool_approve,
 }
 
 
