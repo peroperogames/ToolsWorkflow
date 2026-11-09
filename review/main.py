@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-11-04.unity.147"
+VERSION = "2026-11-04.unity.148"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3104,7 +3104,7 @@ def _reply_in_thread(
 LARGE_FILE_TOKENS = 8_000
 
 
-def _code_change_block(fc: Dict[str, str], patch: str) -> str:
+def _code_change_block(fc: Dict[str, str], patch: str, whole: bool = False) -> str:
     """One file as the model should read it: all of it, or just the change.
 
     A vendored file of six thousand lines is where an instruction goes to die: it
@@ -3114,7 +3114,7 @@ def _code_change_block(fc: Dict[str, str], patch: str) -> str:
     """
     path = fc.get("path") or "?"
     content = fc.get("content") or ""
-    if patch and estimate_tokens(content) > LARGE_FILE_TOKENS:
+    if patch and not whole and estimate_tokens(content) > LARGE_FILE_TOKENS:
         return (
             f"The pull request changed the lines below in {path}. The file is too "
             "long to send whole, so they are all that is shown; each line carries "
@@ -3128,6 +3128,7 @@ def _code_change_context(
     instruction: str,
     max_tokens_per_chunk: int,
     patches: Optional[Dict[str, str]] = None,
+    whole_files: Optional[List[str]] = None,
 ) -> Tuple[str, List[str]]:
     """The files to show the model, and the ones that did not fit.
 
@@ -3140,10 +3141,13 @@ def _code_change_context(
     order they arrived, until the budget is spent.
 
     ``patches`` is what the pull request changed per file, used only for the files
-    too large to send whole. The edit is still applied to the file as read — this
-    decides what is read, not what is written.
+    too large to send whole; ``whole_files`` names files to send in full anyway,
+    which is what a retry does for the file an answer could not place an edit in.
+    The edit is still applied to the file as read — this decides what is read, not
+    what is written.
     """
     patches = patches or {}
+    whole = set(whole_files or [])
     budget = max_tokens_per_chunk
     named: List[Dict[str, str]] = []
     rest: List[Dict[str, str]] = []
@@ -3160,7 +3164,7 @@ def _code_change_context(
     used = 0
     for fc in named + rest:
         path = fc.get("path") or "?"
-        block = _code_change_block(fc, patches.get(path, ""))
+        block = _code_change_block(fc, patches.get(path, ""), path in whole)
         size = estimate_tokens(block) + estimate_tokens(path) + 8
         if chosen and used + size > budget:
             omitted.append(path)
@@ -3370,6 +3374,7 @@ def handle_code_change(
     commit_msg = ""
     cut = False
     problem = ""
+    whole_files: List[str] = []
 
     for attempt in (1, 2):
         reply = ai.chat_message(
@@ -3443,6 +3448,15 @@ def handle_code_change(
             break
         if attempt == 2:
             break
+        # The edit was quoted out of a change, and it is not there: the lines it
+        # means are somewhere else in the file, so the retry reads all of it.
+        failed_path = problem.split(":", 1)[0].strip()
+        if failed_path in known and failed_path not in whole_files:
+            whole_files.append(failed_path)
+            files_text, omitted = _code_change_context(
+                file_contents, instruction, max_tokens_per_chunk, patches, whole_files
+            )
+            log(f"Showing {failed_path} in full for the retry.")
         log(f"Answering again: {problem}")
 
     if problem or not changes:
