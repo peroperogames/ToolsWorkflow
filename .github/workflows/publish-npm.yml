@@ -370,6 +370,7 @@ jobs:
         env:
             TAG: ${{ github.event.release.tag_name }}
             TARGET_HINT: ${{ github.event.release.target_commitish }}
+            PACKAGE_DIR: ${{ inputs.working-directory }}
         run: |
           # The branch which the release was cut from — the one it names, and failing
           # that the one which holds the commit which was tagged (a release published
@@ -410,6 +411,20 @@ jobs:
            git push https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/${{ github.repository }} HEAD:"$TARGET"
            git tag -f "$TAG"
            git push -f origin "$TAG"
+
+           # OpenUPM builds a package from a tag and takes the tag as the version, so
+           # a release tagged `0.3.0-base` is `0.3.0-base` to OpenUPM while the
+           # package.json this release just wrote says `0.3.0`: every build fails with
+           # E811 "package.json version does not match release version". The release
+           # keeps its own name; this is the tag OpenUPM reads, on the commit that
+           # carries the version.
+           NEW_VERSION=$(grep '"version"' "$PACKAGE_DIR/package.json" | head -1 \
+             | sed 's/.*"version": *"\([^"]*\)".*/\1/')
+           if [ -n "$NEW_VERSION" ] && [ "$NEW_VERSION" != "$TAG" ]; then
+             echo "tagging $NEW_VERSION for OpenUPM (the release itself is $TAG)"
+             git tag -f "$NEW_VERSION"
+             git push -f origin "$NEW_VERSION"
+           fi
 
       # npm shows the README that is inside the published tarball, and the tarball is
       # the package directory — so a package whose README lives at the repository

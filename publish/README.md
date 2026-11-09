@@ -71,6 +71,20 @@ to NuGet and nothing else. Each channel owns its prerequisites, so a caller that
 uses one need not supply the others'; what a channel is missing is reported by
 `resolve_channels.sh`, by name, before anything is built.
 
+## OpenUPM
+
+OpenUPM builds a package from a **tag**, and it takes that tag as the version: it compares
+the tag against `package.json` at that commit and refuses the build when they differ
+(`E811 package.json version does not match release version`). A release tagged
+`0.3.0-base` is `0.3.0-base` to OpenUPM while the version this workflow writes is
+`0.3.0`, so every release needs a second, plain tag.
+
+The push step creates it on the commit that carries the version, so nothing has to be
+done by hand: the release keeps its `-base` name and `0.3.0` points at the same commit
+with the right `package.json`. A repository that already has releases has the same tag
+available under its `-base` name — creating `0.3.0` at that commit is all the old builds
+need.
+
 ## What goes where
 
 The npm channels and the NuGet channel carry **different artifacts from the same
