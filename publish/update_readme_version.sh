@@ -6,7 +6,7 @@
 # snippet is the same fact written down twice, and it goes stale silently. This
 # rewrites it in the same commit.
 #
-#   PACKAGE_NAME=com.prpr.accessking NEW_VERSION=0.3.0 GIT_REF=0.3.0-base \
+#   PACKAGE_NAME=com.prpr.accessking NEW_VERSION=0.3.0 GIT_REF=0.3.0 \
 #       bash update_readme_version.sh README.md
 #
 # Only lines that *name the package* are touched. On such a line the version next
@@ -18,7 +18,7 @@
 #                                                     can actually resolve
 #
 # The two are not always the same string: AccessKing publishes clean version numbers
-# to npm and tags its releases `0.3.0-base`, so a git URL pointing at `0.3.0` would
+# to npm and tags its releases with the version itself, so a git URL pointing at
 # name a ref that does not exist. `GIT_REF` defaults to `NEW_VERSION` for the
 # repositories where they are the same.
 #

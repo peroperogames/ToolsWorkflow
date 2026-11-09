@@ -71,6 +71,29 @@ to NuGet and nothing else. Each channel owns its prerequisites, so a caller that
 uses one need not supply the others'; what a channel is missing is reported by
 `resolve_channels.sh`, by name, before anything is built.
 
+## What the caller does not have to say
+
+Three things a caller used to name are answered by the repository, because they are the
+same in every repository here and a wrong value fails late — as a version that silently
+did not change:
+
+- **the package directory** — the shallowest directory whose `package.json` has a name
+  (`package_dir.sh`);
+- **the project the nuget channel packs** — the only one that is not
+  `IsPackable=false`, or the solution holding them when there is more than one
+  (`nuget_project.sh`);
+- **the nuget.org profile** — `Peropero`.
+
+The first two are resolved in one step before anything is packed, written to `$GITHUB_ENV`
+as `PACKAGE_DIR` (relative), `PACKAGE_ROOT` (absolute) and `NUGET_PROJECT`, and the steps
+that work inside the package move into it themselves: a job default cannot read a value
+another step produced. Naming any of them still works and wins over the guess.
+
+`unity-plugin-project` is not one of them. Which assembly the Unity package ships can be
+matched to a project, but the **configuration** it has to be built in cannot: AccessKing
+compiles a different assembly in its `Unity` configuration than in `Release`, and a wrong
+guess ships the wrong binary silently.
+
 ## OpenUPM
 
 OpenUPM builds a package from a **tag**, and it takes that tag as the version: it compares
@@ -308,14 +331,14 @@ same pre-bump commit while the branch and the registries have already moved on.
 | Input | Default | Description |
 | --- | --- | --- |
 | `channels` | `peronpm` | Comma-separated list of `peronpm`, `npmjs`, `nuget`. |
-| `nuget-project` | — | The `.csproj` or `.sln` the `nuget` channel packs, relative to the **repository root** — not to `working-directory`, because a package whose manifest lives in a subdirectory keeps its projects beside it, not inside it. A solution packs every project in it that is packable. |
-| `nuget-user` | — | The nuget.org profile name the trusted publishing policy belongs to — the last path segment of `nuget.org/profiles/<name>`, not the package's owner display or the account's e-mail. `Peropero`, not `perotools`: a name with no profile there fails the login step, after the release has already packed. |
+| `nuget-project` | the only packable project | The `.csproj` or `.sln` the `nuget` channel packs, relative to the **repository root**. Leave it empty and it is found: the one project without `IsPackable=false`, or the solution holding them when there is more than one. |
+| `nuget-user` | `Peropero` | The nuget.org profile name the trusted publishing policy belongs to — the last path segment of `nuget.org/profiles/<name>`. |
 | `nuget-source` | `https://api.nuget.org/v3/index.json` | The feed the `nuget` channel pushes to. |
 | `unity-plugin-project` | — | The `.csproj` or `.sln` whose build produces the assembly the Unity package ships, relative to the **repository root**. When set, it is rebuilt after the version bump and the refreshed files under `working-directory` join the version commit. Leave it empty for a package that ships no precompiled assembly. |
 | `unity-plugin-configuration` | `Unity` | The build configuration whose target copies the assembly into the package. Only used with `unity-plugin-project`. |
 | `expected-package-prefix` | `com.prpr` | Package name prefix the manifest is moved under. |
 | `node-version` | `20` | Node.js used to pack and publish to PeroNPM. The npmjs job pins its own, because trusted publishing needs a newer npm. |
-| `working-directory` | `.` | Subdirectory to work in, relative to the repository root. |
+| `working-directory` | the package's own directory | Where the package is, relative to the repository root. Leave it empty and it is found: the shallowest directory whose `package.json` has a name, so a sample project nested deeper cannot be mistaken for the package. |
 
 | Secret | Required | Description |
 | --- | --- | --- |
