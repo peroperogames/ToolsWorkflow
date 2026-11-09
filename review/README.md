@@ -233,6 +233,11 @@ on:
 
 SQLite.net is the case that exposed it. Its default branch `main` held only `build.yml`, while `review.yml` sat on `peropero`, the branch its pull requests merge into. Every inline reply ran; `@perotoolsbot settle` on PR #1 produced no run and therefore no comment, and the settle never happened.
 
+A fork is where this cannot be repaired by adding a file: its default branch mirrors upstream, and mirroring means anything committed there is upstream's to overwrite. Two routes remain.
+
+- **Point the default branch at the branch that carries the caller** — a repository setting, not a commit, so the mirrored branch is untouched. New pull requests then open against that branch by default, which is the integration branch for a fork that way anyway.
+- **Issue the command inside an inline review thread.** `pull_request_review_comment` runs from the pull request's own branches, so a reply to any of the bot's threads there is a command like any other. This needs no change to the repository at all, which is what makes it the route to use while the setting is still upstream's.
+
 ## Review pipeline
 
 The work is grouped into three steps of one job — `checks` (5–7), `static` (8) and `review` (1–4, 9–10) — which is why the numbering here does not follow the step order: the session and the prompts are only needed by the step that talks to the model. See [Three stages, one job](#three-stages-one-job) for what the split buys and the one ordering rule it must not break.
