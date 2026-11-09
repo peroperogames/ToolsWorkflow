@@ -75,15 +75,19 @@ uses one need not supply the others'; what a channel is missing is reported by
 
 OpenUPM builds a package from a **tag**, and it takes that tag as the version: it compares
 the tag against `package.json` at that commit and refuses the build when they differ
-(`E811 package.json version does not match release version`). A release tagged
-`0.3.0-base` is `0.3.0-base` to OpenUPM while the version this workflow writes is
-`0.3.0`, so every release needs a second, plain tag.
+(`E811 package.json version does not match release version`). A release is therefore
+tagged with the version itself, and the version commit this workflow pushes carries the
+same `package.json`, so there is nothing to reconcile.
 
-The push step creates it on the commit that carries the version, so nothing has to be
-done by hand: the release keeps its `-base` name and `0.3.0` points at the same commit
-with the right `package.json`. A repository that already has releases has the same tag
-available under its `-base` name — creating `0.3.0` at that commit is all the old builds
-need.
+A base release — `1.2.3-base`, the tag a person creates and the one the repository's
+tag Ruleset guards — is published to PeroNPM alone and announced. So is a variant
+(`1.2.3-android-variant`), except that a variant is not announced: it is the same source
+built for another target. Only a tag with no suffix at all reaches npmjs.org and
+nuget.org, whose version numbers cannot be taken back.
+
+For OpenUPM, tell it to ignore the tags it cannot read with `gitTagIgnore: '-base$'` in
+the package's metadata, and give it the version tag: `1.2.3` on the commit that carries
+`package.json` `1.2.3` (the version commit this workflow pushes).
 
 ## What goes where
 
@@ -216,8 +220,9 @@ different versions of itself:
 
 | Tag | Version |
 | --- | --- |
+| `0.3.0` | `0.3.0` |
+| `v0.3.0` | `0.3.0` |
 | `0.3.0-base` | `0.3.0` |
-| `v0.3.0-base` | `0.3.0` |
 | `0.3.0-android-variant` | `0.3.0-android-variant` |
 | anything else | the run stops, naming the tag |
 
@@ -228,7 +233,7 @@ That version is then written into every place the repository repeats it:
    at all is refused: it would name the package `.com.prpr.accessking`.)
 2. `README.md` — only the lines that name this package: the `"pkg": "x.y.z"` of an
    install snippet becomes the version, and a `git#…` reference becomes the tag
-   itself, because `0.3.0` and `0.3.0-base` are not the same string to a consumer.
+   itself, because `0.3.0` and `v0.3.0` are not the same string to a consumer.
    Other packages' versions on the same page are left alone. Both READMEs are
    looked at — the package's own, which npm shows, and the repository's, which is
    where a package whose manifest lives in a subdirectory usually writes its
@@ -267,7 +272,7 @@ and `Core/…csproj` in the same commit cannot run from inside `Unity/`.
 | Report the identity this job publishes under (`external`) | Decodes the OIDC claims and prints the repository and both workflow refs, so a trusted publisher can be filled in from a run rather than guessed. |
 | Publish to npmjs (`external`) | Checks that npm is 11.5.1 or newer (raising it if not), warns about `repository.url`, then `npm publish <tarball>` three times at most. No credential is passed in. |
 | NuGet login, Push the NuGet packages (`external`) | `NuGet/login` exchanges the job's identity for an API key valid for one hour and one use, then `dotnet nuget push --skip-duplicate`, three attempts each. |
-| Send Feishu notification (`notify`) | Only for a `-base` tag, and only when every channel that ran came out green. |
+| Send Feishu notification (`notify`) | For a release (`0.3.0`) and a base release (`0.3.0-base`); never for a variant. Only when every channel that ran came out green. |
 
 Each `publish` step is gated on its own channel flag from the resolver; the
 `external` steps are gated on the flags the `publish` job reports. A channel that is
@@ -315,7 +320,7 @@ same pre-bump commit while the branch and the registries have already moved on.
 | Secret | Required | Description |
 | --- | --- | --- |
 | `APP_ID`, `APP_PK` | yes | The `PeroToolsBot` GitHub App, used for the token that clones this repository and pushes the version commit. |
-| `FEISHU_WEBHOOK`, `FEISHU_SECRET` | yes | The notification for `-base` releases. |
+| `FEISHU_WEBHOOK`, `FEISHU_SECRET` | yes | The notification for releases (a version with no suffix). |
 | `NPM_URL` | only for `peronpm` | The PeroNPM registry URL. |
 | `NPMJS_BOOTSTRAP_TOKEN` | no | A granular npm token, used only to create a package that does not exist on npmjs yet. Delete it after that release. |
 

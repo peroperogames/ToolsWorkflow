@@ -237,7 +237,7 @@ jobs:
           echo "package: $PACKAGE_NAME, version: $NEW_VERSION, tag: $CI_COMMIT_TAG"
           # The npm/OpenUPM snippets want the published version; a `git#…` URL wants
           # the tag, which is the ref a consumer can resolve — `0.3.0` and
-          # `0.3.0-base` are not the same string.
+          # `0.3.0+002` are not the same string.
           candidates=("$PACKAGE_DIR/README.md")
           if [ "$PACKAGE_DIR" != "." ]; then candidates+=(README.md); fi
           for readme in "${candidates[@]}"; do
@@ -412,19 +412,6 @@ jobs:
            git tag -f "$TAG"
            git push -f origin "$TAG"
 
-           # OpenUPM builds a package from a tag and takes the tag as the version, so
-           # a release tagged `0.3.0-base` is `0.3.0-base` to OpenUPM while the
-           # package.json this release just wrote says `0.3.0`: every build fails with
-           # E811 "package.json version does not match release version". The release
-           # keeps its own name; this is the tag OpenUPM reads, on the commit that
-           # carries the version.
-           NEW_VERSION=$(grep '"version"' "$PACKAGE_DIR/package.json" | head -1 \
-             | sed 's/.*"version": *"\([^"]*\)".*/\1/')
-           if [ -n "$NEW_VERSION" ] && [ "$NEW_VERSION" != "$TAG" ]; then
-             echo "tagging $NEW_VERSION for OpenUPM (the release itself is $TAG)"
-             git tag -f "$NEW_VERSION"
-             git push -f origin "$NEW_VERSION"
-           fi
 
       # npm shows the README that is inside the published tarball, and the tarball is
       # the package directory — so a package whose README lives at the repository
@@ -751,15 +738,18 @@ jobs:
             done
           done
 
-  # Only after every channel that ran came out green, and only for a `-base` tag:
+  # Only after every channel that ran came out green, and only for a release tag:
   # the variants are not releases anyone announces.
   notify:
     needs: [publish, external]
     if: >-
+      # A release (`1.2.3`) and a base release (`1.2.3-base`) are announced; a
+      # variant (`1.2.3-android-variant`) is a build of the same source for a
+      # different target and is published to PeroNPM alone, unannounced.
       ${{ !cancelled()
           && needs.publish.result == 'success'
           && (needs.external.result == 'success' || needs.external.result == 'skipped')
-          && endsWith(github.ref_name, '-base') }}
+          && (!contains(github.ref_name, '-') || endsWith(github.ref_name, '-base')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
