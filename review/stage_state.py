@@ -62,6 +62,7 @@ class CheckState:
     unity_sln: Optional[str] = None
     unity_package_projects: List[str] = field(default_factory=list)
     static_posted: int = 0
+    static_comments: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def extra_context(self) -> str:
@@ -118,6 +119,7 @@ class CheckState:
                 "package_projects": list(self.unity_package_projects),
             },
             "static_posted": self.static_posted,
+            "static_comments": list(self.static_comments),
         }
 
     @classmethod
@@ -138,6 +140,9 @@ class CheckState:
                 str(p) for p in (unity.get("package_projects") or []) if p
             ],
             static_posted=int(data.get("static_posted") or 0),
+            static_comments=[
+                dict(c) for c in (data.get("static_comments") or []) if isinstance(c, dict)
+            ],
         )
 
 
