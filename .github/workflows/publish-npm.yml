@@ -290,7 +290,6 @@ jobs:
       # only ever found one of them.
       - name: Update the assembly version properties
         working-directory: ${{ github.workspace }}
-        env:
         run: |
           NEW_VERSION=$(grep '"version"' "$PACKAGE_DIR/package.json" | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
           # The list of files it changed, which the commit step stages. The
@@ -451,7 +450,6 @@ jobs:
       # never part of the commit, and only when the package has no README of its own.
       - name: Give the package the repository's README
         working-directory: ${{ github.workspace }}
-        env:
         run: |
           if [ "$PACKAGE_DIR" = "." ]; then
             echo "The package is the repository root; its README is already inside it."
