@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-11-04.unity.149"
+VERSION = "2026-11-04.unity.150"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -1893,6 +1893,23 @@ def clear_leftover_pending_reviews(
     return removed
 
 
+def review_summary_body(language: str, count: int) -> str:
+    """The line a review carries above its inline comments.
+
+    A review has two kinds of text: its own body — the box at the top, where a
+    person writes what they made of the change — and the body of each comment
+    anchored to a line. Findings were filling the second and leaving the first
+    empty, so the review arrived as a card with nothing to read on it.
+    """
+    chinese = "chinese" in resolve_language(language).lower()
+    if chinese:
+        return f"本审查发现 {count} 处问题，行内评论见下。"
+    return (
+        f"This review found {count} issue{'s' if count != 1 else ''}; "
+        "they are inline below."
+    )
+
+
 def buffer_inline_comments(
     ctx: "ToolContext", comments: List[Dict[str, Any]]
 ) -> int:
@@ -1926,6 +1943,8 @@ def post_buffered_review(ctx: "ToolContext", body: str = "") -> int:
     if not ctx.heads:
         log("Warning: no commit id available; skipping the comments.")
         return 0
+    if not body:
+        body = review_summary_body(getattr(ctx.config, "language", ""), len(comments))
     try:
         review = ctx.gh.post_review(
             ctx.owner, ctx.repo, ctx.number, body, event="COMMENT", comments=comments
