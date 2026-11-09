@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-11-04.unity.146"
+VERSION = "2026-11-04.unity.147"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -337,6 +337,8 @@ CODE_CHANGE_SYSTEM_PROMPT = (
     "- Only include files that actually change.\n"
     "- Preserve the existing code style, conventions, and imports.\n"
     "- Make minimal, focused changes that address the instruction.\n"
+    "- A long file arrives as the lines the pull request changed, each numbered "
+    "with its line in the file: quote `find` from those lines.\n"
     "- Return ONLY the JSON, no markdown fences, no extra text."
 )
 
@@ -3099,10 +3101,33 @@ def _reply_in_thread(
         log(f"Warning: could not post the resolution note on {path}: {exc}")
 
 
+LARGE_FILE_TOKENS = 8_000
+
+
+def _code_change_block(fc: Dict[str, str], patch: str) -> str:
+    """One file as the model should read it: all of it, or just the change.
+
+    A vendored file of six thousand lines is where an instruction goes to die: it
+    costs more than the whole review to send, and the lines the model needs are
+    the ones the pull request changed. Those lines are shown with their numbers in
+    the file, so a `find` copied out of them is a `find` that matches.
+    """
+    path = fc.get("path") or "?"
+    content = fc.get("content") or ""
+    if patch and estimate_tokens(content) > LARGE_FILE_TOKENS:
+        return (
+            f"The pull request changed the lines below in {path}. The file is too "
+            "long to send whole, so they are all that is shown; each line carries "
+            f"its number in the file.\n```diff\n{annotate_diff(patch)}\n```"
+        )
+    return f"```\n{content}\n```"
+
+
 def _code_change_context(
     file_contents: List[Dict[str, str]],
     instruction: str,
     max_tokens_per_chunk: int,
+    patches: Optional[Dict[str, str]] = None,
 ) -> Tuple[str, List[str]]:
     """The files to show the model, and the ones that did not fit.
 
@@ -3113,7 +3138,12 @@ def _code_change_context(
     model has to reply with complete file contents, so a bigger input buys a
     bigger output. Files the instruction names come first, then the rest in the
     order they arrived, until the budget is spent.
+
+    ``patches`` is what the pull request changed per file, used only for the files
+    too large to send whole. The edit is still applied to the file as read — this
+    decides what is read, not what is written.
     """
+    patches = patches or {}
     budget = max_tokens_per_chunk
     named: List[Dict[str, str]] = []
     rest: List[Dict[str, str]] = []
@@ -3125,21 +3155,20 @@ def _code_change_context(
         else:
             rest.append(fc)
 
-    chosen: List[Dict[str, str]] = []
+    chosen: List[str] = []
     omitted: List[str] = []
     used = 0
     for fc in named + rest:
-        size = estimate_tokens(fc.get("content") or "") + estimate_tokens(fc.get("path") or "") + 8
+        path = fc.get("path") or "?"
+        block = _code_change_block(fc, patches.get(path, ""))
+        size = estimate_tokens(block) + estimate_tokens(path) + 8
         if chosen and used + size > budget:
-            omitted.append(fc.get("path") or "?")
+            omitted.append(path)
             continue
-        chosen.append(fc)
+        chosen.append(f"### {path}\n{block}")
         used += size
 
-    text = "\n\n".join(
-        f"### {fc['path']}\n```\n{fc.get('content') or ''}\n```" for fc in chosen
-    )
-    return text, omitted
+    return "\n\n".join(chosen), omitted
 
 
 def _locate_ignoring_whitespace(
@@ -3321,9 +3350,14 @@ def handle_code_change(
         gh.post_comment(owner, repo, number, f"@{author} 无法读取文件内容，请检查分支权限。")
         return 0
 
+    patches = {
+        f.get("filename") or "": f.get("patch") or ""
+        for f in files
+        if f.get("patch")
+    }
     log("Generating code changes...")
     files_text, omitted = _code_change_context(
-        file_contents, instruction, max_tokens_per_chunk
+        file_contents, instruction, max_tokens_per_chunk, patches
     )
     if omitted:
         log(
