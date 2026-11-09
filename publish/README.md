@@ -71,6 +71,23 @@ to NuGet and nothing else. Each channel owns its prerequisites, so a caller that
 uses one need not supply the others'; what a channel is missing is reported by
 `resolve_channels.sh`, by name, before anything is built.
 
+## When a release does not start at all
+
+A reusable workflow that GitHub cannot load produces no jobs and one sentence — "This run
+likely failed because of a workflow file issue" — which names neither the file nor the
+line. Asking the workflow to load itself says the rest: add a `workflow_dispatch` job that
+`uses: ./.github/workflows/publish-npm.yml` in the workflow's own repository and dispatch
+it, and GitHub prints the parse errors before anything runs:
+
+```
+(Line: 293, Col: 13): Unexpected value ''
+(Line: 454, Col: 13): Unexpected value ''
+```
+
+That was an `env:` left with nothing under it. The other load-time mistake seen here was a
+`#` line inside an `if: >-` block, where YAML keeps the `#` as part of the expression.
+`check_publish_workflow.py` refuses both.
+
 ## What the caller does not have to say
 
 Three things a caller used to name are answered by the repository, because they are the
