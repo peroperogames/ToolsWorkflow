@@ -407,7 +407,8 @@ def parse_nunit_skipped(path: Path) -> List[str]:
 TEST_SUMMARY = re.compile(
     r"^(?P<outcome>Passed|Failed)!\s+-\s+Failed:\s*(?P<failed>\d+),\s+"
     r"Passed:\s*(?P<passed>\d+),\s+Skipped:\s*(?P<skipped>\d+),\s+"
-    r"Total:\s*(?P<total>\d+).*?(?P<assembly>[\w.\-]+\.dll)",
+    r"Total:\s*(?P<total>\d+),\s+Duration:\s*(?P<duration>[\d.]+)\s*(?P<unit>ms|s|m)\s*"
+    r"-\s+(?P<assembly>[\w.\-]+\.dll)",
     re.M,
 )
 
@@ -423,6 +424,9 @@ def parse_dotnet_test_summary(text: str) -> List[Dict[str, Any]]:
     """
     out: List[Dict[str, Any]] = []
     for match in TEST_SUMMARY.finditer(text or ""):
+        value = float(match.group("duration"))
+        unit = match.group("unit")
+        seconds = value / 1000.0 if unit == "ms" else (value * 60.0 if unit == "m" else value)
         out.append(
             {
                 "outcome": match.group("outcome"),
@@ -430,6 +434,7 @@ def parse_dotnet_test_summary(text: str) -> List[Dict[str, Any]]:
                 "passed": int(match.group("passed")),
                 "skipped": int(match.group("skipped")),
                 "total": int(match.group("total")),
+                "duration": seconds,
                 "assembly": match.group("assembly"),
             }
         )

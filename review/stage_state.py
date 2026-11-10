@@ -43,7 +43,7 @@ def build_status_context(unity_summary: str, dotnet_summary: str) -> str:
     spelling of it: the checks stage puts it in the state, and a review that has
     to run the gates itself builds the same string from the same parts.
     """
-    status = "\n".join(s for s in (unity_summary, dotnet_summary) if s)
+    status = "\n\n".join(s for s in (unity_summary, dotnet_summary) if s)
     return f"{BUILD_STATUS_HEADER}\n\n{status}" if status else ""
 
 

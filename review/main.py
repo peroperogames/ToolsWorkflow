@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-11-04.unity.153"
+VERSION = "2026-11-04.unity.154"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -2401,19 +2401,22 @@ def rebuild_comment_body(
     talking about have to be reachable from it — and by the time the review step
     writes it, the upload has already happened, so the link is the artifact's own.
     """
-    lines = ["🔧 **重新构建与测试**", f"仓库类型：{kind_line}", ""]
+    # Blocks are separated by a blank line, because a line directly under a
+    # markdown table is a row of that table: the .NET verdict and the ReSharper
+    # line were rendering inside the Unity test table.
+    blocks = [f"🔧 **重新构建与测试**\n仓库类型：{kind_line}"]
     if extra_context:
         # The section as the model would see it, minus its heading: the same
         # words, from the same place.
-        lines.append(extra_context.split("\n\n", 1)[-1])
+        blocks.append(extra_context.split("\n\n", 1)[-1])
     else:
-        lines.append("没有构建/测试步骤运行——该仓库没有，或工具链不可用，详见日志。")
+        blocks.append("没有构建/测试步骤运行——该仓库没有，或工具链不可用，详见日志。")
     if static_posted:
-        lines.append(f"ReSharper：新提出 {static_posted} 条行内意见。")
+        blocks.append(f"ReSharper：新提出 {static_posted} 条行内意见。")
     link = report_link_line()
     if link:
-        lines.append(link)
-    return "\n".join(lines)
+        blocks.append(link)
+    return "\n\n".join(blocks)
 
 
 def _open_thread_briefs(

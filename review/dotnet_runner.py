@@ -180,6 +180,9 @@ class DotnetResult:
         # `test_failures` is what the report spelled out by name, and a report can
         # be thinner than the run: see `parse_dotnet_test_summary`.
         self.failed_total = 0
+        # One row per test assembly, as the run printed it: the only per-target
+        # numbers a solution's run has, since the projects share one report file.
+        self.assemblies: List[Dict[str, Any]] = []
 
     @property
     def ok(self) -> bool:
@@ -201,13 +204,50 @@ class DotnetResult:
                     "⚠️ .NET: 编译通过；单元测试没有产出报告"
                     f"（dotnet test 退出码 {self._exit_code()}），本次未真正运行。"
                 )
-            return "✅ .NET: 编译通过" + ("，单元测试通过。" if self.tested else "。")
+            if self.tested and self.assemblies and not self._ran_any_case():
+                return "⚠️ .NET: 编译通过；本次没有运行用例。" + self._assembly_table()
+            return (
+                "✅ .NET: 编译通过"
+                + ("，单元测试通过。" if self.tested else "。")
+                + self._assembly_table()
+            )
         parts = []
         if not self.compiled:
             parts.append(self._compile_sentence_zh())
         if not self.tests_ok:
             parts.append(f"{self._failed_count()} 个单元测试失败")
-        return "🔴 .NET: " + "；".join(parts) + "。"
+        return "🔴 .NET: " + "；".join(parts) + "。" + self._assembly_table()
+
+    def _assembly_table(self) -> str:
+        """Per-assembly totals as a markdown table, or "" when none were printed."""
+        if not self.assemblies:
+            return ""
+        lines = [
+            "",
+            "",
+            "| 测试程序集 | 用例 | 通过 | 失败 | 跳过 | 耗时 |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+        for row in self.assemblies:
+            name = row.get("assembly") or "?"
+            if name.endswith(".dll"):
+                name = name[: -len(".dll")]
+            seconds = row.get("duration")
+            took = (
+                f"{float(seconds):.1f}s"
+                if isinstance(seconds, (int, float)) and seconds < 60
+                else (f"{int(seconds) // 60}m {int(seconds) % 60}s"
+                      if isinstance(seconds, (int, float)) else "—")
+            )
+            lines.append(
+                f"| {name} | {row.get('total', 0)} | {row.get('passed', 0)} "
+                f"| {row.get('failed', 0)} | {row.get('skipped', 0)} | {took} |"
+            )
+        return "\n".join(lines)
+
+    def _ran_any_case(self) -> bool:
+        """Whether the run actually had a case to report, per assembly."""
+        return any(row.get("total") for row in self.assemblies)
 
     def _failed_count(self) -> int:
         """Failures to report: at least what the run printed, if more than the file."""
@@ -389,6 +429,7 @@ def analyze(clone_dir: str, solution: str, report_dir: Path) -> DotnetResult:
             result.test_failures = build_log.parse_trx_failures(trx)
         result.tests_reported = trx.exists() or bool(summaries)
         result.failed_total = declared_failed
+        result.assemblies = summaries
         if result.tests_reported:
             # The exit code is part of the answer: a run whose tests failed exits
             # non-zero even when the surviving report belongs to a project that

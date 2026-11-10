@@ -2055,6 +2055,10 @@ class UnityResult:
                 )
             if not self.tests_reported:
                 return "⚠️ Unity: 编译通过；单元测试没有产出报告，本次未真正运行。"
+            if self.platform_runs and not any(
+                (run.get("summary") or {}).get("total") for run in self.platform_runs
+            ):
+                return "⚠️ Unity: 编译通过；本次没有运行用例。" + self._platform_table()
             return "✅ Unity: 编译通过，单元测试通过。" + self._platform_table()
         parts = []
         if not self.compiled:
