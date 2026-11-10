@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-11-04.unity.151"
+VERSION = "2026-11-04.unity.152"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3664,6 +3664,9 @@ def handle_review_request(
         gates = resolve_checks(
             gh, owner, repo, number, pr, files, config, with_static=with_static
         )
+        # The build and test result is what the review says above its comments —
+        # the paragraph a person would write there, already written by the run.
+        review_body = gates.extra_context
         extra_context = gates.extra_context
         if not with_static:
             extra_context = _no_static_context(extra_context)
@@ -3676,6 +3679,7 @@ def handle_review_request(
             "approval is off because nothing was verified."
         )
         extra_context = NO_GATES_STATUS
+        review_body = ""
         may_approve = False
         block_reason = "this review ran without the build and the tests"
         why_not = "This review ran without the build and the tests"
@@ -3702,6 +3706,8 @@ def handle_review_request(
     ctx = run_agent_review(
         ai, gh, owner, repo, number, pr, files, system_prompt, session_records, turns,
         config, block_approve=not may_approve, block_reason=block_reason,
+        review_body=review_body,
+        carried_comments=_read_static_comments(owner, repo, number, pr),
     )
     if ctx is not None:
         settle_after_review(
