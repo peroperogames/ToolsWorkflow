@@ -403,6 +403,39 @@ def parse_nunit_skipped(path: Path) -> List[str]:
     return out
 
 
+# `Passed!  - Failed:     0, Passed:  79, Skipped: 0, Total: 79, ... - X.dll (net10.0)`
+TEST_SUMMARY = re.compile(
+    r"^(?P<outcome>Passed|Failed)!\s+-\s+Failed:\s*(?P<failed>\d+),\s+"
+    r"Passed:\s*(?P<passed>\d+),\s+Skipped:\s*(?P<skipped>\d+),\s+"
+    r"Total:\s*(?P<total>\d+).*?(?P<assembly>[\w.\-]+\.dll)",
+    re.M,
+)
+
+
+def parse_dotnet_test_summary(text: str) -> List[Dict[str, Any]]:
+    """One row per test assembly from a ``dotnet test`` run's output.
+
+    This is the only place a solution's totals all survive. Every test project in
+    a solution writes its TRX to the file named on the command line, so the last
+    one to finish overwrites the rest — RhythmAce-Neo PR #112 reported "no failing
+    case" for a run whose ``Infrastructure.Desktop`` tests had 9 failures, because
+    the TRX left behind belonged to a project that passed.
+    """
+    out: List[Dict[str, Any]] = []
+    for match in TEST_SUMMARY.finditer(text or ""):
+        out.append(
+            {
+                "outcome": match.group("outcome"),
+                "failed": int(match.group("failed")),
+                "passed": int(match.group("passed")),
+                "skipped": int(match.group("skipped")),
+                "total": int(match.group("total")),
+                "assembly": match.group("assembly"),
+            }
+        )
+    return out
+
+
 def parse_trx_failures(path: Path) -> List[Dict[str, Any]]:
     """Failing test cases from a VSTest TRX report (``dotnet test``).
 

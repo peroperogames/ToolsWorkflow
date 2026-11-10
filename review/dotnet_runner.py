@@ -176,6 +176,10 @@ class DotnetResult:
         self.build_timed_out = False
         self.compile_errors: List[Dict[str, Any]] = []
         self.test_failures: List[Dict[str, Any]] = []
+        # How many cases the run itself said failed, across every test assembly.
+        # `test_failures` is what the report spelled out by name, and a report can
+        # be thinner than the run: see `parse_dotnet_test_summary`.
+        self.failed_total = 0
 
     @property
     def ok(self) -> bool:
@@ -202,8 +206,12 @@ class DotnetResult:
         if not self.compiled:
             parts.append(self._compile_sentence_zh())
         if not self.tests_ok:
-            parts.append(f"{len(self.test_failures)} 个单元测试失败")
+            parts.append(f"{self._failed_count()} 个单元测试失败")
         return "🔴 .NET: " + "；".join(parts) + "。"
+
+    def _failed_count(self) -> int:
+        """Failures to report: at least what the run printed, if more than the file."""
+        return max(len(self.test_failures), self.failed_total)
 
     def _exit_code(self) -> Any:
         """The test run's exit code, or ``"未知"`` if the run has no record."""
@@ -274,7 +282,7 @@ class DotnetResult:
             else:
                 parts.append(f"{len(self.compile_errors)} compile error(s)")
         if not self.tests_ok:
-            parts.append(f"{len(self.test_failures)} test failure(s)")
+            parts.append(f"{self._failed_count()} test failure(s)")
         return ".NET: " + ", ".join(parts) + "."
 
 
@@ -365,15 +373,35 @@ def analyze(clone_dir: str, solution: str, report_dir: Path) -> DotnetResult:
         took = build_log.format_duration(time.monotonic() - started)
         result.tested = True
         result.test_run = {"exit": rc, "timed_out": timed_out, "timeout": DOTNET_TIMEOUT}
+        # What the run said about itself, per assembly, and what the report it
+        # left behind says. A solution's projects share one report file, so the
+        # report can describe only the project that finished last — the totals
+        # from the output are then the only account of the others.
+        summaries = build_log.parse_dotnet_test_summary(text)
+        declared_failed = sum(s["failed"] for s in summaries)
+        failing = [s for s in summaries if s["failed"]]
+        for s in failing:
+            log(
+                f"  {s['assembly']}: {s['failed']} failed, {s['passed']} passed, "
+                f"{s['total']} total."
+            )
         if trx.exists():
             result.test_failures = build_log.parse_trx_failures(trx)
-            result.tests_ok = not result.test_failures
-            result.tests_reported = True
-            if result.test_failures:
-                log(f".NET tests: {len(result.test_failures)} failing case(s) in {took}.")
+        result.tests_reported = trx.exists() or bool(summaries)
+        result.failed_total = declared_failed
+        if result.tests_reported:
+            # The exit code is part of the answer: a run whose tests failed exits
+            # non-zero even when the surviving report belongs to a project that
+            # passed, which is how a solution's 9 failures went unreported.
+            result.tests_ok = (
+                not result.test_failures and not declared_failed and rc == 0
+            )
+            if not result.tests_ok:
+                log(f".NET tests: {result._failed_count()} failing case(s) in {took}.")
                 for line in build_log.format_test_failures(result.test_failures):
                     log(f"  {line}")
-                log(f"  report: {trx}")
+                if trx.exists():
+                    log(f"  report: {trx}")
             else:
                 log(f".NET tests finished in {took} with no failing case.")
         else:
