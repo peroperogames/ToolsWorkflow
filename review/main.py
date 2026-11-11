@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-11-04.unity.154"
+VERSION = "2026-11-04.unity.155"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -2565,6 +2565,7 @@ def handle_settle_command(ctx: CommandContext, command: Command) -> int:
         diff_files=diff_files,
         changed_paths=changed_paths,
         language=ctx.config.language,
+        reply=False,
     )
     after = unresolved_bot_thread_count(ctx.gh, ctx.owner, ctx.repo, ctx.number)
     result = settle_comment_body(before, after, outcome)
@@ -2604,13 +2605,39 @@ def settle_comment_body(before: int, after: int, outcome: "SettleOutcome") -> st
     counts = f"未解决线程 {before} → {after}，" if before >= 0 else f"未解决线程 {after}，"
     if after == 0:
         if outcome.approved:
-            return counts + "已 approve ✅"
-        return counts + "approve 未提交（该提交此前已批准过，或没有权限）。"
-    if outcome.unknown:
-        return counts + "判定失败，详见 workflow 日志。"
-    # Just the count: which thread stayed open is visible on the pull request, and
-    # why is in the run log. Nothing is posted into a thread that stays open.
-    return counts + "暂不 approve。"
+            head = counts + "已 approve ✅"
+        else:
+            head = counts + "approve 未提交（该提交此前已批准过，或没有权限）。"
+    elif outcome.unknown:
+        head = counts + "判定失败，详见 workflow 日志。"
+    else:
+        # Which thread stayed open is visible on the pull request, and why it
+        # stayed open is in the run log. Nothing is posted into that thread.
+        head = counts + "暂不 approve。"
+    return head + _closed_lines(outcome)
+
+
+def _closed_lines(outcome: "SettleOutcome") -> str:
+    """The threads this pass closed, and the sentence that closed each one.
+
+    They used to be posted as a reply inside every thread — one notification
+    each, so a settle that retired five threads arrived as five emails and a
+    sixth saying how many were left. The same sentences fit in the one message
+    the settle already posts.
+    """
+    if not outcome.closed:
+        return ""
+    shown = outcome.closed[:10]
+    lines = ["", "", f"已关闭 {len(outcome.closed)} 条："]
+    for item in shown:
+        where = item.get("path") or "?"
+        line = item.get("line")
+        label = "`%s:%s`" % (where, line) if line else "`%s`" % where
+        reason = " ".join((item.get("reason") or "").split())
+        lines.append("- %s — %s" % (label, reason) if reason else "- %s" % label)
+    if len(outcome.closed) > len(shown):
+        lines.append("- …另有 %d 条" % (len(outcome.closed) - len(shown)))
+    return "\n".join(lines)
 
 
 # Every command the bot answers to. A command never reaches the intent
@@ -2821,6 +2848,7 @@ def settle_threads_and_approve(
     skip_ids: Optional[List[int]] = None,
     language: str = "",
     changed_paths: Optional["set[str]"] = None,
+    reply: bool = True,
 ) -> SettleOutcome:
     """Resolve the threads that are done with, then approve if none are left.
 
@@ -2843,6 +2871,7 @@ def settle_threads_and_approve(
         ai, gh, owner, repo, number, pr, "perotoolsbot[bot]",
         diff_files=diff_files, conversation=conversation,
         skip_ids=skip_ids, language=language, changed_paths=changed_paths,
+        reply=reply,
     )
 
     if not allow_approve:
@@ -2956,6 +2985,9 @@ class SettleOutcome:
 
     resolved: int = 0
     open: List[Dict[str, Any]] = field(default_factory=list)
+    # Threads this pass closed, with the decider's sentence: one list, so a settle
+    # reports all of them in one place instead of one notification per thread.
+    closed: List[Dict[str, Any]] = field(default_factory=list)
     approved: bool = False
     unknown: bool = False
 
@@ -2973,6 +3005,7 @@ def decide_resolved_threads(
     skip_ids: Optional[List[int]] = None,
     language: str = "",
     changed_paths: Optional["set[str]"] = None,
+    reply: bool = True,
 ) -> SettleOutcome:
     """Resolve the review threads that have been settled.
 
@@ -3128,7 +3161,13 @@ def decide_resolved_threads(
             log(f"  {c['path']}: already resolved by another run; no note.")
             continue
         note = _resolution_note(wanted.get(tid, ""), language)
-        _reply_in_thread(gh, owner, repo, number, c.get("comment_id"), note, c["path"])
+        outcome.closed.append(
+            {"path": c.get("path"), "line": c.get("line"), "reason": note}
+        )
+        if reply:
+            _reply_in_thread(
+                gh, owner, repo, number, c.get("comment_id"), note, c["path"]
+            )
         try:
             gh.resolve_review_thread(c["id"])
             resolved += 1
