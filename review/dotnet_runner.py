@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -42,24 +43,104 @@ def log(message: str) -> None:
     print(message, file=sys.stderr)
 
 
+# Where an SDK can be besides ``PATH``. A runner can hold two: the distribution's
+# one in ``/usr/bin`` and a newer one the user installed under ``~/.dotnet``, which
+# is on the interactive shell's ``PATH`` but not on a job step's. PeroError PR #1
+# is the case: ``net11.0`` there, ``/usr/bin/dotnet`` here, and NETSDK1045.
+DOTNET_DIRS = ("~/.dotnet", "/usr/share/dotnet", "/usr/lib/dotnet")
+
+_PICKED_DOTNET: List[Optional[str]] = []
+
+
+def _version_tuple(text: str) -> Tuple[int, ...]:
+    """``11.0.100`` as ``(11, 0, 100)``, ignoring any prerelease suffix."""
+    first = ""
+    for line in (text or "").strip().splitlines():
+        if line.strip():
+            first = line.strip()
+            break
+    parts: List[int] = []
+    for piece in first.split("-")[0].split("."):
+        parts.append(int(piece) if piece.isdigit() else 0)
+    return tuple(parts)
+
+
+def pick_newest_dotnet(
+    candidates: List[str], version_of: "Any"
+) -> "Tuple[Optional[str], List[Tuple[str, Tuple[int, ...]]]]":
+    """The newest of ``candidates`` and every version found, for the log.
+
+    A solution that targets a framework needs an SDK that supports it, and the one
+    first on ``PATH`` is not necessarily the newest: the distribution ships one and
+    the user installs another. Choosing by version, and saying which were seen,
+    makes "the SDK here is too old" a fact about the runner rather than a mystery.
+    """
+    seen: List[Tuple[str, Tuple[int, ...]]] = []
+    for candidate in candidates:
+        seen.append((candidate, version_of(candidate)))
+    usable = [item for item in seen if item[1]]
+    if not usable:
+        return (candidates[0] if candidates else None), seen
+    best = max(usable, key=lambda item: item[1])
+    return best[0], seen
+
+
 def dotnet_path() -> Optional[str]:
     """Path to the .NET SDK CLI, or None when it is not installed.
 
     Reported once as a fact, like the Unity CLI and ``jb``: which one was used is
     the first thing worth knowing when a build behaves differently here than it
-    does by hand. Unlike those two it has no fallback directories — the SDK
-    installs itself onto ``PATH``.
+    does by hand. The newest SDK the runner can reach is chosen, because a job
+    step's ``PATH`` is not the interactive shell's and a repository is built with
+    whatever is newest rather than whatever ``/usr/bin`` happens to hold.
     """
-    return tool_path.find(
-        "dotnet",
-        (),
-        override_env="DOTNET_PATH",
-        label=".NET SDK",
-        hint=(
-            "Install it for the user the runner runs as. A repository that ships "
+    override = os.environ.get("DOTNET_PATH", "").strip()
+    if override:
+        found = shutil.which(override) or (override if os.path.exists(override) else None)
+        if found:
+            log(f".NET SDK: {found} (DOTNET_PATH)")
+            return found
+        log(f"DOTNET_PATH set but not found: {override}")
+        return None
+
+    if _PICKED_DOTNET:
+        return _PICKED_DOTNET[0]
+
+    candidates: List[str] = []
+    on_path = shutil.which("dotnet")
+    if on_path:
+        candidates.append(on_path)
+    for directory in DOTNET_DIRS:
+        candidate = os.path.normpath(os.path.join(os.path.expanduser(directory), "dotnet"))
+        if (
+            os.path.isfile(candidate)
+            and os.access(candidate, os.X_OK)
+            and candidate not in candidates
+        ):
+            candidates.append(candidate)
+    if not candidates:
+        log(
+            ".NET SDK ('dotnet') was not found. Checked PATH"
+            + (f" and: {', '.join(DOTNET_DIRS)}." if DOTNET_DIRS else ".")
+            + " Install it for the user the runner runs as. A repository that ships "
             "its own solution is not built or tested without it."
-        ),
-    )
+        )
+        return None
+
+    def version_of(path: str) -> Tuple[int, ...]:
+        try:
+            rc, text, _ = _run([path, "--version"], os.getcwd(), 60)
+        except Exception:  # noqa: BLE001 - an unreadable SDK is just not a candidate
+            return ()
+        return _version_tuple(text) if rc == 0 else ()
+
+    chosen, seen = pick_newest_dotnet(candidates, version_of)
+    for path, version in seen:
+        said = ".".join(str(p) for p in version) if version else "unknown"
+        log(f".NET SDK candidate: {path} (version {said})")
+    log(f".NET SDK: {chosen}")
+    _PICKED_DOTNET.append(chosen)
+    return chosen
 
 
 def solution_projects(solution: str) -> List[Path]:
