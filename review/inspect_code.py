@@ -138,7 +138,7 @@ def inspect_args() -> List[str]:
     win, which fails on a broken preview.
     """
     args: List[str] = []
-    sdk = os.environ.get("INSPECT_DOTNET_SDK", "").strip() or _dotnet_sdk_of_this_run()
+    sdk = os.environ.get("INSPECT_DOTNET_SDK", "").strip()
     if sdk:
         args.append(f"--dotnetcoresdk={sdk}")
     if not _env_bool("INSPECT_BUILD"):
@@ -147,23 +147,6 @@ def inspect_args() -> List[str]:
         "--properties:TreatWarningsAsErrors=false",
         "--properties:MSBuildTreatWarningsAsErrors=false",
     ]
-
-
-def _dotnet_sdk_of_this_run() -> str:
-    """The SDK version the build used, so the analysis evaluates the same projects.
-
-    ``jb inspectcode`` runs MSBuild itself. Left to choose, it can pick a different
-    SDK than the build did — a different install, a different idea of which
-    projects exist — and a half-resolved project model produces findings about code
-    that is not there: PeroError PR #1 reported a ``void`` method as "return value
-    is never used" because the ``net11.0`` project had not resolved at all.
-    """
-    try:
-        import dotnet_runner
-
-        return dotnet_runner.sdk_version()
-    except Exception:  # noqa: BLE001 - no hint is better than a wrong one
-        return ""
 
 
 def log(message: str) -> None:
