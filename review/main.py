@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-11-04.unity.158"
+VERSION = "2026-11-04.unity.161"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -1424,6 +1424,18 @@ RESOLVE_DECIDER_PROMPT = (
     "did not make — AccessKing PR #3 has a note reading 「作者认为该警告无意义（'??' "
     "左操作数永不为 null 属于防御性写法的误报），不处理。」 in reply to an author who "
     "wrote only \"non sense.\"\n"
+    "- A decision the author already made applies to the same rule elsewhere. If the "
+    "discussion shows they declined a finding — `ignore`, `non sense`, `按现状保留` — "
+    "then every other thread raising that SAME rule (the same naming rule, the same "
+    "inspection) on this pull request is settled the same way, and its reason says "
+    "so: quote their words once and say the code stays unchanged. Leaving one of "
+    "them open asks the author to argue the same point twice, which is what happened "
+    "on PeroError PR #1: `NestedEnumReportsPERR009Test` was ignored in its thread "
+    "while `NameConflictReportsPERR008Test`, the identical naming rule, stayed "
+    "open.\n"
+    "- Two findings are the same rule when the inspection and its subject kind match "
+    "— `Methods` naming, `Properties` naming, `unused return value` — not when they "
+    "happen to be in the same file.\n"
     "- The `open` reason goes to the run log, nowhere else: name what the code still "
     "lacks, not that it was reviewed. Nothing is posted into a thread that stays open."
 )
