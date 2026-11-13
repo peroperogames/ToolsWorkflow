@@ -1,0 +1,15 @@
+fix: a reply accepts a dismissal, and does not review
+
+PeroSerde #11 has two of these in one afternoon of comments. The author answered a
+finding with "ignore it." and got it restated, in English, as a new comment on the same
+file four minutes later. He answered another with "啰嗦" and got "但第二条不受影响：…" —
+the point argued again — before the same thread was resolved by the next pass anyway.
+
+Reply mode had no rule for either. It now has two: a reply is an answer and does not
+open findings (what strikes the model goes in the reply text, never into another inline
+comment over a point this pull request already has a thread for), and a dismissal is
+the author's decision — acknowledge it in one sentence, close the thread if they asked,
+and do not re-argue, restate or re-raise it.
+
+The review side already has the rule that a finding needs a victim (d9a308a, 40 minutes
+after those comments); this is the half that argues with the answer.

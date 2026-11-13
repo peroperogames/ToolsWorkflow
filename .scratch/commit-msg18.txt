@@ -1,0 +1,6 @@
+fix: the notify gate is an expression again, not a block scalar that starts with a comment
+
+A YAML block scalar keeps its `#` lines: the `if:` of the notify job began with
+"# A release (`1.2.3`)..." and `${{ }}`, which is not an expression GitHub can read.
+The workflow then failed to load at all — CITest's release run came back as
+`startup_failure` with no jobs, which is the shape of that mistake.

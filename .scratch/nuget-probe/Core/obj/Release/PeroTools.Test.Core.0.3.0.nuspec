@@ -1,0 +1,16 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2012/06/nuspec.xsd">
+  <metadata>
+    <id>PeroTools.Test.Core</id>
+    <version>0.3.0</version>
+    <authors>PeroTools.Test.Core</authors>
+    <description>Package Description</description>
+    <repository type="git" commit="4b876fa33900a89ae7e95a8b8f272a8a19e6428a" />
+    <dependencies>
+      <group targetFramework=".NETStandard2.0" />
+    </dependencies>
+  </metadata>
+  <files>
+    <file src="E:\Gatongone\GitClone\ToolsWorkflow\.scratch\nuget-probe\Core\bin\Release\netstandard2.0\PeroTools.Test.Core.dll" target="lib\netstandard2.0\PeroTools.Test.Core.dll" />
+  </files>
+</package>

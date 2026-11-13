@@ -1,0 +1,21 @@
+feat: a base release stays, reaches PeroNPM alone, and is announced
+
+`-base` is the tag a person creates and the one the repository's tag Ruleset guards, so
+it stays. What changes is where it goes: a base release is published to PeroNPM only,
+because a version number on npmjs.org or nuget.org cannot be taken back and a base
+release is one more build of the same source. It is still announced.
+
+  1.2.3             a release      every channel asked for, announced
+  1.2.3-base        a base release PeroNPM only, announced
+  1.2.3-preview.1   a prerelease   PeroNPM only, silent
+
+`extract_version` gives a base tag its plain version (`1.2.3-base` -> `1.2.3`) and any
+other suffix its own (`1.2.3-preview.1` stays), so PeroNPM keeps receiving the version
+it always did. `resolve_channels.sh` reads the tag and drops the other channels for
+anything but a release; `notify` runs for a release and a base release, never a variant.
+
+For OpenUPM — which reads a tag as the version and refuses `1.2.3-base` against
+`package.json` `1.2.3` — the metadata ignores the base tags (`gitTagIgnore: '-base$'`)
+and the plain `1.2.3` tag on the version commit is the one it builds. A plain-version
+release of a version PeroNPM already has is safe: both channels treat "already there"
+as published.

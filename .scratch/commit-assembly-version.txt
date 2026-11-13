@@ -1,0 +1,34 @@
+feat: the publish also bumps the assembly/NuGet version properties
+
+The README was one place the version is written down twice; the assembly properties
+are another, and they drift the same way: AccessKing's Core project still said 0.2.5
+in `<Version>`, `<AssemblyVersion>` and `<FileVersion>` while the package had moved
+on. They are not always in a `.csproj` — `Directory.Build.props` and friends hold them
+for every project under them, so both are covered.
+
+`publish/update_version_properties.sh` rewrites
+
+    <Version>  <PackageVersion>  <AssemblyVersion>  <FileVersion>  <InformationalVersion>
+
+in every `.csproj`/`.props`/`.targets` that already carries one — none is added, no
+other element is touched, and `obj/`, `bin/`, `Library/` and the packaging's `~`
+folders are skipped. The numeric properties get the numeric core, because
+`AssemblyVersion` and `FileVersion` do not accept a pre-release suffix:
+
+    <Version>1.2.3-android-variant</Version>
+    <AssemblyVersion>1.2.3</AssemblyVersion>
+    <FileVersion>1.2.3</FileVersion>
+
+The workflow runs it next to the README step and commits the result in the same
+version commit.
+
+That commit now uses `git commit --only -- <paths>`. It used to stage the files and
+commit the index, which would have taken anything else already staged along with it —
+and the packaging has already moved folders and deleted `.meta` files in the working
+tree. `--only` commits exactly the files the bump is made of.
+
+Checked end to end in a throwaway repository that has all of it at once: a README with
+`com.prpr.accessking: 0.2.5` and an untouched `com.cysharp.unitask: 2.5.5`, a csproj
+with the three properties, a folder moved the way `changefoldername.sh` moves it, and
+a stray staged edit. The commit contains `package.json`, `README.md` and the csproj
+and nothing else; the move, the deleted `.meta` and the staged edit stay out of it.

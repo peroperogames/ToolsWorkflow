@@ -1,0 +1,12 @@
+fix: the diagnosis block does not repeat itself, and names the platform's verdict
+
+Two wordings from the pull request comment:
+
+- `**PlayMode 没有产出报告，编辑器日志里 N 次异常、2 类**` repeated the run's
+  headline, which is the line above the table; the header is now
+  `**PlayMode 编辑器日志里的异常（N 次、2 类）**`.
+- `测试运行器自己的结论：` was true but generic — the same run is told apart by
+  which platform said it, so the line is now `PlayMode 测试结果：`.
+
+Checked locally against the real log: the summary carries "没有产出报告" exactly
+once, and the block renders with the new header and verdict line.

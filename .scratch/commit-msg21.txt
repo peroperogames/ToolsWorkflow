@@ -1,0 +1,21 @@
+feat: a code change is answered with edits, not whole files
+
+SQLite.net PR #1: a "copy this over from that branch" instruction implied rewriting large
+files, the model was asked for complete file contents as JSON, and the provider's output
+ceiling (65,536 tokens) cut the answer off inside a string — twice, the second time after
+the retry asked for something "smaller", which is not the same as asking for something
+smaller than the files.
+
+`files: [{path, edits: [{find, replace}]}]` is the shape now: the answer is the size of
+the change instead of the size of the file, and a large file cannot exhaust the limit.
+`content` is still accepted for a new or almost entirely rewritten file.
+
+Applying them is where the safety is, and it is checked: a `find` must occur exactly once
+in the file as it is on the branch — text that is absent is refused rather than skipped,
+text that occurs twice is refused rather than edited in whichever place came first — and
+a file whose edit cannot be placed stops the whole thing, because a branch carrying half
+of the instruction opens a pull request that looks finished and is not. Line endings are
+normalised for the match and restored after it.
+
+The retry says what to leave out now — edits, never a whole file — and the failure
+comment names the file when an edit cannot be placed.

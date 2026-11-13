@@ -1,0 +1,9 @@
+ci: a refused artifact upload is not a failed review
+
+GitHub answered the upload with "Artifact storage quota has been hit" after the
+review had already run and its comment was already on the pull request, and the red
+job read as "the review broke". The step is continue-on-error now: its own log says
+what went missing, and the comment keeps pointing at the run page it already had.
+
+The quota is the account's, not this workflow's — the review's reports are ~18 MB of
+8.7 GB across 2136 artifacts — so nothing here can free it.

@@ -1,0 +1,26 @@
+fix: a pending review belongs to a commit, so a stale one is deleted
+
+RhythmAce-Neo #108 is what reusing one costs. The run found the pending review an
+earlier push left, and every comment came back
+
+  GitHub API error (404) ... POST /pulls/108/reviews/5797609808/comments: Not Found
+
+because a review's comments are validated against the commit the review was opened
+for, and that commit no longer matched the pull request. The model retried each
+finding up to five times, the 64-step budget ran out with nothing posted and no
+verdict, and the approval after it failed with 422 — the same review was still there,
+and GitHub refuses a new review while a pending one exists.
+
+Three things are true now.
+
+The review is tied to the head commit: one for an older commit is deleted rather than
+reused, and a run clears those before it posts anything.
+
+A comment the review refuses is posted on its own, and the carrier is abandoned for the
+rest of the run. A review that says 404 to one comment will say 404 to the next one, so
+retrying it costs the step budget and saves nothing.
+
+A comment that failed is no longer recorded as "already said". The dedupe key was
+appended before the post, so every retry of the same finding was answered with "you
+already posted this finding" — which is why that run kept rephrasing the same points at
+the same lines instead of moving on.

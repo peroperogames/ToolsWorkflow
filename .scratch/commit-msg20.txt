@@ -1,0 +1,6 @@
+docs: how to find out why a release produced no jobs
+
+A reusable workflow that fails to load reports "workflow file issue" and nothing else.
+Dispatching a workflow in the same repository that `uses:` it prints the parse errors
+instead — that is how the empty `env:` in 6e12af0 was found after three releases came
+back as startup failures with no jobs.

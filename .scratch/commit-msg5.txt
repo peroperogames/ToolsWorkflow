@@ -1,0 +1,16 @@
+fix: a failed step before the review must not skip the review
+
+RhythmAce-Neo #89 (run 41014711782): the artifact upload was refused with "Artifact
+storage quota has been hit", and the log reads
+
+  ##[end-action display=Review and settle the threads;outcome=skipped
+
+The review step was gated on the steps before it succeeding — the implicit
+success() — so one refused upload cost the whole review, after the build, the tests
+and the static analysis had already run. It is `!cancelled() && not closed` now:
+nothing but a cancelled run skips the review. The job still ends failed when an
+earlier step did, so this hides nothing.
+
+The upload itself is continue-on-error (0f580d4), so the quota cannot fail the job
+in the first place; this covers every other way a step before the review can fail.
+`check_action_conditions.py` holds both.

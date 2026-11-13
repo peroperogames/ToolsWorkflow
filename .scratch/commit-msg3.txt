@@ -1,0 +1,20 @@
+fix: a clean review that cannot approve says so
+
+RhythmAce-Neo #80: 14 agent steps, 0 inline comments, verdict=approve, approved=no —
+and the pull request showed nothing at all. A clean verdict has no comment to post
+and the approval was withheld by three open threads, so the review's only result went
+to the job log, where nobody reads it.
+
+`act_on_clean_verdict` now posts one line when it cannot approve and the pull request
+would otherwise stay silent — the count of open threads, in the review's language,
+carrying `<!-- ai-review clean verdict -->` so a later run edits it instead of adding
+another. No reason per thread: which ones are open is on the pull request already.
+
+The comment is corrected rather than left behind. An approval — from this review or
+from the settle step that resolves what was left — rewrites it to say it is approved,
+so a pull request never keeps a sentence that has stopped being true. A first
+approval has no such comment to correct and posts none, and a clean verdict that did
+post inline comments leaves it alone, because the findings are the report then.
+
+`post_status_comment`'s marker lookup became `standing_comment_id`, shared with the
+new `update_standing_comment`.

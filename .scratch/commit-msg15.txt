@@ -1,0 +1,13 @@
+feat: tag the version commit with the plain version, which is what OpenUPM reads
+
+OpenUPM builds a package from a tag and takes that tag as the version, then compares it
+with package.json at that commit. A release is tagged `0.3.0-base` and the version this
+workflow writes is `0.3.0`, so every build of it fails with E811, "package.json version
+does not match release version" — eleven of them, back to the first release.
+
+The push step now also tags the commit that carries the version with `0.3.0` and pushes
+it. The release keeps its own name; the plain tag is what OpenUPM reads, and it points at
+the commit where package.json agrees with it.
+
+The old builds need the same tag on their version commits — the `-base` tag of a past
+release is not that commit, which is why comparing them could never work.

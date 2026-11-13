@@ -1,0 +1,26 @@
+fix: settle is told whether the thread's file is still in the branch
+
+The `.117` run on NativeAudio PR #1 did produce a reason and did post it in the
+thread — `⏳ 仍未关闭：Eclipse/Buildship 本地文件 … 仍未从 PR 移除，也没有在
+.gitignore 中忽略，问题依旧存在。` — and it was wrong: `AndroidProject~/.project`,
+`nativeaudio/.project` and `nativeaudio/.classpath` are gone from the branch, removed
+by a later commit of the same pull request. The decider had nothing to look at for
+them, because a file the pull request no longer changes is not in `list_files`, so it
+fell back to repeating the thread's own claim.
+
+It is now told, per thread:
+
+    changed by this pull request: no
+    file at head: no
+
+`file at head` is one `get_file_content_optional` call per thread whose path the
+pull request does not touch, and it is the one that settles "was this carried out":
+`changed by this pull request: no` alone is also what an untouched file says. The
+prompt spells out both — a missing file is reason to resolve; an untouched one is
+not. The job log names the files the pull request no longer changes, before judging.
+
+`file at head` is `GitHubClient.path_exists` — the contents API's 404 against the head ref, not "was the content readable as text", because a binary or oversized file reads as nothing while still existing.
+
+Checked locally: the listing carries `changed by this pull request` and `file at head`
+with the right values, a path the pull request still changes carries neither, and the
+resolve/open/note behaviour from the previous commits is unchanged.

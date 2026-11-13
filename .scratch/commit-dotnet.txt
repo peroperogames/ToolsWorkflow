@@ -1,0 +1,23 @@
+fix: the .NET gate says how its test run ended, not that it did not finish
+
+"测试没有跑完" does not say whether the run is still going, was stopped at a
+deadline, or exited on its own — and those three call for different next steps.
+The Unity side already keeps them apart per platform; the .NET side said one
+vague sentence for all of them.
+
+`_run` now returns whether it was the deadline as well as the exit code, and the
+result keeps both (`test_run`), so the status line reads:
+
+    ⚠️ .NET: 编译通过；.NET 测试运行失败（dotnet test 退出码 3），没有产出报告。
+    ⚠️ .NET: 编译通过；.NET 测试超时（30 分钟还没跑完，被停掉了），没有产出报告。
+    ⚠️ .NET: 编译通过；单元测试没有产出报告（dotnet test 退出码 0），本次未真正运行。
+
+A build stopped at its deadline gets its own sentence too (编译超时), rather than
+"编译失败（0 个错误）" — it has no error list to count. The heading above the
+captured output no longer claims the run went unfinished either.
+
+Checked locally with the two tool calls stubbed, which is how it caught a `self.`
+in module scope in the new log line — the exception path would have swallowed it
+and reported a build that was never tested:
+
+    .NET step failed, continuing without it: name 'self' is not defined

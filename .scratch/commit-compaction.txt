@@ -1,0 +1,32 @@
+fix: the context budget is in tokens, and compaction actually frees something
+
+The AccessKing review compacted on all 22 of its steps and stayed at ~500k tokens
+throughout, which is what the complaint says it is: indistinguishable from not
+compacting. Two causes, both in the budget.
+
+The budget was 400 000 **characters**, sized as "100k tokens at four characters per
+token". That is an English rule; a review transcript is code and Chinese, close to
+one character per token, so the budget was really a 500 000-token request — at the
+model's ceiling, where compaction frees exactly enough for the next step and runs
+again immediately. `estimate_tokens` counts a wide (CJK, kana, fullwidth) character
+as a token and four ASCII characters as one; the budget is 200k tokens and
+compaction aims at 60% of it, because a pass that ends exactly at the limit is a
+pass that runs again on the next step.
+
+Stubbing tool results was also the only pass, and it cannot help when the size is
+in the session: a pull request reviewed a dozen times carries its earlier runs, and
+that history is not a tool result. Compaction is now three passes — stub the older
+results, drop the oldest turns one at a time (oldest first, keeping the newest
+request and as much history as fits), then stub what is left — and says what it did:
+
+    Context compacted: 45 tool result(s) stubbed, 93 earlier message(s) dropped, 290k -> 115k tokens.
+
+`chunk_files` and `select_file_contents` had the same four-characters-per-token
+error, so a "131k-token" diff chunk was really 500k tokens of Chinese; both now use
+the same estimate. `CHARS_PER_TOKEN` is gone.
+
+Checked locally against a transcript shaped like that review: 290k tokens in, 115k
+out, the newest request and its reads intact, no tool result left without the call
+that produced it — and three more steps afterwards with **no compaction at all**
+(120k, 126k, 131k). A transcript that fits is untouched, and a 140k-character
+Chinese diff now splits into two chunks where an equally long ASCII diff stays one.

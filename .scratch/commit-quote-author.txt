@@ -1,0 +1,28 @@
+fix: the resolution note quotes the author, and stops there
+
+AccessKing PR #3, two threads on `Unity/Runtime/UnityOwnerLifetime.cs:35`:
+
+    ⚠️ ReSharper: Conditional access qualifier expression is known to be not null
+    Gatongone: stupid ass
+    ✔️ 作者认为该警告无意义（Conditional access qualifier 已知非 null 属于防御性写法的误报），不处理。
+
+    ⚠️ ReSharper: '??' left operand is never 'null'
+    Gatongone: non sense.
+    ✔️ 作者认为该警告无意义（'??' 左操作数永不为 null 属于防御性写法的误报），不处理。
+
+The author wrote six words and none of them was a technical judgement. The note
+translated the analyzer's own message into Chinese, labelled it a false positive about
+defensive code, and put that sentence in the author's mouth — [作者认为…] followed by
+a claim they never made. The dismissal itself is a perfectly good reason and needs no
+help: it is what settled the thread.
+
+The decider is now told what to write in that case — quote the author, say the code
+was left unchanged, stop — and what not to: no restating the warning, no verdict of
+"false positive", and no [作者认为…] in front of a technical claim the author did not
+make. The two notes above are the example in the prompt.
+
+The analysis itself is not the point of this commit, but for the record: both warnings
+are about `o?.GetHashCode() ?? 0`, and ReSharper is right that the left operand cannot
+be null — `IEqualityComparer<object>.GetHashCode(object o)` is a non-nullable parameter.
+Whether to keep the defensive check is the author's call, which is exactly why the note
+should say "the author dismissed it" and not explain it for them.

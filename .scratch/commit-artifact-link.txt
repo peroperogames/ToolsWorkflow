@@ -1,0 +1,29 @@
+feat: the comment carries the artifact's own download URL
+
+The rebuild comment linked to the run's artifact page (`…/runs/<id>#artifacts`),
+because it is written by the checks stage, before anything has been uploaded and
+before an artifact id exists to name. The upload step is the first thing that
+knows that URL, so it hands `artifact-url` to a step of its own, which edits the
+run's comment in place — one comment, and the link downloads.
+
+    - name: Point the comment at the uploaded reports
+      env:
+        REVIEW_ARTIFACT_URL: ${{ steps.upload-reports.outputs.artifact-url }}
+      run: python3 main.py artifact-link
+
+`main.py artifact-link` is a fourth entry point beside `checks`, `static` and
+`review`, and like `cleanup` it is not a stage of a review. It edits only the
+comments that name *this* run's page, so an earlier run's link never moves, and a
+refused edit is a warning rather than a failure — the comment already points
+somewhere useful. A run that uploaded nothing leaves the page link alone instead
+of replacing it with an empty string.
+
+The link is also there in the case that had none: the artifact line was written
+only when a report had failing cases, which is exactly not the situation where
+the reports are all there is to read. A run that crashed or was stopped at its
+deadline now gets the link too.
+
+Checked locally: the four ways a comment can come back (this run's, another
+run's, already edited, no artifact) do the right thing, and the real
+`report_build_result` rendered for a PlayMode run that exited 6 with no report
+carries the link — the comment text is in the check script's output.

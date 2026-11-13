@@ -1,0 +1,27 @@
+feat: the repository answers where the package is and what to pack
+
+AccessKing's publish.yml named the package directory, the project to pack and the
+nuget.org profile, and the last two were the same answer twice. All three are the same
+in every repository here, and a wrong `working-directory` does not fail — it produces a
+release whose version silently did not change, because the steps grep a package.json
+that is not there.
+
+One step now resolves them before anything is packed:
+
+  package directory   the shallowest directory whose package.json has a name
+                      (package_dir.sh) — a nested sample project has one too
+  nuget-project       the only project without IsPackable=false, or the solution
+                      holding them (nuget_project.sh)
+  nuget-user          Peropero, as a default
+
+The job no longer runs in the package directory (a job default cannot read a value a
+step produced): it runs at the repository root, the resolved path goes to $GITHUB_ENV as
+PACKAGE_DIR/PACKAGE_ROOT/NUGET_PROJECT, and the four steps that work inside the package
+move into it themselves. Naming any of the three still works and wins over the guess.
+
+`channels_for_tag.sh` is the tag rule's other reader: a base release and a prerelease
+publish to PeroNPM alone, so the step must not demand a project they will never pack.
+
+`unity-plugin-project` stays explicit. Which project produces the assembly can be
+matched, but the configuration cannot: AccessKing's `Unity` configuration compiles a
+different assembly than `Release`, and a guess ships the wrong binary silently.

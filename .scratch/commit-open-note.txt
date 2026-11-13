@@ -1,0 +1,23 @@
+fix: the reason a thread stays open is posted in the thread, not in the summary
+
+The previous commit put it in the conversation comment, which is the wrong place: the
+comment is about the run, the finding belongs to the thread, and the person who
+wrote the concern is looking at the thread.
+
+    ⏳ 仍未关闭：新提交没有改动这个文件，构建产物仍然会被提交。
+
+The conversation comment goes back to being a count — `未解决线程 1 → 1，暂不
+approve。` — and the decider's sentence per thread it does not close is posted as a
+reply inside that thread, next to the `✔️` note that resolution already posted there.
+The job log prints the same sentence per thread.
+
+Two guards, because a settle can be asked for repeatedly:
+
+- a note is only posted when the decider gave a reason — a note that says nothing is
+  worse than none;
+- a sentence that is already the thread's last comment is not posted again, so
+  running settle twice does not produce the same line twice.
+
+Checked locally: the note lands in the right thread with the right text, a repeat is
+suppressed, an empty reason posts nothing, a thread the decider did not mention posts
+nothing, and the note renders in both languages (`⏳ Still open: …`).

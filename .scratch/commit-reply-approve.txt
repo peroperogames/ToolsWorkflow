@@ -1,0 +1,32 @@
+fix: a reply that closed the threads goes on to approve
+
+AccessKing PR #3 is the case: 38 review threads, 0 unresolved, all reviews
+`COMMENTED`, `reviewDecision: REVIEW_REQUIRED`. The log says what happened:
+
+  Reply step 1: resolve_thread ×8
+  Reply step 3: resolve_thread ×3
+  Reply step 4: finish
+  Ignored the comment: …全部关闭，无需进一步回复。(it resolved 10 thread(s) first).
+
+The reply run had nothing to say, so it ended in the empty-reply branch — which
+`return`ed before `settle_threads_and_approve`. Ten threads closed by the very run
+that then declined to draw the conclusion, and the pull request stayed unapproved
+with nothing left open.
+
+The two empty-reply cases are now told apart. "This comment needs no answer" is the
+model deciding not to speak: nothing happened, and nothing is decided from it — an
+unrelated @-mention still cannot approve an unreviewed pull request. "I closed the
+threads and there is nothing left to say" is the model acting, and the approval that
+follows a clean review is exactly what the request asked for, so that run settles the
+threads and approves if none are left:
+
+  The reply had nothing to say but acted on the pull request (10 resolved, 0 posted);
+  settling the threads and approving if nothing is left open.
+
+Checked locally: resolved threads with an empty reply → settle and approve is called;
+an inline comment posted with an empty reply → also settles, with this run's own
+comment ids skipped so it cannot settle itself; no action at all, dry-run, and no
+reply context → nothing happens.
+
+Also visible in that log, from the previous fix: one compaction for the whole run
+(571k -> 71k tokens) instead of one per step.

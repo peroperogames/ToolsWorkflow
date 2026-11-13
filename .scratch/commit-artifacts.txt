@@ -1,0 +1,19 @@
+fix: the reports directory is not hidden, which is why the upload found nothing
+
+The job log for UIQueen PR #3, run 39586837484 attempt 2, says both things in
+the same twenty-five seconds:
+
+    Copied 8 report file(s) into .../UIQueen/UIQueen/.ai-review-artifacts ...
+    No files were found with the provided path: .../.ai-review-artifacts/
+
+The copy was never the problem. upload-artifact excludes hidden files unless
+include-hidden-files is true, so a dot-prefixed directory is searched, found
+empty and reported as nothing to upload — no matter how many files are in it.
+The directory is now ai-review-artifacts, and the comment above it says why,
+because the next person to dot-prefix a directory for tidiness will reproduce
+this exactly.
+
+Checked locally: seven report files are copied from a PR-shaped state directory
+into the checkout (the session log, the lock and the package clone stay put),
+the upload path in action.yml names the same directory, and a run that resolved
+no pull request still writes nothing.

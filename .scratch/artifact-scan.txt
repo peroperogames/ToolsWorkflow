@@ -1,0 +1,27 @@
+
+Repo                                     Count      MB
+----                                     -----      --
+peroperogames/lazymeowcity                 374 6304.20
+peroperogames/musedash2                    595 1436.90
+peroperogames/lmc-feishuproject-bridge     389  656.40
+peroperogames/pos-apis                       4  199.80
+peroperogames/musedash2-server             164   72.00
+peroperogames/perohub                      200   24.20
+peroperogames/RhythmAce-Neo                115   11.90
+peroperogames/game-ci                      158    4.00
+peroperogames/PeroLog                       33    3.90
+peroperogames/RhythmAce                     14    3.00
+peroperogames/pero-agent                    12    1.30
+peroperogames/PeroSerde                     13    1.20
+peroperogames/PeroSDK                        7    0.70
+peroperogames/AccessKing                    14    0.70
+peroperogames/RhythmAce-Importer            11    0.40
+peroperogames/GroupGraph                     7    0.40
+peroperogames/NativeAudio                    9    0.30
+peroperogames/perohub-data-collector-sdk     6    0.30
+peroperogames/UIQueen                        1    0.10
+peroperogames/perohub-data-server            2    0.10
+peroperogames/perohub-host-sdk               8    0.00
+
+
+TOTAL artifacts: 2136  size: 8721.8 MB

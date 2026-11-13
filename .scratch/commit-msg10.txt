@@ -1,0 +1,21 @@
+feat: one review per run, submitted when the run is done
+
+`post_inline_comment` called the comment endpoint directly, so every finding created
+its own COMMENTED review: RhythmAce-Neo #65 ended with fifteen reviews for fifteen
+comments, fifteen notifications, and a half-posted review whenever a run died in the
+middle of deciding what else to say.
+
+A run now writes into one pending review and submits it at the end. The comments are
+invisible while the model is still working, and the author gets one review carrying
+all of them. The ReSharper batch goes through the same helpers, so its findings come
+out as one review as well.
+
+GitHub allows one pending review per user per pull request — a second create answers
+422 "User can only have one pending review per pull request" — so a pending review
+left behind by a run that died is reused instead of fought with, which also delivers
+what that run found. When no review can be started, or the submit is refused, the
+comments are posted one by one as before: a lost review is worse than a noisy one.
+
+The ids of the submitted comments are collected into `posted_ids`, which is what
+stops the retirement pass from resolving this run's own findings seconds after they
+appear.

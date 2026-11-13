@@ -1,0 +1,15 @@
+feat: a new npm package is created from the workflow, once
+
+npm attaches a trusted publisher to a package, so a name that does not exist yet has
+nothing to trust, and a tokenless publish cannot create one. The workaround has been a
+0.0.0-stage placeholder published by hand — which stays in the package's version
+history for ever, and which is not what happened here before.
+
+NPMJS_BOOTSTRAP_TOKEN is that one release instead. It is optional, it is read only
+after the trusted publish has failed, it writes a temporary npmrc for a single
+`npm publish` and removes it, and the log says to delete the secret. Every release
+after the first one uses OIDC and never reads it.
+
+The check that forbade any secret in the OIDC job now allows this one, and asserts the
+three things that make it safe: the primary path has no credential, the token is
+guarded by a non-empty check, and the npmrc is removed.

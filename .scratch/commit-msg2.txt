@@ -1,0 +1,5 @@
+docs: the nuget profile name, stated as an example that is not a guess
+
+The channels example named `perotools`, and there is no nuget.org profile by that
+name; nuget.org/profiles/Peropero is the account the package belongs to, so the
+example was one copy-paste away from a release that packs, logs in and fails.

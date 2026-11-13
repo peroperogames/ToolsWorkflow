@@ -1,0 +1,26 @@
+feat: a slice reviewer reads its own files
+
+A worker saw its slice's diff and nothing else. A changed line that calls into code
+the worker cannot see can only be guessed at, and RhythmAce-Neo #65 is what that
+looks like: one finding from a 33-file slice, and a `notes` field that asked about
+everything else and was dropped by the code.
+
+Each worker now has three tools: `read_file` and `get_file_diff` over the files of
+its own slice, and `report_findings`. They are the agent's own `_tool_read_file` and
+`_tool_get_file_diff`, so the 200-line windows, the 8000-character cap, the "you
+already have this window" answer and the binary-file message are the same code; what
+differs is the reach and the budget. A path outside the slice is refused before
+anything is fetched, and a finding naming such a path is still dropped by name, so a
+worker can only report what it could see.
+
+Two bounds keep a worker from reading instead of reviewing: `MAP_WORKER_STEPS` (6),
+whose last step is preceded by "call report_findings with what you have now", and
+`MAP_WORKER_READS` (8), which binds when a model asks for several files in one step -
+a step can carry more than one call. A worker that runs out of steps says so in the
+log instead of passing for a slice with nothing in it.
+
+`notes` is gone from the prompt and from the schema: it was asked for and never read.
+
+Also fixes a duplicate this uncovered: with the check run refused, the no-check-run
+status comment was posted even for a rebuild, whose own reply is the report - the
+same result twice on the same pull request.

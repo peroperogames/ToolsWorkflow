@@ -1,0 +1,19 @@
+fix: the rebuild comment carries the reports link too
+
+Two comments report a build, and only one of them linked at the reports. The
+status comment (posted by the checks stage) did:
+
+    完整报告（XML 与日志）：https://github.com/…/actions/runs/39586837484/artifacts/12407029397
+
+The rebuild comment — the only comment a `@perotoolsbot rebuild` run leaves — did
+not, because it is built by `handle_rebuild_command` from the gates' context and
+that path never had the link. It has it now, and it has the *artifact's* URL rather
+than the run page's, because the review step runs after the upload: `REVIEW_ARTIFACT_URL`
+is on its environment too, and `artifacts_link()` prefers it over the run page.
+
+The body of that comment moved into `rebuild_comment_body()`, which is what let it
+be rendered and read in a check instead of described.
+
+Checked locally, three states: with no artifact URL the line names the run's
+artifact page; with one it names the artifact itself and the run page is gone; with
+no run id at all there is no line rather than an empty link.

@@ -1,0 +1,27 @@
+refactor: comments report the result, not what the command is for
+
+Whoever reads these comments asked for the command, so a line telling them what it
+does is the bot restating the request back at them. Removed:
+
+    🧹 **重新检查评论线程**（只处理已有线程；不新建评论，不跑构建）
+    →  未解决线程 38 → 0，已 approve ✅
+
+    🔧 **重新构建与测试**（只跑门禁，未做评审）
+    →  🔧 **重新构建与测试**
+
+    完整报告（XML 与日志）：<url>
+    →  完整报告：<url>
+
+The settle body is now one sentence in one of four states: resolved and approved,
+resolved but the approval was not this run's to submit (and why), threads still open,
+or the thread state unreadable. What stays is what the reader cannot know without it:
+the counts, the cause, and the artifact link.
+
+Swept the rest of the posted text for the same thing. The remaining parentheticals
+are facts rather than description — `（Unity 退出码 6）`, `（dotnet test 退出码 3）`,
+`（30 分钟还没跑完，被停掉了）`, `（未能定位到改动行）` — and the error replies
+(`无法读取当前 prompt.md，请检查`) tell the author what failed, which is the point of
+posting them.
+
+Checked locally: the settle body has no "不新建评论" and no heading in any of the four
+states, and the other comment checks are unchanged.

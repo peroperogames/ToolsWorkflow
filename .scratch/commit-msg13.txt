@@ -1,0 +1,25 @@
+fix: post one review with all of its comments, and delete leftover pending reviews
+
+Two defects, one cause. `POST /pulls/{n}/reviews/{id}/comments` does not exist — GitHub
+answers 404 for any review — so a pending review could never be added to. And while a
+user has a pending review open on a pull request, GitHub refuses every other write:
+
+  {"message":"Validation Failed","errors":[{"resource":"PullRequestReview",
+   "field":"user_id","code":"custom",
+   "message":"user_id can only have one pending review per pull request"}]}
+
+That is the 422 RhythmAce-Neo #108 kept getting: the review 5797609808 was left behind
+by the first attempt, so every comment failed with 422 after the 404, the submit failed
+with 422, and the approval failed with 422. Reproduced against the live API: create a
+pending review, then post a plain comment — 422, same message; delete the review, and
+the same comment posts.
+
+A run now buffers its findings and posts them as one review with `comments`, which is
+the shape the API supports and the behaviour that was asked for: nothing on the diff
+until the run is finished. Any pending review this bot left behind is deleted before it
+starts, because that is what blocks the rest. A review GitHub refuses still falls back
+to posting its comments one by one, and a rejected comment is no longer recorded as
+said (that made every retry look like a duplicate).
+
+The API error message now carries GitHub's `errors` array — "Validation Failed" alone
+is what made this take two runs to see.

@@ -1,0 +1,21 @@
+fix: a `rebuild` run posts one comment, not two
+
+`@perotoolsbot rebuild` runs the checks stage and then answers from the review
+step, and both reported the same results: the status comment (with the table, the
+editor-log diagnosis and the reports link), and then the reply that repeats all of
+it under the rebuild heading. Two comments saying the same thing is how a pull
+request ends up with neither of them read.
+
+The checks stage already knows which command this run is — `_comment_invocation`
+parses the comment without the model — so it now sees that a rebuild's reply *is*
+the report and leaves the posting to it:
+
+    The rebuild command reports this result itself; not posting the status comment for it.
+
+Everything else still gets the status comment: for `review` and for prose requests
+the reply is a review, not a build report, and the status comment is the only place
+the build result appears.
+
+Checked locally: with the flag set `report_build_result` posts nothing and with it
+clear posts exactly one comment; the reply carries the same result, the reports
+link included.

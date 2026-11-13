@@ -1,0 +1,32 @@
+feat: a project that resolves Addressables gets its settings created
+
+UIQueen PR #3's PlayMode run wrote no report because every fixture threw in
+`IPrebuildSetup`: `AddressablesAdapter.get_settings()` asserts "There is no
+Addressables Settings in project, please create it!", and a project laid out from
+the 3D template has none. No fixture ever ran, so there was nothing to report —
+and nothing the pipeline could do about it until now.
+
+A project whose resolved packages include `com.unity.addressables` and which has
+no `Assets/AddressableAssetsData/AddressableAssetSettings.asset` now gets one:
+the pipeline writes `Assets/Editor/AiReviewProvision.cs`, runs
+`-executeMethod AiReviewProvision.EnsureAddressableSettings`, and the editor
+creates the settings and their default groups through
+`AddressableAssetSettingsDefaultObject.GetSettings(true)` — the same thing a
+developer's own project already has, not a change to the package under review.
+
+- once per project, because the asset is then on disk; a project that does not
+  resolve Addressables is not touched at all;
+- a project that stops resolving it has the script deleted, because a reference
+  to a package that is gone is a compile error in every later run;
+- never fatal: if the settings cannot be created, the tests run exactly as they
+  did before, and the comment says so through the editor-log diagnosis.
+
+Checked locally in the real 2022.3.62f3 project this machine already has, with
+`com.unity.addressables@1.21.14` added to its manifest:
+
+    Unity: the project has no Addressables settings; creating them before the tests run.
+      ai-review: Addressables settings at Assets/AddressableAssetsData/AddressableAssetSettings.asset, default group: Default Local Group
+    Unity: Addressables settings created (Assets/AddressableAssetsData/AddressableAssetSettings.asset).
+
+The asset is 3906 bytes on disk and a second call returns without launching the
+editor.

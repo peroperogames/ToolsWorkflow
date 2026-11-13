@@ -1,0 +1,36 @@
+feat: `@perotoolsbot settle` — re-judge the open threads and approve
+
+A command for "I have dealt with everything; check and close it out". It re-reads
+the threads that are still open, decides which ones the discussion has settled,
+and approves once none are left. No build, no review, and no new inline comment:
+asking for it cannot turn into another round of findings.
+
+    CommandSpec(
+        "settle", "note",
+        "re-judge the open threads and approve if none are left; no build, no review",
+        handle_settle_command, stages=frozenset(),
+    )
+
+`stages=frozenset()` is what keeps the checks and static stages out of it — a
+command that needs neither must not pay for a Unity build, and the empty case now
+says so in the log instead of "this run runs .".
+
+Threads are judged from their own comments and the discussion rather than from the
+diff, exactly as a reply run does: the question is whether the concern was dealt
+with, not whether the code changed. A thread it closes gets its reason Inside that
+thread — a reply, not a thread. `settle_threads_and_approve` now returns whether the
+approval was submitted, so the one comment the run posts can say which state the
+pull request is in:
+
+    🧹 **重新检查评论线程**（只处理已有线程；不新建评论，不跑构建）
+    未解决线程：38 → 0。
+    全部线程已解决，已 approve ✅
+
+…and "全部线程已解决；approve 未提交（该提交此前已批准过，或没有权限）" when the
+approval was not this run's to make, and "还有 N 个线程没处理完，暂不 approve" when it
+is not finished.
+
+Checked locally: the command parses without the model, asks for neither gate, calls
+the settle step exactly once, posts no inline comment, and the comment body is right
+in all four states (approved, all resolved but not submitted, threads left, thread
+state unreadable); dry-run posts nothing and judges nothing.

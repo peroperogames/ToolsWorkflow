@@ -1,0 +1,30 @@
+feat: settle says why a thread stayed open, and therefore why it did not approve
+
+The comment was `未解决线程 1 → 1，暂不 approve。` — a fact with no reason, which is
+exactly the question it raises. NativeAudio PR #1 is the case: one thread on
+`AndroidProject~/.project`, `Resolved 0/1`, and the reader is left to guess whether
+the decider ran, saw the code, disagreed, or failed.
+
+The decider is now asked for the second half of its answer, a sentence per thread it
+does not close —
+
+    {"resolved": [...], "open": [{"id": "...", "reason": "<what is still missing>"}]}
+
+— and that reason reaches the comment:
+
+    未解决线程 1 → 1，暂不 approve：
+    - `AndroidProject~/.project:12` — 新提交没有改动这个文件，构建产物仍然会被提交。
+
+`decide_resolved_threads` and `settle_threads_and_approve` return a `SettleOutcome`
+(resolved count, the open threads with their reasons, whether the approval was
+submitted, whether the judgment happened at all) instead of a number and a bool, so
+the command can tell the four states apart: resolved and approved, resolved but the
+approval was not this run's to make, still open with reasons, and judgment failed.
+The job log prints the same reasons, one line per thread.
+
+Falls back honestly: a thread whose decider gave no sentence is shown with its own
+opening comment and said to be that; more than five open threads are counted rather
+than listed; a resolve the API refused is reported with the API's message.
+
+Checked locally: the four states, the reason list, the no-reason fallback, the cap at
+five, the unreadable-thread-state case and the dry run.

@@ -1,0 +1,8 @@
+fix: two steps carried an `env:` with nothing in it
+
+Removing the PACKAGE_DIR lines left `env:` alone above `run:` in two steps, and GitHub
+rejects an empty mapping: "Unexpected value ''" at lines 293 and 454 — a startup failure
+with no jobs, which reads as "workflow file issue" and nothing else. Found by asking the
+workflow to load itself: dispatching a `uses: ./.github/workflows/publish-npm.yml` job
+prints the parse errors, while a release from another repository only says the run could
+not start.

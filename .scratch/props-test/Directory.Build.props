@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <LangVersion>14</LangVersion>
+    <Version>1.2.3-android-variant</Version>
+    <InformationalVersion>1.2.3-android-variant</InformationalVersion>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,16 @@
+fix: one living status comment per gate, not one per repository
+
+PeroSerde #9 is a .NET solution with a UPM package inside it, so the checks stage ran
+both gates. Both reported through one living comment — `<!-- ai-review build status -->`
+— and the second edit erased the first: `Edited 1 time`, and the pull request showed
+
+  ✅ .NET: 编译通过，单元测试通过。
+
+while the Unity result it had shown a moment earlier (64 EditMode tests, the platform
+table) survived only in that comment's edit history. A reader sees a package that was
+never tested.
+
+The marker carries the label now — `<!-- ai-review build status: Unity -->`,
+`...: .NET -->` — so each gate keeps its own comment and each re-run edits its own.
+`report_build_result` still posts the same comment when the check run is refused; it
+just names which gate it is.

@@ -1,0 +1,29 @@
+feat: a Unity project's report has no nullability findings
+
+Unity compiles without nullable reference types, and object lifetimes there are the
+engine's: a destroyed `UnityEngine.Object` compares equal to null while being a live
+reference, and the code is written for that. An inspection whose verdict comes from
+nullable annotations is then reasoning about a contract the project does not have —
+which is why AccessKing PR #3 could report `o?.GetHashCode() ?? 0` twice on one line
+(`ConstantConditionalAccessQualifier` and `ConstantNullCoalescingCondition`, both
+WARNING in the report) while the author's Rider reported neither: its Unity project
+model resolves Unity's own reference assemblies.
+
+`inspect_code.drop_nullable_issues` removes those ids when the analysed code is a
+Unity project, and says what it removed:
+
+    ReSharper: 2 nullability finding(s) dropped (ConstantConditionalAccessQualifier ×1,
+    ConstantNullCoalescingCondition ×1) — a Unity project compiles without nullable
+    reference types, so the annotation the inspection reasons from is not a contract
+    this code has.
+
+The ids are matched by prefix, because ReSharper ships suffixed variants
+(`ConditionIsAlwaysTrueOrFalseAccordingToNullableAPIContract`). `analyze` takes
+`unity=`; both call sites pass it, the solution one as `unity is not None` and the
+per-project fallback as `True`. Everything else in the report is kept, and a
+non-Unity project's report is untouched — that is where nullable annotations *are* a
+contract.
+
+Checked locally: the predicate names the inspections (including the suffixed
+variant), a report containing three of them plus a real finding keeps only the real
+one, the counts are exact, and a report with nothing to drop comes back whole.

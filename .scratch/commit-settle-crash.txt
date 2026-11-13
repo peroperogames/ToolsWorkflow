@@ -1,0 +1,22 @@
+fix: a settle with nothing left open approves without crashing
+
+AccessKing PR #3, run `unity.119`:
+
+    No unresolved bot review threads to consider.
+    Approved: nothing left open.
+    Traceback (most recent call last): … outcome.approved = approve_if_clean( …
+
+`decide_resolved_threads` still had one `return 0` on the path that matters most —
+everything already resolved, so there is nothing to judge — while the caller now
+assigns into the outcome it gets back. Python evaluates the right-hand side first, so
+the approval *was* posted, logged as approved, and then the assignment on an `int`
+raised. The run ends red and the comment the command exists to post is never written.
+
+Two returns were still counts: the empty-candidate path and the "decision failed"
+path. Both return the outcome now, so all five exits from the function agree, and the
+"decision failed" exit is marked `unknown` rather than looking like a clean sweep.
+
+Checked locally with the production shape: 41 resolved threads → a `SettleOutcome`
+with `approved=True` and an APPROVE review posted; a thread list that raises → an
+outcome marked `unknown`; a decider answering nonsense → also `unknown`. Nothing
+raises on any of the three.

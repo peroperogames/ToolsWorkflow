@@ -1,0 +1,11 @@
+E:\Gatongone\GitClone\ToolsWorkflow\.scratch\nuget-probe\Core\bin\Release\netstandard2.0\PeroTools.Test.Core.deps.json
+E:\Gatongone\GitClone\ToolsWorkflow\.scratch\nuget-probe\Core\bin\Release\netstandard2.0\PeroTools.Test.Core.dll
+E:\Gatongone\GitClone\ToolsWorkflow\.scratch\nuget-probe\Core\bin\Release\netstandard2.0\PeroTools.Test.Core.pdb
+E:\Gatongone\GitClone\ToolsWorkflow\.scratch\nuget-probe\Core\obj\Release\netstandard2.0\PeroTools.Test.Core.csproj.AssemblyReference.cache
+E:\Gatongone\GitClone\ToolsWorkflow\.scratch\nuget-probe\Core\obj\Release\netstandard2.0\PeroTools.Test.Core.GeneratedMSBuildEditorConfig.editorconfig
+E:\Gatongone\GitClone\ToolsWorkflow\.scratch\nuget-probe\Core\obj\Release\netstandard2.0\PeroTools.Test.Core.AssemblyInfoInputs.cache
+E:\Gatongone\GitClone\ToolsWorkflow\.scratch\nuget-probe\Core\obj\Release\netstandard2.0\PeroTools.Test.Core.AssemblyInfo.cs
+E:\Gatongone\GitClone\ToolsWorkflow\.scratch\nuget-probe\Core\obj\Release\netstandard2.0\PeroTools.Test.Core.csproj.CoreCompileInputs.cache
+E:\Gatongone\GitClone\ToolsWorkflow\.scratch\nuget-probe\Core\obj\Release\netstandard2.0\PeroTools.Test.Core.sourcelink.json
+E:\Gatongone\GitClone\ToolsWorkflow\.scratch\nuget-probe\Core\obj\Release\netstandard2.0\PeroTools.Test.Core.dll
+E:\Gatongone\GitClone\ToolsWorkflow\.scratch\nuget-probe\Core\obj\Release\netstandard2.0\PeroTools.Test.Core.pdb

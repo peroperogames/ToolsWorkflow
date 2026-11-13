@@ -1,0 +1,36 @@
+feat: the project's Addressables play mode script is the one the tests expect
+
+With the settings created, UIQueen's PlayMode fixtures moved on to their next
+assertion and refused to run again:
+
+    AssertionException: Test should run when Addressable is simulate groups or
+    use existing builds   ×7 — DefaultPanelInserterTests.IPrebuildSetup.Setup
+
+That is `Assert.IsTrue(AddressableAssetSettingsDefaultObject.Settings
+.ActivePlayModeDataBuilderIndex != 0)`: 0 is "Use Asset Database (fastest)", which
+bypasses the Addressables runtime, and 1 is "Simulate Groups (advanced)". A project
+the pipeline creates starts at 0, so the same method now switches it to 1 — a
+developer's project is not in the fastest mode either.
+
+The index is stored in a binary `Library` config this side cannot read, so the
+method writes `Library/ai-review-provisioned.txt` with what it set, and a project
+whose stamp records a real index is left alone: one launch per project, not one per
+build. The stamp lives in `Library`, so it disappears exactly when the project does
+need provisioning again.
+
+Checked locally, twice over.
+
+The pipeline's own method, in the real 2022.3.62f3 project on this machine:
+
+    Unity: the project's Addressables play mode script is "Use Asset Database (fastest)"; switching it to "Simulate Groups" before the tests run.
+      ai-review: Addressables settings at Assets/AddressableAssetsData/AddressableAssetSettings.asset, play mode script index 1, default group: Default Local Group
+    Unity: Addressables ready (..., play mode script index 1).
+    stamp: activePlayModeDataBuilderIndex=1
+    second call: 0.0s
+
+And a PlayMode test written the way UIQueen's fixtures are — assert the index is
+not 0 in `IPrebuildSetup`, register an asset in the default group there, load it by
+address in the test: it passes (`ai-review-probe: loaded ProbeMat`, exit 0). The
+first attempt failed with `InvalidKeyException` because the asset registered was a
+*scene*; scenes are not `LoadAssetAsync` material, which is the probe's bug, not the
+pipeline's.

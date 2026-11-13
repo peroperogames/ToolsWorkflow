@@ -1,0 +1,32 @@
+fix: the review is shown the threads it already opened
+
+AccessKing PR #3, thread by thread: the same "the result collection is not released
+under an exception" concern was raised and resolved five times —
+
+    Core/Common/CollectionPool.cs                        raised 11:03, resolved
+    Unity/…/CommandOperationAsyncExtensions.cs:76        raised 11:05, resolved
+    Unity/…/CommandOperationAsyncExtensions.cs:14        raised 11:05, resolved
+    Core/Command/CommandBus/CommandBus.cs:76             raised 11:07, resolved
+    Core/Command/Operation/CommandOperation.cs:98        raised 12:24, resolved
+
+— and then raised a sixth time at 12:59:36 on
+`Core/Command/Operation/CommandOperation.Extensions.cs:57`, because the PR is titled
+"split projects" and the file had moved. The settle step recognised it for what it
+was and closed it at 13:01:46, which is the "it comments, then dismisses its own
+comment" that reads as noise on the diff.
+
+The model could not know. A review run gets the new commits and the tail of the
+session — `conversation`, which does carry the threads, is never passed to it — and
+anything older than the handed history was invisible. `threads_briefing` now renders
+the threads already on the pull request (path, line, open or resolved, the opening
+160 characters) and `build_review_turns` puts them in the turn. The instruction is
+deliberate about the one exception: a resolved thread is done, unless the new commits
+changed the answer or the resolution was wrong — and then the comment has to say
+what the evidence is. Suppressing every re-raise would also suppress correcting a
+wrong one, which is how `README.md:27` was legitimately re-raised at 12:59:12.
+
+The settle step stays as the backstop.
+
+Checked locally: the briefing lists every thread with its state (a thread without a
+line included), appears in the turn after the build status, comes out empty for a
+pull request with no threads, and keeps the "new evidence" exception in its wording.

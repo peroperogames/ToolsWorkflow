@@ -1,0 +1,243 @@
+<?xml version="1.0" encoding="utf-8"?>
+<test-run id="2" testcasecount="24" result="Passed" total="24" passed="24" failed="0" inconclusive="0" skipped="0" asserts="0" engine-version="3.5.0.0" clr-version="4.0.30319.42000" start-time="2026-10-21 11:00:26Z" end-time="2026-10-21 11:00:27Z" duration="1.3391518">
+  <test-suite type="TestSuite" id="1000" name="UIQueen-PR3" fullname="UIQueen-PR3" runstate="Runnable" testcasecount="24" result="Passed" start-time="2026-10-21 11:00:26Z" end-time="2026-10-21 11:00:27Z" duration="1.339152" total="24" passed="24" failed="0" inconclusive="0" skipped="0" asserts="0">
+    <properties>
+      <property name="platform" value="EditMode" />
+    </properties>
+    <test-suite type="Assembly" id="1030" name="PeroTools2.UIQueen.Editor.Tests.dll" fullname="/tmp/ai-code-review/peroperogames/UIQueen-PR3/Library/ScriptAssemblies/PeroTools2.UIQueen.Editor.Tests.dll" runstate="Runnable" testcasecount="23" result="Passed" start-time="2026-10-21 11:00:26Z" end-time="2026-10-21 11:00:27Z" duration="1.334552" total="23" passed="23" failed="0" inconclusive="0" skipped="0" asserts="0">
+      <properties>
+        <property name="_PID" value="337876" />
+        <property name="_APPDOMAIN" value="Unity Child Domain" />
+        <property name="platform" value="EditMode" />
+        <property name="EditorOnly" value="True" />
+      </properties>
+      <test-suite type="TestSuite" id="1031" name="PeroTools2" fullname="PeroTools2" runstate="Runnable" testcasecount="23" result="Passed" start-time="2026-10-21 11:00:26Z" end-time="2026-10-21 11:00:27Z" duration="1.334290" total="23" passed="23" failed="0" inconclusive="0" skipped="0" asserts="0">
+        <properties />
+        <test-suite type="TestSuite" id="1032" name="UIQueen" fullname="PeroTools2.UIQueen" runstate="Runnable" testcasecount="23" result="Passed" start-time="2026-10-21 11:00:26Z" end-time="2026-10-21 11:00:27Z" duration="1.334187" total="23" passed="23" failed="0" inconclusive="0" skipped="0" asserts="0">
+          <properties />
+          <test-suite type="TestSuite" id="1033" name="Editor" fullname="PeroTools2.UIQueen.Editor" runstate="Runnable" testcasecount="23" result="Passed" start-time="2026-10-21 11:00:26Z" end-time="2026-10-21 11:00:27Z" duration="1.333934" total="23" passed="23" failed="0" inconclusive="0" skipped="0" asserts="0">
+            <properties />
+            <test-suite type="TestSuite" id="1034" name="Tests" fullname="PeroTools2.UIQueen.Editor.Tests" runstate="Runnable" testcasecount="23" result="Passed" start-time="2026-10-21 11:00:26Z" end-time="2026-10-21 11:00:27Z" duration="1.333773" total="23" passed="23" failed="0" inconclusive="0" skipped="0" asserts="0">
+              <properties />
+              <test-suite type="TestFixture" id="1001" name="PanelInserterTests" fullname="PeroTools2.UIQueen.Editor.Tests.PanelInserterTests" classname="PeroTools2.UIQueen.Editor.Tests.PanelInserterTests" runstate="Runnable" testcasecount="4" result="Passed" start-time="2026-10-21 11:00:26Z" end-time="2026-10-21 11:00:27Z" duration="0.791804" total="4" passed="4" failed="0" inconclusive="0" skipped="0" asserts="0">
+                <properties />
+                <test-case id="1003" name="DestroyPanelInserterTest" fullname="PeroTools2.UIQueen.Editor.Tests.PanelInserterTests.DestroyPanelInserterTest" methodname="DestroyPanelInserterTest" classname="PeroTools2.UIQueen.Editor.Tests.PanelInserterTests" runstate="Runnable" seed="1240519038" result="Passed" start-time="2026-10-21 11:00:26Z" end-time="2026-10-21 11:00:27Z" duration="0.768656" asserts="0">
+                  <properties>
+                    <property name="retryIteration" value="0" />
+                    <property name="repeatIteration" value="0" />
+                  </properties>
+                </test-case>
+                <test-case id="1002" name="InstantiateNewPanelInserterTest" fullname="PeroTools2.UIQueen.Editor.Tests.PanelInserterTests.InstantiateNewPanelInserterTest" methodname="InstantiateNewPanelInserterTest" classname="PeroTools2.UIQueen.Editor.Tests.PanelInserterTests" runstate="Runnable" seed="1770401389" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.004474" asserts="0">
+                  <properties>
+                    <property name="retryIteration" value="0" />
+                    <property name="repeatIteration" value="0" />
+                  </properties>
+                </test-case>
+                <test-case id="1004" name="MovePanelInserterFromPanelManagerTest" fullname="PeroTools2.UIQueen.Editor.Tests.PanelInserterTests.MovePanelInserterFromPanelManagerTest" methodname="MovePanelInserterFromPanelManagerTest" classname="PeroTools2.UIQueen.Editor.Tests.PanelInserterTests" runstate="Runnable" seed="1953220776" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.003534" asserts="0">
+                  <properties>
+                    <property name="retryIteration" value="0" />
+                    <property name="repeatIteration" value="0" />
+                  </properties>
+                </test-case>
+                <test-case id="1005" name="MovePanelInserterToPanelManagerTest" fullname="PeroTools2.UIQueen.Editor.Tests.PanelInserterTests.MovePanelInserterToPanelManagerTest" methodname="MovePanelInserterToPanelManagerTest" classname="PeroTools2.UIQueen.Editor.Tests.PanelInserterTests" runstate="Runnable" seed="872706516" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.003449" asserts="0">
+                  <properties>
+                    <property name="retryIteration" value="0" />
+                    <property name="repeatIteration" value="0" />
+                  </properties>
+                </test-case>
+              </test-suite>
+              <test-suite type="TestFixture" id="1006" name="UIRelativeOrderTests" fullname="PeroTools2.UIQueen.Editor.Tests.UIRelativeOrderTests" classname="PeroTools2.UIQueen.Editor.Tests.UIRelativeOrderTests" runstate="Runnable" testcasecount="3" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.271290" total="3" passed="3" failed="0" inconclusive="0" skipped="0" asserts="0">
+                <properties />
+                <test-case id="1007" name="AddRelativeOrderTest" fullname="PeroTools2.UIQueen.Editor.Tests.UIRelativeOrderTests.AddRelativeOrderTest" methodname="AddRelativeOrderTest" classname="PeroTools2.UIQueen.Editor.Tests.UIRelativeOrderTests" runstate="Runnable" seed="65850896" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.015987" asserts="0">
+                  <properties>
+                    <property name="_JOINTYPE" value="UnityCombinatorial" />
+                    <property name="retryIteration" value="0" />
+                    <property name="repeatIteration" value="0" />
+                  </properties>
+                </test-case>
+                <test-case id="1008" name="BaseSortingOrderChangedTest" fullname="PeroTools2.UIQueen.Editor.Tests.UIRelativeOrderTests.BaseSortingOrderChangedTest" methodname="BaseSortingOrderChangedTest" classname="PeroTools2.UIQueen.Editor.Tests.UIRelativeOrderTests" runstate="Runnable" seed="1124174678" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.002126" asserts="0">
+                  <properties>
+                    <property name="_JOINTYPE" value="UnityCombinatorial" />
+                    <property name="retryIteration" value="0" />
+                    <property name="repeatIteration" value="0" />
+                  </properties>
+                </test-case>
+                <test-case id="1009" name="GetRendererAndCanvasInChildrenTest" fullname="PeroTools2.UIQueen.Editor.Tests.UIRelativeOrderTests.GetRendererAndCanvasInChildrenTest" methodname="GetRendererAndCanvasInChildrenTest" classname="PeroTools2.UIQueen.Editor.Tests.UIRelativeOrderTests" runstate="Runnable" seed="722875287" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.002735" asserts="0">
+                  <properties>
+                    <property name="_JOINTYPE" value="UnityCombinatorial" />
+                    <property name="retryIteration" value="0" />
+                    <property name="repeatIteration" value="0" />
+                  </properties>
+                </test-case>
+              </test-suite>
+              <test-suite type="GenericFixture" id="1024" name="UISortingOrderManagerTests&lt;T&gt;" fullname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests&lt;T&gt;" runstate="Runnable" testcasecount="12" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.035557" total="12" passed="12" failed="0" inconclusive="0" skipped="0" asserts="0">
+                <properties />
+                <test-suite type="TestFixture" id="1017" name="UISortingOrderManagerTests&lt;UIRelativeOrder&gt;(&quot;Packages/com.prpr.uiqueen/Tests/Prefa...&quot;)" fullname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests&lt;UIRelativeOrder&gt;(&quot;Packages/com.prpr.uiqueen/Tests/Prefa...&quot;)" classname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests`1" runstate="Runnable" testcasecount="6" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.017752" total="6" passed="6" failed="0" inconclusive="0" skipped="0" asserts="0">
+                  <properties />
+                  <test-case id="1020" name="AddAndRemoveGameObjectInChildrenTest" fullname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests&lt;UIRelativeOrder&gt;(&quot;Packages/com.prpr.uiqueen/Tests/Prefa...&quot;).AddAndRemoveGameObjectInChildrenTest" methodname="AddAndRemoveGameObjectInChildrenTest" classname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests`1" runstate="Runnable" seed="2032369257" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.006339" asserts="0">
+                    <properties>
+                      <property name="_JOINTYPE" value="UnityCombinatorial" />
+                      <property name="retryIteration" value="0" />
+                      <property name="repeatIteration" value="0" />
+                    </properties>
+                  </test-case>
+                  <test-case id="1018" name="AddAndRemoveTest" fullname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests&lt;UIRelativeOrder&gt;(&quot;Packages/com.prpr.uiqueen/Tests/Prefa...&quot;).AddAndRemoveTest" methodname="AddAndRemoveTest" classname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests`1" runstate="Runnable" seed="411537546" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.001738" asserts="0">
+                    <properties>
+                      <property name="_JOINTYPE" value="UnityCombinatorial" />
+                      <property name="retryIteration" value="0" />
+                      <property name="repeatIteration" value="0" />
+                    </properties>
+                  </test-case>
+                  <test-case id="1019" name="AddRelativeOrderAndAddSortingOrderManagerInChildrenTest" fullname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests&lt;UIRelativeOrder&gt;(&quot;Packages/com.prpr.uiqueen/Tests/Prefa...&quot;).AddRelativeOrderAndAddSortingOrderManagerInChildrenTest" methodname="AddRelativeOrderAndAddSortingOrderManagerInChildrenTest" classname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests`1" runstate="Runnable" seed="971377005" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.001808" asserts="0">
+                    <properties>
+                      <property name="_JOINTYPE" value="UnityCombinatorial" />
+                      <property name="retryIteration" value="0" />
+                      <property name="repeatIteration" value="0" />
+                    </properties>
+                  </test-case>
+                  <test-case id="1022" name="AddRelativeOrderAndMoveFromOneToAnotherTest" fullname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests&lt;UIRelativeOrder&gt;(&quot;Packages/com.prpr.uiqueen/Tests/Prefa...&quot;).AddRelativeOrderAndMoveFromOneToAnotherTest" methodname="AddRelativeOrderAndMoveFromOneToAnotherTest" classname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests`1" runstate="Runnable" seed="1182511368" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.002577" asserts="0">
+                    <properties>
+                      <property name="_JOINTYPE" value="UnityCombinatorial" />
+                      <property name="retryIteration" value="0" />
+                      <property name="repeatIteration" value="0" />
+                    </properties>
+                  </test-case>
+                  <test-case id="1023" name="ChangeOrderInListTest" fullname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests&lt;UIRelativeOrder&gt;(&quot;Packages/com.prpr.uiqueen/Tests/Prefa...&quot;).ChangeOrderInListTest" methodname="ChangeOrderInListTest" classname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests`1" runstate="Runnable" seed="605848015" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.001793" asserts="0">
+                    <properties>
+                      <property name="_JOINTYPE" value="UnityCombinatorial" />
+                      <property name="retryIteration" value="0" />
+                      <property name="repeatIteration" value="0" />
+                    </properties>
+                  </test-case>
+                  <test-case id="1021" name="MoveFromOneToAnotherTest" fullname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests&lt;UIRelativeOrder&gt;(&quot;Packages/com.prpr.uiqueen/Tests/Prefa...&quot;).MoveFromOneToAnotherTest" methodname="MoveFromOneToAnotherTest" classname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests`1" runstate="Runnable" seed="1453318744" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.002146" asserts="0">
+                    <properties>
+                      <property name="_JOINTYPE" value="UnityCombinatorial" />
+                      <property name="retryIteration" value="0" />
+                      <property name="repeatIteration" value="0" />
+                    </properties>
+                  </test-case>
+                </test-suite>
+                <test-suite type="TestFixture" id="1010" name="UISortingOrderManagerTests&lt;UISortingOrderManager&gt;(&quot;Packages/com.prpr.uiqueen/Tests/Prefa...&quot;)" fullname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests&lt;UISortingOrderManager&gt;(&quot;Packages/com.prpr.uiqueen/Tests/Prefa...&quot;)" classname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests`1" runstate="Runnable" testcasecount="6" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.017269" total="6" passed="6" failed="0" inconclusive="0" skipped="0" asserts="0">
+                  <properties />
+                  <test-case id="1013" name="AddAndRemoveGameObjectInChildrenTest" fullname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests&lt;UISortingOrderManager&gt;(&quot;Packages/com.prpr.uiqueen/Tests/Prefa...&quot;).AddAndRemoveGameObjectInChildrenTest" methodname="AddAndRemoveGameObjectInChildrenTest" classname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests`1" runstate="Runnable" seed="1675939906" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.001465" asserts="0">
+                    <properties>
+                      <property name="_JOINTYPE" value="UnityCombinatorial" />
+                      <property name="retryIteration" value="0" />
+                      <property name="repeatIteration" value="0" />
+                    </properties>
+                  </test-case>
+                  <test-case id="1011" name="AddAndRemoveTest" fullname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests&lt;UISortingOrderManager&gt;(&quot;Packages/com.prpr.uiqueen/Tests/Prefa...&quot;).AddAndRemoveTest" methodname="AddAndRemoveTest" classname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests`1" runstate="Runnable" seed="1406542467" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.003532" asserts="0">
+                    <properties>
+                      <property name="_JOINTYPE" value="UnityCombinatorial" />
+                      <property name="retryIteration" value="0" />
+                      <property name="repeatIteration" value="0" />
+                    </properties>
+                    <reason>
+                      <message><![CDATA[]]></message>
+                    </reason>
+                    <output><![CDATA[Can't add 'UISortingOrderManager' to RootCanvas because a 'UISortingOrderManager' is already added to the game object!
+]]></output>
+                  </test-case>
+                  <test-case id="1012" name="AddRelativeOrderAndAddSortingOrderManagerInChildrenTest" fullname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests&lt;UISortingOrderManager&gt;(&quot;Packages/com.prpr.uiqueen/Tests/Prefa...&quot;).AddRelativeOrderAndAddSortingOrderManagerInChildrenTest" methodname="AddRelativeOrderAndAddSortingOrderManagerInChildrenTest" classname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests`1" runstate="Runnable" seed="871024335" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.000822" asserts="0">
+                    <properties>
+                      <property name="_JOINTYPE" value="UnityCombinatorial" />
+                      <property name="retryIteration" value="0" />
+                      <property name="repeatIteration" value="0" />
+                    </properties>
+                    <reason>
+                      <message><![CDATA[]]></message>
+                    </reason>
+                  </test-case>
+                  <test-case id="1015" name="AddRelativeOrderAndMoveFromOneToAnotherTest" fullname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests&lt;UISortingOrderManager&gt;(&quot;Packages/com.prpr.uiqueen/Tests/Prefa...&quot;).AddRelativeOrderAndMoveFromOneToAnotherTest" methodname="AddRelativeOrderAndMoveFromOneToAnotherTest" classname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests`1" runstate="Runnable" seed="147077756" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.000743" asserts="0">
+                    <properties>
+                      <property name="_JOINTYPE" value="UnityCombinatorial" />
+                      <property name="retryIteration" value="0" />
+                      <property name="repeatIteration" value="0" />
+                    </properties>
+                    <reason>
+                      <message><![CDATA[]]></message>
+                    </reason>
+                  </test-case>
+                  <test-case id="1016" name="ChangeOrderInListTest" fullname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests&lt;UISortingOrderManager&gt;(&quot;Packages/com.prpr.uiqueen/Tests/Prefa...&quot;).ChangeOrderInListTest" methodname="ChangeOrderInListTest" classname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests`1" runstate="Runnable" seed="1845631836" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.007471" asserts="0">
+                    <properties>
+                      <property name="_JOINTYPE" value="UnityCombinatorial" />
+                      <property name="retryIteration" value="0" />
+                      <property name="repeatIteration" value="0" />
+                    </properties>
+                  </test-case>
+                  <test-case id="1014" name="MoveFromOneToAnotherTest" fullname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests&lt;UISortingOrderManager&gt;(&quot;Packages/com.prpr.uiqueen/Tests/Prefa...&quot;).MoveFromOneToAnotherTest" methodname="MoveFromOneToAnotherTest" classname="PeroTools2.UIQueen.Editor.Tests.UISortingOrderManagerTests`1" runstate="Runnable" seed="1709426775" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.001766" asserts="0">
+                    <properties>
+                      <property name="_JOINTYPE" value="UnityCombinatorial" />
+                      <property name="retryIteration" value="0" />
+                      <property name="repeatIteration" value="0" />
+                    </properties>
+                  </test-case>
+                </test-suite>
+              </test-suite>
+              <test-suite type="TestFixture" id="1025" name="UITweenBaseTests" fullname="PeroTools2.UIQueen.Editor.Tests.UITweenBaseTests" classname="PeroTools2.UIQueen.Editor.Tests.UITweenBaseTests" runstate="Runnable" testcasecount="4" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.233978" total="4" passed="4" failed="0" inconclusive="0" skipped="0" asserts="0">
+                <properties />
+                <test-case id="1026" name="UITweenBasePreviewEnterInEditorTest" fullname="PeroTools2.UIQueen.Editor.Tests.UITweenBaseTests.UITweenBasePreviewEnterInEditorTest" methodname="UITweenBasePreviewEnterInEditorTest" classname="PeroTools2.UIQueen.Editor.Tests.UITweenBaseTests" runstate="Runnable" seed="801271000" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.125590" asserts="0">
+                  <properties>
+                    <property name="_JOINTYPE" value="UnityCombinatorial" />
+                    <property name="Timeout" value="5000" />
+                    <property name="retryIteration" value="0" />
+                    <property name="repeatIteration" value="0" />
+                  </properties>
+                </test-case>
+                <test-case id="1027" name="UITweenBasePreviewExitInEditorTest" fullname="PeroTools2.UIQueen.Editor.Tests.UITweenBaseTests.UITweenBasePreviewExitInEditorTest" methodname="UITweenBasePreviewExitInEditorTest" classname="PeroTools2.UIQueen.Editor.Tests.UITweenBaseTests" runstate="Runnable" seed="2059420075" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.102379" asserts="0">
+                  <properties>
+                    <property name="_JOINTYPE" value="UnityCombinatorial" />
+                    <property name="Timeout" value="5000" />
+                    <property name="retryIteration" value="0" />
+                    <property name="repeatIteration" value="0" />
+                  </properties>
+                </test-case>
+                <test-case id="1028" name="UITweenBaseStopPreviewInEditorTest" fullname="PeroTools2.UIQueen.Editor.Tests.UITweenBaseTests.UITweenBaseStopPreviewInEditorTest" methodname="UITweenBaseStopPreviewInEditorTest" classname="PeroTools2.UIQueen.Editor.Tests.UITweenBaseTests" runstate="Runnable" seed="508736025" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.002720" asserts="0">
+                  <properties>
+                    <property name="_JOINTYPE" value="UnityCombinatorial" />
+                    <property name="Timeout" value="5000" />
+                    <property name="retryIteration" value="0" />
+                    <property name="repeatIteration" value="0" />
+                  </properties>
+                </test-case>
+                <test-case id="1029" name="UITweenBaseStopPreviewInEditorWhenNotTriggerPreviewTest" fullname="PeroTools2.UIQueen.Editor.Tests.UITweenBaseTests.UITweenBaseStopPreviewInEditorWhenNotTriggerPreviewTest" methodname="UITweenBaseStopPreviewInEditorWhenNotTriggerPreviewTest" classname="PeroTools2.UIQueen.Editor.Tests.UITweenBaseTests" runstate="Runnable" seed="169034888" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.001810" asserts="0">
+                  <properties>
+                    <property name="_JOINTYPE" value="UnityCombinatorial" />
+                    <property name="Timeout" value="5000" />
+                    <property name="retryIteration" value="0" />
+                    <property name="repeatIteration" value="0" />
+                  </properties>
+                </test-case>
+              </test-suite>
+            </test-suite>
+          </test-suite>
+        </test-suite>
+      </test-suite>
+    </test-suite>
+    <test-suite type="Assembly" id="1037" name="Unity.Addressables.Editor.Tests.DocExampleCode.dll" fullname="/tmp/ai-code-review/peroperogames/UIQueen-PR3/Library/ScriptAssemblies/Unity.Addressables.Editor.Tests.DocExampleCode.dll" runstate="Runnable" testcasecount="1" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.000873" total="1" passed="1" failed="0" inconclusive="0" skipped="0" asserts="0">
+      <properties>
+        <property name="_PID" value="337876" />
+        <property name="_APPDOMAIN" value="Unity Child Domain" />
+        <property name="platform" value="EditMode" />
+        <property name="EditorOnly" value="True" />
+      </properties>
+      <test-suite type="TestSuite" id="1038" name="AddressableAssets" fullname="AddressableAssets" runstate="Runnable" testcasecount="1" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.000758" total="1" passed="1" failed="0" inconclusive="0" skipped="0" asserts="0">
+        <properties />
+        <test-suite type="TestSuite" id="1039" name="DocExampleCode" fullname="AddressableAssets.DocExampleCode" runstate="Runnable" testcasecount="1" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.000644" total="1" passed="1" failed="0" inconclusive="0" skipped="0" asserts="0">
+          <properties />
+          <test-suite type="TestFixture" id="1035" name="TestStub" fullname="AddressableAssets.DocExampleCode.TestStub" classname="AddressableAssets.DocExampleCode.TestStub" runstate="Runnable" testcasecount="1" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.000521" total="1" passed="1" failed="0" inconclusive="0" skipped="0" asserts="0">
+            <properties />
+            <test-case id="1036" name="RequiredTest" fullname="AddressableAssets.DocExampleCode.TestStub.RequiredTest" methodname="RequiredTest" classname="AddressableAssets.DocExampleCode.TestStub" runstate="Runnable" seed="1996713686" result="Passed" start-time="2026-10-21 11:00:27Z" end-time="2026-10-21 11:00:27Z" duration="0.000097" asserts="0">
+              <properties>
+                <property name="retryIteration" value="0" />
+                <property name="repeatIteration" value="0" />
+              </properties>
+              <output><![CDATA[Saving results to: /tmp/ai-code-review/peroperogames/UIQueen-PR3/.ai-review/tests-EditMode.xml
+]]></output>
+            </test-case>
+          </test-suite>
+        </test-suite>
+      </test-suite>
+    </test-suite>
+  </test-suite>
+</test-run>

@@ -1,0 +1,18 @@
+fix: an edit that differs in whitespace still names the lines it means
+
+SQLite.net PR #1, second run: the model answered with edits, and edit 7's `find` text was
+not in the file. One wrong indent or a dropped trailing space and 70k tokens of context
+ended with nothing to show for it.
+
+`_apply_edits` now falls back to a match that ignores leading and trailing whitespace
+line by line: a block that differs only there is still the block the model means, and the
+replacement goes where those lines are. More than one such window is still refused —
+positions have to be unambiguous — and a block that is genuinely absent still fails.
+
+A failure is also no longer final: the request is answered once more, and that second
+prompt says what went wrong (`Foo.cs: edit 1: that text is not in the file (starts with
+'void Nope()')`) and that `find` is copied out of the file contents above. The failure
+comment names the same reason.
+
+The handler's two attempts now share one loop, so a cut-off answer and an unapplicable
+edit take the same path.

@@ -1,0 +1,27 @@
+{
+  "version": 2,
+  "head_sha": "d39bbbc1b5fd05ee2f64a2da96699a7e3914f3c8",
+  "run_key": "39586837484/3",
+  "clone_dir": "/tmp/ai-code-review/peroperogames/UIQueen-PR3/.ai-review/pkg",
+  "kind": {
+    "name": "unity",
+    "package_name": "com.prpr.uiqueen",
+    "package_root": "/tmp/ai-code-review/peroperogames/UIQueen-PR3/.ai-review/pkg",
+    "solution": ""
+  },
+  "blocked": false,
+  "unity_summary": "⚠️ Unity: 编译通过；PlayMode 测试运行失败（Unity 退出码 6），没有产出报告。\n\n| 平台 | 用例 | 通过 | 失败 | 跳过 | 耗时 |\n| --- | --- | --- | --- | --- | --- |\n| EditMode | 24 | 24 | 0 | 0 | 1.3s |",
+  "dotnet_summary": "",
+  "unity": {
+    "ran": true,
+    "sln_path": "/tmp/ai-code-review/peroperogames/UIQueen-PR3/UIQueen-PR3.sln",
+    "package_projects": [
+      "/tmp/ai-code-review/peroperogames/UIQueen-PR3/PeroTools2.UIQueen.Editor.Tests.csproj",
+      "/tmp/ai-code-review/peroperogames/UIQueen-PR3/PeroTools2.UIQueen.Editor.csproj",
+      "/tmp/ai-code-review/peroperogames/UIQueen-PR3/PeroTools2.UIQueen.Samples.csproj",
+      "/tmp/ai-code-review/peroperogames/UIQueen-PR3/PeroTools2.UIQueen.Tests.csproj",
+      "/tmp/ai-code-review/peroperogames/UIQueen-PR3/PeroTools2.UIQueen.csproj"
+    ]
+  },
+  "static_posted": 0
+}

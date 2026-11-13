@@ -1,0 +1,12 @@
+fix: a PeroNPM-only release collects and uploads no artifact
+
+Nothing reads the packages artifact unless the `external` job publishes to npmjs or
+nuget: the tarball has already gone to PeroNPM from the package directory, and the
+second runner cannot see this one's disk, which is the whole reason the artifact
+exists. So `Collect the packages` and `Upload the packages` are gated on
+`DO_NPMJS || DO_NUGET`, and the upload is fatal when they run — without those files
+`external` has nothing to publish.
+
+That is also the honest version of 12a28c7: making the upload continue-on-error let a
+PeroNPM-only release skip the failure but still upload the files. ResourcesManager was
+uploading a tarball that nothing would ever download.

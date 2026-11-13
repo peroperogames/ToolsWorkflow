@@ -1,0 +1,15 @@
+feat: a reply can approve, and does not invent a reason it cannot
+
+RhythmAce-Neo #108 shows both halves in one screenshot: the bot answered
+"我没有提交 approve 的权限，审批只能由有写权限的账号来完成" and then approved the very
+same pull request a minute later. The reply agent has no approve tool, so the model
+reached for the explanation a model reaches for — a claim about the installation that
+nothing in the run had checked.
+
+`approve` is a reply tool now. It goes through the same gate as the pipeline's own
+approval: nothing may be left open, and an already-approved commit is not approved
+again. The answer says which of those stopped it, or that the approval went through.
+
+The prompt also stops the two other ways a reply can state something it cannot know:
+a refusal explained by a permission, a role or a capability, and a build or test status
+this run was not given.

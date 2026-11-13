@@ -1,0 +1,33 @@
+feat: a review asked for by a comment judges the delta since the last one
+
+These repositories deliberately do not run a workflow on push, so the incremental
+path — which hung off the push event's `before...after` — never ran at all, and every
+review was a full pass over the whole pull request (285 files on AccessKing #3) no
+matter how small the change was.
+
+The session already records the commit each review looked at (`turn_record`'s meta
+sha); the next review now diffs that against the head:
+
+    Incremental review: judging only what changed since the last reviewed commit (d39bbbc1 -> 7a940271).
+
+That is the same increment the push event would have produced, from a base the
+pipeline actually has. `_incremental_command_review` keeps the two cases that must
+not be incremental: no session (a first review, which needs the whole diff to judge
+anything) and a head identical to the last reviewed commit (nothing to diff).
+
+`@perotoolsbot review full` — or `--full`, `全部`, `全量` — asks for the whole pull
+request; it is the escape hatch for "look at it all again", which an incremental
+default would otherwise have made impossible. The other commands are unaffected:
+`rebuild full` is not a full review, it is a rebuild.
+
+The log says which of the four happened, so a review of 285 files is never a mystery:
+
+    Later push detected: running an incremental review of the pushed commits only.
+    Incremental review: judging only what changed since the last reviewed commit (d39bbbc1 -> 7a940271).
+    Full review was asked for (`review full`): every changed file is judged.
+    Full review: nothing has changed since the last reviewed commit (7a940271).
+
+Checked locally: an earlier commit → incremental and the turn is `compare(that,
+head)` with the incremental directive; the same commit → full; no session → full;
+the four words ask for a full review and `rebuild full` does not; `fully` is not the
+word.

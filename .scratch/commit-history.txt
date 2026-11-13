@@ -1,0 +1,27 @@
+perf: a run is handed 40k tokens of history, not the whole session
+
+The review of a push *is* incremental — `build_review_turns` sends the push's own
+diff (`before...after`) with `INCREMENTAL_DIRECTIVE`, adds only the comments posted
+since the last run, and tells the model to judge the new commits alone. What was not
+incremental was the transcript: the whole session — every earlier run's turns, every
+file it read, its narration — was handed to the run in full, and every step of the
+run re-sends it. A one-line push therefore paid for ten runs of history, at up to
+200k tokens per step (the compaction threshold), and the log of a small push showed
+exactly that: `571k -> 71k tokens` in one pass, then ~71k per step.
+
+`MAX_AGENT_HISTORY_TOKENS` bounds what a run is handed to 40k, keeping the newest
+turns and replacing the rest with a note:
+
+    Handed this run the last 15 message(s) of history: 15 omitted to stay under 40k tokens.
+
+That is safe because what a run needs from the earlier ones is *what was raised*, and
+the threads are that record — `list_threads` is one call away. The session file is
+untouched, so nothing is lost; the budget within a run (`MAX_AGENT_CONTEXT_TOKENS`,
+the three-pass compaction) still applies on top.
+
+Both entry points share `agent_messages`, so the review and the reply are bounded the
+same way.
+
+Checked locally on a ten-run session: 72k tokens of history handed as 37k, the
+run's own new turns untouched, no tool result left without its call; a session that
+fits is handed over whole, and a first review (no session) gets exactly its turns.

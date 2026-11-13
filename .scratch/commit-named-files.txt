@@ -1,0 +1,29 @@
+fix: settle reads the files a thread names, not only the one it is anchored to
+
+`.118` narrowed the NativeAudio report to `目前仅能确认 AndroidProject~/.project 不在分支
+中，另两个文件是否已移除或加入 .gitignore 仍无法确认` — which is an honest sentence and
+a useless one. The thread is anchored to `AndroidProject~/.project` and names three
+files in its text; the pull request removes all three and updates two `.gitignore`
+files it also names. Only the anchor was ever looked at.
+
+Now, per thread, whatever it writes in backticks is resolved against the pull
+request's changed files, and the diff of the files it names is sent with the diff of
+the file it sits on:
+
+    named file `.idea`: not among the files this pull request changes
+    named file `.project`: not among the files this pull request changes
+    named file `.classpath`: not among the files this pull request changes
+    named file `.gitignore`: changed by this pull request (AndroidProject~/.gitignore, AndroidProject~/nativeaudio/.gitignore)
+
+with three more lines of `.gitignore` diff that say `.project` and `.classpath` are
+now ignored. The prompt tells the decider what that means: not among the changed files
+is the removal being already true; `file at head: no` is the file being gone.
+
+`settle_scope` gets the threads' bodies to know the names, so `_thread_paths` became
+`_open_thread_briefs`; names are matched on the basename, which is how
+`nativeaudio/.project` in a comment finds `AndroidProject~/nativeaudio/.project` in
+the file list without guessing at a prefix.
+
+Checked locally: the names a comment writes are extracted in order, each is reported
+as changed (with its paths) or not, a body with no names adds nothing, and the whole
+suite still passes.

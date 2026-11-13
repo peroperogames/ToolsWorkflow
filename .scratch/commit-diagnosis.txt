@@ -1,0 +1,27 @@
+feat: a run that wrote no report says why, from the editor log
+
+The PlayMode run on UIQueen PR #3 exited 6, wrote no NUnit file, and the pipeline
+had one line to show for it — "Unity exited with code 3 before reporting results"
+— while the 321 KB editor log beside it said the reason 23 times. That log is now
+parsed, not just uploaded.
+
+`build_log.parse_editor_diagnosis` groups the exceptions the editor logged by
+message, counts them, keeps the outermost frame that is not engine plumbing (the
+fixture that asked, not Assert.Fail) and quotes the runner's own verdict:
+
+    **PlayMode 没有产出报告，编辑器日志里 23 次异常、2 类**：
+    - `AssertionException: There is no Addressables Settings in project, please create it!` ×16 — `MDSampleInit.Init`
+    - `NullReferenceException: Object reference not set to an instance of an object` ×7 — `DefaultPanelInserterTests.IPrebuildSetup.Setup`
+
+    测试运行器自己的结论：`Test run completed. Exiting with code 3 (RunError). Multiple unexpected errors happened while running tests.`
+
+It is part of `summary()`, so the pull request comment, the job log and the review
+prompt all carry it — an approving model is told why the suite never ran. The
+frame shortener knows two spellings that are not worth showing: an explicitly
+implemented interface method (`.UnityEngine.TestTools.IPrebuildSetup.Setup`) and
+a compiler-generated lambda (`MDSampleInit+<>c.<Init>b__1_0` is `Init`).
+
+Checked locally against that very log, which is in `.scratch/artifacts-3`: the
+parser finds 2 kinds / 23 exception lines, the frame of the first is
+`MDSampleInit.Init`, the verdict line is the one quoted above, and a missing log
+returns an empty diagnosis rather than raising.

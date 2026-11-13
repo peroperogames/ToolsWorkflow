@@ -1,0 +1,22 @@
+fix: settle judges the threads against the code, not only the discussion
+
+`@perotoolsbot settle` on AccessKing PR #3 answered `未解决线程：1 → 1` — the thread
+it was asked to close stayed open. The command was judging threads from their own
+comments and the discussion, deliberately without a diff, so a fix pushed after the
+last review (commit `1b03f2f`, "feat: 增加忽略项") was invisible to it: the commit had
+not been reviewed, and the only thing settle looked at was the conversation.
+
+It now gets the diff of the files the open threads are about — and only those. That
+is the judgment the command exists to make ("is this dealt with now?"), and a
+285-file diff would be both expensive and beside the point for the one file a thread
+is on:
+
+    Settle command: judging against the diff of 1 file(s) the open thread(s) are about.
+
+Files come from `gh.list_files`, filtered by the paths of the unresolved bot threads;
+a PR whose threads are all resolved, or whose files cannot be read, settles on the
+discussion alone as before. It still runs no build and posts no new inline comment.
+
+Checked locally: with one open thread on one file the settle step is called with that
+file's diff and nothing else; with no threads it is called with `diff_files=None`;
+the four comment states are unchanged, and dry-run still touches nothing.

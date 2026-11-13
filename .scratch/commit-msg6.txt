@@ -1,0 +1,21 @@
+fix: the packages artifact is collected outside the package directory
+
+ResourcesManager's release packed, published to PeroNPM, and then failed on the
+step that keeps the paperwork:
+
+  Error: Invalid pattern '/…/ResourcesManager/ResourcesManager/./publish-artifacts/'.
+  Relative pathing '.' and '..' is not allowed.
+
+The path was `${{ github.workspace }}/${{ inputs.working-directory }}/publish-artifacts/`,
+and `working-directory` defaults to `.` — upload-artifact@v4 refuses any pattern with a
+`.` segment. Every repository that publishes from its own root was one release away
+from this; the ones with a subdirectory never saw it.
+
+The packages are staged in `$RUNNER_TEMP/publish-artifacts` now and uploaded from
+`${{ runner.temp }}`, which is a path nothing has to build from expressions.
+
+The upload is also no longer fatal for a release that has nothing downstream: with
+neither npmjs nor nuget in `channels`, nothing reads the artifact, so a refused upload
+— the account's quota, today — must not fail a release that already published to
+PeroNPM. A multi-channel release still fails here, because the `external` job
+publishes those exact bytes.
