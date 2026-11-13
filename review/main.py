@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-11-04.unity.155"
+VERSION = "2026-11-04.unity.157"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -6917,8 +6917,17 @@ def stage_static(
     posted = run_static_analysis(
         gh, owner, repo, number, pr, scope or files, config,
         clone_dir=state.clone_dir, kind=state.kind, unity=state.unity_result(),
-        collector=held if carried else None,
+        collector=held,
     )
+    if held and not carried:
+        # A `rebuild` runs these two steps and nothing after them, so no review
+        # carries the findings — and one comment each is one notification each.
+        # They go out as one review here, the shape a review has.
+        _post_unclaimed_static_comments(gh, owner, repo, number, pr, held)
+        state.static_posted = posted
+        state.static_comments = []
+        stage_state.save(state, _state_path(owner, repo, number))
+        return 0
     if posted:
         log(f"Static analysis posted {posted} inline comment(s).")
     state.static_posted = posted
@@ -6950,7 +6959,12 @@ def _clear_static_comments(
 
 
 def _post_unclaimed_static_comments(
-    gh: GitHubClient, owner: str, repo: str, number: int, pr: Dict[str, Any]
+    gh: GitHubClient,
+    owner: str,
+    repo: str,
+    number: int,
+    pr: Dict[str, Any],
+    comments: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """Post findings the review step did not carry, so none of them is lost.
 
@@ -6958,7 +6972,11 @@ def _post_unclaimed_static_comments(
     in prose and failed, a model that posted nothing — and findings held for it
     must not disappear with it. One review again, not one comment each.
     """
-    carried = _read_static_comments(owner, repo, number, pr)
+    carried = (
+        comments
+        if comments is not None
+        else _read_static_comments(owner, repo, number, pr)
+    )
     if not carried:
         return
     head_sha = pr.get("head", {}).get("sha", "")
@@ -6972,7 +6990,8 @@ def _post_unclaimed_static_comments(
         log(f"Warning: could not post the static analysis's findings ({exc}); "
             "posting them one by one instead.")
         post_inline_comments(gh, owner, repo, number, head_sha, carried)
-    _clear_static_comments(owner, repo, number, pr)
+    if comments is None:
+        _clear_static_comments(owner, repo, number, pr)
 
 
 def stage_review(

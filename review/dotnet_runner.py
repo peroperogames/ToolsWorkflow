@@ -296,7 +296,13 @@ class DotnetResult:
         if not self.compiled:
             parts.append(self._compile_sentence_zh())
         if not self.tests_ok:
-            parts.append(f"{self._failed_count()} 个单元测试失败")
+            # A run can fail with no case to name — a test host that exited, a
+            # filter that matched nothing — and "0 个单元测试失败" is not an answer.
+            parts.append(
+                f"{self._failed_count()} 个单元测试失败"
+                if self._failed_count()
+                else f"测试运行失败（dotnet test 退出码 {self._exit_code()}）"
+            )
         return "🔴 .NET: " + "；".join(parts) + "。" + self._assembly_table()
 
     def _assembly_table(self) -> str:
@@ -403,7 +409,11 @@ class DotnetResult:
             else:
                 parts.append(f"{len(self.compile_errors)} compile error(s)")
         if not self.tests_ok:
-            parts.append(f"{self._failed_count()} test failure(s)")
+            parts.append(
+                f"{self._failed_count()} test failure(s)"
+                if self._failed_count()
+                else f"the test run exited {self._exit_code()}"
+            )
         return ".NET: " + ", ".join(parts) + "."
 
 
