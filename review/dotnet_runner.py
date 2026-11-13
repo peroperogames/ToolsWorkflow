@@ -50,6 +50,7 @@ def log(message: str) -> None:
 DOTNET_DIRS = ("~/.dotnet", "/usr/share/dotnet", "/usr/lib/dotnet")
 
 _PICKED_DOTNET: List[Optional[str]] = []
+_PICKED_VERSION: List[str] = []
 
 
 def _version_tuple(text: str) -> Tuple[int, ...]:
@@ -141,6 +142,33 @@ def dotnet_path() -> Optional[str]:
     log(f".NET SDK: {chosen}")
     _PICKED_DOTNET.append(chosen)
     return chosen
+
+
+def sdk_version() -> str:
+    """The version of the SDK this run builds with, e.g. ``11.0.100``.
+
+    Asked of the chosen binary rather than read from a directory name: the
+    analysis needs the same one the build used, and a second tool guessing its own
+    is how PeroError PR #1 got the wrong project model.
+    """
+    if _PICKED_VERSION:
+        return _PICKED_VERSION[0]
+    path = dotnet_path()
+    if not path:
+        return ""
+    try:
+        rc, text, _ = _run([path, "--version"], os.getcwd(), 60)
+    except Exception:  # noqa: BLE001 - no version is a fact, not a failure
+        return ""
+    if rc != 0:
+        return ""
+    first = ""
+    for line in (text or "").strip().splitlines():
+        if line.strip():
+            first = line.strip()
+            break
+    _PICKED_VERSION.append(first)
+    return first
 
 
 def solution_projects(solution: str) -> List[Path]:
