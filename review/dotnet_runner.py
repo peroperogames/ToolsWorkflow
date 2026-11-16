@@ -86,6 +86,56 @@ def pick_newest_dotnet(
     return best[0], seen
 
 
+FRAMEWORK = re.compile(r"<TargetFrameworks?>\s*([^<]+)</TargetFrameworks?>")
+
+
+def required_framework(root: str) -> Tuple[int, ...]:
+    """The newest framework the projects under ``root`` ask for, as ``(10, 0)``.
+
+    A build uses one SDK, and each SDK install carries the reference packs of its
+    own generation: `/usr/bin/dotnet` 10 has net10's, `~/.dotnet` 11 has net11's.
+    Which one a repository needs is therefore a fact about its projects, not about
+    where it happens to sit on `PATH`.
+    """
+    newest: Tuple[int, ...] = ()
+    for directory, _dirs, files in os.walk(root):
+        for name in files:
+            if not name.endswith(".csproj"):
+                continue
+            try:
+                text = Path(directory, name).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for match in FRAMEWORK.finditer(text):
+                for value in match.group(1).split(";"):
+                    found = re.match(r"net(\d+)\.(\d+)", value.strip(), re.I)
+                    if found:
+                        version = (int(found.group(1)), int(found.group(2)))
+                        newest = max(newest, version)
+    return newest
+
+
+def pick_for_frameworks(
+    seen: List[Tuple[str, Tuple[int, ...]]], required: Tuple[int, ...]
+) -> str:
+    """The candidate to build with: enough for ``required``, and no more.
+
+    The one on `PATH` wins when it can already build the projects — switching a
+    repository to a newer SDK than its projects ask for costs it the reference
+    packs of the older generation, which is the other half of the PeroError
+    problem: net11 needed 11, and the net10 repositories needed 10.
+    """
+    usable = [item for item in seen if item[1]]
+    if not usable:
+        return seen[0][0] if seen else ""
+    if not required:
+        return usable[0][0]
+    fitting = [item for item in usable if item[1] >= required]
+    if not fitting:
+        return max(usable, key=lambda item: item[1])[0]
+    return min(fitting, key=lambda item: item[1])[0]
+
+
 def dotnet_path() -> Optional[str]:
     """Path to the .NET SDK CLI, or None when it is not installed.
 
@@ -142,6 +192,45 @@ def dotnet_path() -> Optional[str]:
     log(f".NET SDK: {chosen}")
     _PICKED_DOTNET.append(chosen)
     return chosen
+
+
+def dotnet_for_solution(solution: str) -> Optional[str]:
+    """The SDK to build ``solution`` with — the one its frameworks need."""
+    override = os.environ.get("DOTNET_PATH", "").strip()
+    if override:
+        return dotnet_path()
+
+    candidates: List[str] = []
+    on_path = shutil.which("dotnet")
+    if on_path:
+        candidates.append(on_path)
+    for directory in DOTNET_DIRS:
+        candidate = os.path.normpath(os.path.join(os.path.expanduser(directory), "dotnet"))
+        if (
+            os.path.isfile(candidate)
+            and os.access(candidate, os.X_OK)
+            and candidate not in candidates
+        ):
+            candidates.append(candidate)
+    if not candidates:
+        return dotnet_path()
+
+    def version_of(path: str) -> Tuple[int, ...]:
+        try:
+            rc, text, _ = _run([path, "--version"], os.getcwd(), 60)
+        except Exception:  # noqa: BLE001 - an unreadable SDK is just not a candidate
+            return ()
+        return _version_tuple(text) if rc == 0 else ()
+
+    seen = [(path, version_of(path)) for path in candidates]
+    for path, version in seen:
+        said = ".".join(str(p) for p in version) if version else "unknown"
+        log(f".NET SDK candidate: {path} (version {said})")
+    required = required_framework(str(Path(solution).parent))
+    chosen = pick_for_frameworks(seen, required)
+    wanted = ".".join(str(p) for p in required) if required else "none"
+    log(f".NET SDK: {chosen} (projects ask for .NET {wanted})")
+    return chosen or None
 
 
 def sdk_version() -> str:
@@ -466,7 +555,7 @@ def analyze(clone_dir: str, solution: str, report_dir: Path) -> DotnetResult:
     """
     result = DotnetResult()
     try:
-        dotnet = dotnet_path()
+        dotnet = dotnet_for_solution(solution)
         if not dotnet or not solution:
             return result
 
