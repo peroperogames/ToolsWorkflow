@@ -41,7 +41,12 @@ if [ ! -f "$README" ]; then
     exit 0
 fi
 
+NUGET_PACKAGE="${NUGET_PACKAGE:-}"
 escaped_pkg=$(printf '%s' "$PACKAGE_NAME" | sed 's/[.]/\\./g')
+escaped_nuget=""
+if [ -n "$NUGET_PACKAGE" ]; then
+    escaped_nuget=$(printf '%s' "$NUGET_PACKAGE" | sed 's/[.]/\\./g')
+fi
 escaped_new=$(printf '%s' "$NEW_VERSION" | sed 's/[.&/]/\\&/g')
 escaped_ref=$(printf '%s' "$GIT_REF" | sed 's/[.&/]/\\&/g')
 semver='[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?'
@@ -57,6 +62,20 @@ sed -i -E \
     }" \
     "$README"
 
+# The .NET installation snippet names the nuspec id, not the UPM one:
+#   <PackageReference Include="PeroTools2.PeroError" Version="0.2.0" />
+#   dotnet add package PeroTools2.PeroError --version 0.2.0
+# The id comes from the project the nuget channel packs, so a README is kept
+# current without anyone having to name it twice.
+if [ -n "$escaped_nuget" ]; then
+    sed -i -E \
+        -e "/${escaped_nuget}/ {
+            s/(Version=\")[^\"]*(\")/\1${escaped_new}\2/g
+            s/(--version[[:space:]]+)${semver}/\1${escaped_new}/g
+        }" \
+        "$README"
+fi
+
 if cmp -s "$before" "$README"; then
     echo "Nothing to update in $README: it does not name $PACKAGE_NAME, or it already says $NEW_VERSION."
     exit 0
@@ -64,3 +83,6 @@ fi
 
 echo "Updated $README:"
 grep -n "\"${escaped_pkg}\"" "$README" | sed 's/^/  /'
+if [ -n "$escaped_nuget" ]; then
+    grep -n "${escaped_nuget}" "$README" | sed 's/^/  /'
+fi

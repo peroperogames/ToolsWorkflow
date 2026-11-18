@@ -196,6 +196,18 @@ jobs:
             echo "NUGET_PROJECT=$NUGET_PROJECT"
           } >> "$GITHUB_ENV"
 
+          # The nuspec id, read from the project itself: the README's .NET snippet
+          # names it, and nobody should have to name it twice.
+          NUGET_PACKAGE_ID=""
+          if [ -n "$NUGET_PROJECT" ] && [ -f "$NUGET_PROJECT" ]; then
+            NUGET_PACKAGE_ID=$(sed -n 's:.*<PackageId>[[:space:]]*\([^<]*\)</PackageId>.*:\1:p' "$NUGET_PROJECT" | head -1)
+            case "$NUGET_PROJECT" in
+              *.csproj) [ -n "$NUGET_PACKAGE_ID" ] || NUGET_PACKAGE_ID=$(basename "$NUGET_PROJECT" .csproj) ;;
+            esac
+          fi
+          echo "NUGET_PACKAGE=$NUGET_PACKAGE_ID" >> "$GITHUB_ENV"
+          echo "nuget-package: ${NUGET_PACKAGE_ID:-(none)}"
+
           # Exported, or the resolver — a child process — sees an empty project and
           # refuses the nuget channel it was just told about.
           export NUGET_PROJECT
