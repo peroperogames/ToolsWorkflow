@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-11-04.unity.168"
+VERSION = "2026-11-04.unity.169"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3153,40 +3153,6 @@ def decide_resolved_threads(
                 str(item.get("reason") or "").split()
             )
 
-    # One draft review carries every reply this pass posts, so they submit together.
-    # Opened by the first reply that needs it: a pass that ends before replying
-    # anything must not leave a draft behind, because an open draft blocks every
-    # later write on the pull request (422, one pending review per user).
-    draft: Dict[str, Any] = {"id": "", "opened": False}
-
-    def batched(note: str, thread_id: Any) -> bool:
-        """Attach the reply to the draft; False means post it on its own."""
-        adder = getattr(gh, "add_pending_review_reply", None)
-        if not callable(adder):
-            return False
-        if not draft["opened"]:
-            draft["opened"] = True
-            # A draft left by a run that died before submitting blocks every write
-            # on the pull request — a review, a reply, an approval (422, one
-            # pending review per user). PeroError PR #2 lost a whole settle to one.
-            try:
-                clear_leftover_pending_reviews(gh, owner, repo, number)
-            except Exception as exc:  # noqa: BLE001 - the clear is a courtesy
-                log(f"Warning: could not look for a leftover draft review ({exc}).")
-            creator = getattr(gh, "create_pending_review", None)
-            try:
-                draft["id"] = creator(pr.get("node_id", ""), "") or "" if callable(creator) else ""
-            except Exception as exc:  # noqa: BLE001 - fall back to one reply each
-                log(f"Warning: could not open a draft review ({exc}); replying in each thread.")
-                draft["id"] = ""
-        if not draft.get("id"):
-            return False
-        try:
-            return bool(adder(draft["id"], str(thread_id), note))
-        except Exception as exc:  # noqa: BLE001 - one reply is better than none
-            log(f"Warning: could not add a reply to the draft review ({exc}).")
-            return False
-
     known = {str(c["id"]) for c in candidates}
     resolved = 0
     kept_open: List[Dict[str, Any]] = []
@@ -3222,9 +3188,7 @@ def decide_resolved_threads(
                 "comment_id": c.get("comment_id"),
             }
         )
-        # Gathered on a draft review and submitted once: the reasons stay in their
-        # threads, and the author gets one notification instead of one per thread.
-        if reply and not (draft.get("id") and batched(note, c["id"])):
+        if reply:
             _reply_in_thread(
                 gh, owner, repo, number, c.get("comment_id"), note, c["path"]
             )
@@ -3242,14 +3206,6 @@ def decide_resolved_threads(
                     "body": c.get("body") or "",
                 }
             )
-    if draft.get("id"):
-        submitter = getattr(gh, "submit_review", None)
-        try:
-            if callable(submitter) and submitter(draft["id"], "COMMENT"):
-                outcome.closed_in_threads = True
-                log(f"Submitted one review carrying {len(outcome.closed)} reply(s).")
-        except Exception as exc:  # noqa: BLE001 - the threads are resolved either way
-            log(f"Warning: could not submit the draft review ({exc}).")
     outcome.resolved = resolved
     outcome.open = kept_open
     for item in kept_open:
