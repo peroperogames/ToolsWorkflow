@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-11-04.unity.163"
+VERSION = "2026-11-04.unity.164"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -2577,7 +2577,6 @@ def handle_settle_command(ctx: CommandContext, command: Command) -> int:
         diff_files=diff_files,
         changed_paths=changed_paths,
         language=ctx.config.language,
-        reply=False,
     )
     after = unresolved_bot_thread_count(ctx.gh, ctx.owner, ctx.repo, ctx.number)
     result = settle_comment_body(before, after, outcome)
@@ -2637,7 +2636,7 @@ def _closed_lines(outcome: "SettleOutcome") -> str:
     sixth saying how many were left. The same sentences fit in the one message
     the settle already posts.
     """
-    if not outcome.closed:
+    if not outcome.closed or outcome.closed_in_threads:
         return ""
     shown = outcome.closed[:10]
     lines = ["", "", f"已关闭 {len(outcome.closed)} 条："]
@@ -3003,6 +3002,9 @@ class SettleOutcome:
     # Threads this pass closed, with the decider's sentence: one list, so a settle
     # reports all of them in one place instead of one notification per thread.
     closed: List[Dict[str, Any]] = field(default_factory=list)
+    # True when each closed thread got its reason inside the thread, as replies
+    # carried by one review: the message then has no list to repeat.
+    closed_in_threads: bool = False
     approved: bool = False
     unknown: bool = False
 
@@ -3151,6 +3153,27 @@ def decide_resolved_threads(
                 str(item.get("reason") or "").split()
             )
 
+    # One draft review carries every reply this pass posts, so they submit together.
+    draft: Dict[str, Any] = {"id": ""}
+    if reply:
+        creator = getattr(gh, "create_pending_review", None)
+        if callable(creator):
+            try:
+                draft["id"] = creator(pr.get("node_id", ""), "") or ""
+            except Exception as exc:  # noqa: BLE001 - fall back to one reply each
+                log(f"Warning: could not open a draft review ({exc}); replying in each thread.")
+
+    def batched(note: str, thread_id: Any) -> bool:
+        """Attach the reply to the draft; False means post it on its own."""
+        adder = getattr(gh, "add_pending_review_reply", None)
+        if not callable(adder):
+            return False
+        try:
+            return bool(adder(draft["id"], str(thread_id), note))
+        except Exception as exc:  # noqa: BLE001 - one reply is better than none
+            log(f"Warning: could not add a reply to the draft review ({exc}).")
+            return False
+
     known = {str(c["id"]) for c in candidates}
     resolved = 0
     kept_open: List[Dict[str, Any]] = []
@@ -3181,12 +3204,14 @@ def decide_resolved_threads(
                 "path": c.get("path"),
                 "line": c.get("line"),
                 "reason": note,
-                # The thread this came from, so the one message can point at it
-                # instead of leaving the reader to find the line in the diff.
+                # The thread this came from, so a message can point at it instead
+                # of leaving the reader to find the line in the diff.
                 "comment_id": c.get("comment_id"),
             }
         )
-        if reply:
+        # Gathered on a draft review and submitted once: the reasons stay in their
+        # threads, and the author gets one notification instead of one per thread.
+        if reply and not (draft.get("id") and batched(note, c["id"])):
             _reply_in_thread(
                 gh, owner, repo, number, c.get("comment_id"), note, c["path"]
             )
@@ -3204,6 +3229,14 @@ def decide_resolved_threads(
                     "body": c.get("body") or "",
                 }
             )
+    if draft.get("id"):
+        submitter = getattr(gh, "submit_review", None)
+        try:
+            if callable(submitter) and submitter(draft["id"], "COMMENT"):
+                outcome.closed_in_threads = True
+                log(f"Submitted one review carrying {len(outcome.closed)} reply(s).")
+        except Exception as exc:  # noqa: BLE001 - the threads are resolved either way
+            log(f"Warning: could not submit the draft review ({exc}).")
     outcome.resolved = resolved
     outcome.open = kept_open
     for item in kept_open:

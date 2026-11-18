@@ -320,6 +320,55 @@ class GitHubClient:
             "POST", f"/repos/{owner}/{repo}/pulls/{number}/comments", json=payload
         )
 
+    def create_pending_review(self, pr_node_id: str, body: str = "") -> Optional[str]:
+        """A draft review: replies gathered on it, submitted once.
+
+        ``addPullRequestReview`` without an ``event`` leaves the review pending,
+        which is the only way to answer several threads and produce one
+        notification instead of one per thread.
+        """
+        data = self.graphql(
+            "mutation($pr: ID!, $body: String) {"
+            " addPullRequestReview(input: {pullRequestId: $pr, body: $body})"
+            " { pullRequestReview { id } } }",
+            {"pr": pr_node_id, "body": body},
+        )
+        return (
+            ((data.get("data") or {}).get("addPullRequestReview") or {})
+            .get("pullRequestReview", {})
+            .get("id")
+        )
+
+    def add_pending_review_reply(
+        self, review_node_id: str, thread_node_id: str, body: str
+    ) -> bool:
+        """A reply inside an existing thread, attached to the draft review."""
+        data = self.graphql(
+            "mutation($rev: ID!, $thread: ID!, $body: String!) {"
+            " addPullRequestReviewThreadReply(input: {pullRequestReviewId: $rev,"
+            " pullRequestReviewThreadId: $thread, body: $body}) { comment { id } } }",
+            {"rev": review_node_id, "thread": thread_node_id, "body": body},
+        )
+        return bool(
+            ((data.get("data") or {}).get("addPullRequestReviewThreadReply") or {}).get(
+                "comment"
+            )
+        )
+
+    def submit_review(self, review_node_id: str, event: str = "COMMENT") -> bool:
+        """Submit a draft review, with everything attached to it, at once."""
+        data = self.graphql(
+            "mutation($rev: ID!, $event: PullRequestReviewEvent!) {"
+            " submitPullRequestReview(input: {pullRequestReviewId: $rev, event: $event})"
+            " { pullRequestReview { state } } }",
+            {"rev": review_node_id, "event": event},
+        )
+        return bool(
+            ((data.get("data") or {}).get("submitPullRequestReview") or {}).get(
+                "pullRequestReview"
+            )
+        )
+
     def delete_review(
         self, owner: str, repo: str, number: int, review_id: Any
     ) -> Any:
