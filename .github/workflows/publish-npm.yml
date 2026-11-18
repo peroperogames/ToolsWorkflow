@@ -216,10 +216,23 @@ jobs:
         env:
           CI_COMMIT_TAG: ${{ github.ref_name }}
         run: |
-          if ! command -v dotnet > /dev/null 2>&1; then
+          # A job step's PATH is not the interactive shell's: a runner can hold the
+          # SDK under ~/.dotnet and still have no `dotnet` here, which is what
+          # stopped PeroError 0.3.0 before it packed anything. Look in the places
+          # an SDK installs itself, and keep the newest of them.
+          DOTNET="$(command -v dotnet || true)"
+          for candidate in "$HOME/.dotnet/dotnet" /usr/share/dotnet/dotnet /usr/lib/dotnet/dotnet; do
+            [ -x "$candidate" ] || continue
+            if [ -z "$DOTNET" ]; then DOTNET="$candidate"; continue; fi
+            newest="$(printf '%s\n%s\n' "$("$candidate" --version 2>/dev/null)" "$("$DOTNET" --version 2>/dev/null)" | sort -V | tail -n1)"
+            if [ "$newest" = "$("$candidate" --version 2>/dev/null)" ]; then DOTNET="$candidate"; fi
+          done
+          if [ -z "$DOTNET" ]; then
             echo "::error::The nuget channel needs the .NET SDK and there is no dotnet on this runner."
             exit 1
           fi
+          echo "dotnet: $DOTNET ($("$DOTNET" --version))"
+          export PATH="$(dirname "$DOTNET"):$PATH"
           if [ ! -e "$NUGET_PROJECT" ]; then
             echo "::error::No '$NUGET_PROJECT' at the repository root — the nuget-project input names the .csproj or .sln to pack, relative to the repository root."
             exit 1
@@ -315,10 +328,23 @@ jobs:
           PLUGIN_PROJECT: ${{ inputs.unity-plugin-project }}
           PLUGIN_CONFIGURATION: ${{ inputs.unity-plugin-configuration }}
         run: |
-          if ! command -v dotnet > /dev/null 2>&1; then
+          # A job step's PATH is not the interactive shell's: a runner can hold the
+          # SDK under ~/.dotnet and still have no `dotnet` here, which is what
+          # stopped PeroError 0.3.0 before it packed anything. Look in the places
+          # an SDK installs itself, and keep the newest of them.
+          DOTNET="$(command -v dotnet || true)"
+          for candidate in "$HOME/.dotnet/dotnet" /usr/share/dotnet/dotnet /usr/lib/dotnet/dotnet; do
+            [ -x "$candidate" ] || continue
+            if [ -z "$DOTNET" ]; then DOTNET="$candidate"; continue; fi
+            newest="$(printf '%s\n%s\n' "$("$candidate" --version 2>/dev/null)" "$("$DOTNET" --version 2>/dev/null)" | sort -V | tail -n1)"
+            if [ "$newest" = "$("$candidate" --version 2>/dev/null)" ]; then DOTNET="$candidate"; fi
+          done
+          if [ -z "$DOTNET" ]; then
             echo "::error::unity-plugin-project is set, and rebuilding it needs the .NET SDK; there is no dotnet on this runner."
             exit 1
           fi
+          echo "dotnet: $DOTNET ($("$DOTNET" --version))"
+          export PATH="$(dirname "$DOTNET"):$PATH"
           if [ ! -e "$PLUGIN_PROJECT" ]; then
             echo "::error::No '$PLUGIN_PROJECT' at the repository root — unity-plugin-project names the .csproj or .sln whose build produces the assembly $PACKAGE_DIR ships."
             exit 1
