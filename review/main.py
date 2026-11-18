@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-11-04.unity.166"
+VERSION = "2026-11-04.unity.167"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3154,23 +3154,29 @@ def decide_resolved_threads(
             )
 
     # One draft review carries every reply this pass posts, so they submit together.
-    draft: Dict[str, Any] = {"id": ""}
-    if reply:
-        # A draft left by a run that died before submitting blocks every write on
-        # the pull request — a new review, a reply, an approval (422, one pending
-        # review per user). PeroError PR #2 lost a whole settle to one.
-        clear_leftover_pending_reviews(gh, owner, repo, number)
-        creator = getattr(gh, "create_pending_review", None)
-        if callable(creator):
-            try:
-                draft["id"] = creator(pr.get("node_id", ""), "") or ""
-            except Exception as exc:  # noqa: BLE001 - fall back to one reply each
-                log(f"Warning: could not open a draft review ({exc}); replying in each thread.")
+    # Opened by the first reply that needs it: a pass that ends before replying
+    # anything must not leave a draft behind, because an open draft blocks every
+    # later write on the pull request (422, one pending review per user).
+    draft: Dict[str, Any] = {"id": "", "opened": False}
 
     def batched(note: str, thread_id: Any) -> bool:
         """Attach the reply to the draft; False means post it on its own."""
         adder = getattr(gh, "add_pending_review_reply", None)
         if not callable(adder):
+            return False
+        if not draft["opened"]:
+            draft["opened"] = True
+            # A draft left by a run that died before submitting blocks every write
+            # on the pull request — a review, a reply, an approval (422, one
+            # pending review per user). PeroError PR #2 lost a whole settle to one.
+            clear_leftover_pending_reviews(gh, owner, repo, number)
+            creator = getattr(gh, "create_pending_review", None)
+            try:
+                draft["id"] = creator(pr.get("node_id", ""), "") or "" if callable(creator) else ""
+            except Exception as exc:  # noqa: BLE001 - fall back to one reply each
+                log(f"Warning: could not open a draft review ({exc}); replying in each thread.")
+                draft["id"] = ""
+        if not draft.get("id"):
             return False
         try:
             return bool(adder(draft["id"], str(thread_id), note))
