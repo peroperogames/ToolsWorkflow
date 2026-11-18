@@ -748,9 +748,15 @@ jobs:
 
       # Requested right before the push: nuget.org hands out a key valid for one
       # hour and usable once, and an early one expires before the packages arrive.
+      # Trusted publishing first, an API key as the fallback: the OIDC exchange
+      # has to match a policy on nuget.org exactly (repository, workflow file,
+      # environment, package glob), and one wrong field there fails the release
+      # with a 401 that says nothing about which field. A key keeps a release
+      # possible while that is sorted out.
       - name: NuGet login
         id: nuget_login
         if: ${{ needs.publish.outputs.nuget == 'true' }}
+        continue-on-error: true
         uses: NuGet/login@v1
         with:
           user: ${{ inputs.nuget-user }}
@@ -758,12 +764,16 @@ jobs:
       - name: Push the NuGet packages
         if: ${{ needs.publish.outputs.nuget == 'true' }}
         env:
-          NUGET_API_KEY: ${{ steps.nuget_login.outputs.NUGET_API_KEY }}
+          NUGET_API_KEY: ${{ steps.nuget_login.outputs.NUGET_API_KEY || secrets.NUGET_API_KEY }}
           NUGET_SOURCE: ${{ inputs.nuget-source }}
         run: |
           if [ -z "$NUGET_API_KEY" ]; then
-            echo "::error::nuget.org returned no API key — its trusted publishing policy must name the repository and the workflow file reported above."
+            echo "::error::no NuGet API key: the OIDC exchange failed (see the login step) and no NUGET_API_KEY secret is set."
+            echo "::error::Either fix the trusted publishing policy (repository, workflow file, environment, package glob) or set the NUGET_API_KEY secret to a nuget.org key with push permission."
             exit 1
+          fi
+          if [ -n "${{ secrets.NUGET_API_KEY }}" ]; then
+            echo "Pushing with the NUGET_API_KEY secret; the OIDC exchange is not needed."
           fi
           shopt -s nullglob
           packages=(packages/*.nupkg)
