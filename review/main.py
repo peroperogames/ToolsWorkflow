@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-11-04.unity.165"
+VERSION = "2026-11-04.unity.166"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3156,6 +3156,10 @@ def decide_resolved_threads(
     # One draft review carries every reply this pass posts, so they submit together.
     draft: Dict[str, Any] = {"id": ""}
     if reply:
+        # A draft left by a run that died before submitting blocks every write on
+        # the pull request — a new review, a reply, an approval (422, one pending
+        # review per user). PeroError PR #2 lost a whole settle to one.
+        clear_leftover_pending_reviews(gh, owner, repo, number)
         creator = getattr(gh, "create_pending_review", None)
         if callable(creator):
             try:
