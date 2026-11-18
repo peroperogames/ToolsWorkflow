@@ -748,6 +748,25 @@ jobs:
 
       # Requested right before the push: nuget.org hands out a key valid for one
       # hour and usable once, and an early one expires before the packages arrive.
+      # The token exchange's own error names neither the claim it saw nor the
+      # policy fields it compared against. This prints the response body, once,
+      # when a repository sets the NUGET_OIDC_PROBE variable — the only place the
+      # OIDC token and that body exist at all.
+      - name: Probe the nuget.org token exchange
+        if: ${{ needs.publish.outputs.nuget == 'true' && vars.NUGET_OIDC_PROBE == 'true' }}
+        continue-on-error: true
+        env:
+          NUGET_USER_PROBE: ${{ inputs.nuget-user }}
+        run: |
+          idtoken=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://www.nuget.org" | jq -r .value)
+          echo "id token claims:"
+          printf '%s' "$idtoken" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | jq .
+          echo "token service response:"
+          curl -sS -w '\nhttp=%{http_code}\n' -X POST https://www.nuget.org/api/v2/token \
+            -H "Authorization: Bearer $idtoken" -H 'Content-Type: application/json' \
+            -d "{\"username\":\"$NUGET_USER_PROBE\",\"tokenType\":\"ApiKey\"}"
+
       - name: NuGet login
         id: nuget_login
         if: ${{ needs.publish.outputs.nuget == 'true' }}
