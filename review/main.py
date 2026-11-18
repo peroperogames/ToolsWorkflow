@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-11-04.unity.162"
+VERSION = "2026-11-04.unity.163"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -2645,6 +2645,9 @@ def _closed_lines(outcome: "SettleOutcome") -> str:
         where = item.get("path") or "?"
         line = item.get("line")
         label = "`%s:%s`" % (where, line) if line else "`%s`" % where
+        anchor = item.get("comment_id")
+        if isinstance(anchor, int):
+            label = "[%s](#discussion_r%d)" % (label, anchor)
         reason = " ".join((item.get("reason") or "").split())
         lines.append("- %s — %s" % (label, reason) if reason else "- %s" % label)
     if len(outcome.closed) > len(shown):
@@ -3174,7 +3177,14 @@ def decide_resolved_threads(
             continue
         note = _resolution_note(wanted.get(tid, ""), language)
         outcome.closed.append(
-            {"path": c.get("path"), "line": c.get("line"), "reason": note}
+            {
+                "path": c.get("path"),
+                "line": c.get("line"),
+                "reason": note,
+                # The thread this came from, so the one message can point at it
+                # instead of leaving the reader to find the line in the diff.
+                "comment_id": c.get("comment_id"),
+            }
         )
         if reply:
             _reply_in_thread(
