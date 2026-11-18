@@ -64,7 +64,7 @@ PROMPT_TARGET = "peroperogames/ToolsWorkflow/review/prompt.md"
 DEFAULT_PROJECT_PROMPT_PATH = ".github/ai-review.md"
 
 # Bumped whenever behaviour changes, so the job log shows which build ran.
-VERSION = "2026-11-04.unity.164"
+VERSION = "2026-11-04.unity.165"
 
 # Sections the review body is assembled from when the model only returns
 # comments (JSON-only prompt) rather than ready-made Markdown.
@@ -3782,26 +3782,58 @@ def handle_review_request(
         why_not = "This review ran without the build and the tests"
 
     head_sha = pr.get("head", {}).get("sha", "")
+    # A review asked for by a command judges what changed since the last one, the
+    # same increment a push event carries. Everything is judged on a first review,
+    # and when the head has not moved there is nothing smaller to look at.
+    previous = last_turn_sha(session_records)
+    asked_full = any(word in (body or "").lower() for word in FULL_REVIEW_WORDS)
+    incremental = not asked_full and _incremental_command_review(
+        session_records, head_sha
+    )
+    scope = files
+    if incremental:
+        try:
+            changed = gh.compare(owner, repo, previous, head_sha)
+        except Exception as exc:  # noqa: BLE001 - the whole pull request is the fallback
+            log(f"Warning: could not diff {previous[:7]}..{head_sha[:7]}: {exc}")
+            changed = None
+        if changed is None:
+            incremental = False
+        else:
+            scope = changed
+            log(
+                "Incremental review: judging only what changed since the last "
+                f"reviewed commit ({previous[:8] or '?'} -> {head_sha[:8]}), "
+                f"{len(scope)} file(s)."
+            )
+    elif asked_full:
+        log("Full review was asked for (`review full`): every changed file is judged.")
+    prompt = system_prompt + INCREMENTAL_DIRECTIVE if incremental else system_prompt
     turns = list(comment_records)
     if not session.has_bootstrap(session_records):
         turns.append(
             turn_record(
-                build_diff_text(pr, files) + context_suffix(extra_context),
+                build_diff_text(pr, scope) + context_suffix(extra_context),
                 "open",
                 head_sha,
             )
         )
+    asked = (
+        f"Review what changed since {previous[:8]} with your tools."
+        if incremental
+        else "Review the current state of the pull request with your tools."
+    )
     turns.append(
         turn_record(
             f"## Review Request\n\n**{author}** asked for a review:\n\n{body}\n\n"
-            "Review the current state of the pull request with your tools.",
+            + asked,
             "request",
             head_sha,
         )
     )
 
     ctx = run_agent_review(
-        ai, gh, owner, repo, number, pr, files, system_prompt, session_records, turns,
+        ai, gh, owner, repo, number, pr, scope, prompt, session_records, turns,
         config, block_approve=not may_approve, block_reason=block_reason,
         review_body=review_body,
         carried_comments=_read_static_comments(owner, repo, number, pr),
@@ -3814,7 +3846,7 @@ def handle_review_request(
         return 0
 
     review_text, raw_comments, _general = perform_review(
-        ai, system_prompt, pr, files, config.max_tokens_per_chunk, conversation
+        ai, prompt, pr, scope, config.max_tokens_per_chunk, conversation
     )
     if not review_text:
         log("Error: perform_review returned empty — model may have hit a limit or returned no content.")
