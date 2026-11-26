@@ -236,14 +236,18 @@ jobs:
           # A job step's PATH is not the interactive shell's: a runner can hold the
           # SDK under ~/.dotnet and still have no `dotnet` here, which is what
           # stopped PeroError 0.3.0 before it packed anything. Look in the places
-          # an SDK installs itself, and keep the newest of them.
+          # an SDK installs itself, and take the first one there.
+          # PATH first: a repository can pin its SDK in global.json, and the pinned
+          # one is whatever plain `dotnet` has always resolved to. The install
+          # directories are only a fallback for a runner whose PATH has none.
           DOTNET="$(command -v dotnet || true)"
-          for candidate in "$HOME/.dotnet/dotnet" /usr/share/dotnet/dotnet /usr/lib/dotnet/dotnet; do
-            [ -x "$candidate" ] || continue
-            if [ -z "$DOTNET" ]; then DOTNET="$candidate"; continue; fi
-            newest="$(printf '%s\n%s\n' "$("$candidate" --version 2>/dev/null)" "$("$DOTNET" --version 2>/dev/null)" | sort -V | tail -n1)"
-            if [ "$newest" = "$("$candidate" --version 2>/dev/null)" ]; then DOTNET="$candidate"; fi
-          done
+          if [ -z "$DOTNET" ]; then
+            for candidate in "$HOME/.dotnet/dotnet" /usr/share/dotnet/dotnet /usr/lib/dotnet/dotnet; do
+              [ -x "$candidate" ] || continue
+              DOTNET="$candidate"
+              break
+            done
+          fi
           if [ -z "$DOTNET" ]; then
             echo "::error::The nuget channel needs the .NET SDK and there is no dotnet on this runner."
             exit 1
@@ -348,14 +352,18 @@ jobs:
           # A job step's PATH is not the interactive shell's: a runner can hold the
           # SDK under ~/.dotnet and still have no `dotnet` here, which is what
           # stopped PeroError 0.3.0 before it packed anything. Look in the places
-          # an SDK installs itself, and keep the newest of them.
+          # an SDK installs itself, and take the first one there.
+          # PATH first: a repository can pin its SDK in global.json, and the pinned
+          # one is whatever plain `dotnet` has always resolved to. The install
+          # directories are only a fallback for a runner whose PATH has none.
           DOTNET="$(command -v dotnet || true)"
-          for candidate in "$HOME/.dotnet/dotnet" /usr/share/dotnet/dotnet /usr/lib/dotnet/dotnet; do
-            [ -x "$candidate" ] || continue
-            if [ -z "$DOTNET" ]; then DOTNET="$candidate"; continue; fi
-            newest="$(printf '%s\n%s\n' "$("$candidate" --version 2>/dev/null)" "$("$DOTNET" --version 2>/dev/null)" | sort -V | tail -n1)"
-            if [ "$newest" = "$("$candidate" --version 2>/dev/null)" ]; then DOTNET="$candidate"; fi
-          done
+          if [ -z "$DOTNET" ]; then
+            for candidate in "$HOME/.dotnet/dotnet" /usr/share/dotnet/dotnet /usr/lib/dotnet/dotnet; do
+              [ -x "$candidate" ] || continue
+              DOTNET="$candidate"
+              break
+            done
+          fi
           if [ -z "$DOTNET" ]; then
             echo "::error::unity-plugin-project is set, and rebuilding it needs the .NET SDK; there is no dotnet on this runner."
             exit 1
