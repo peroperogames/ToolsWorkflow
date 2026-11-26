@@ -1,55 +1,96 @@
 #!/bin/bash
+# Rename the folders a package's own file: dependencies point at.
+#
+# A UPM package that ships other UPM packages as `file:../Foo~` dependencies needs
+# its `Foo/` folder to be called `Foo~` in the published tarball, or the installed
+# package resolves the dependency to a path that is not there. This step renames
+# exactly those folders, and deletes the `.meta` that belonged to the old name so
+# Unity does not see an orphan.
+#
+# Output is English, like every other step: the Chinese lines this script used to
+# print were the only ones left in the log, and read as another tool's output.
+set -euo pipefail
 
-#set -e 
-#set -x
-echo "####原有目录：####"
-find $CI_PROJECT_DIR -maxdepth 1 -type d -printf "%f\n"
-echo "###################"
-#获取项目根目录名称；
-declare -a arr
-declare -a brr
-# 使用find获取子目录,存入arr数组
-#arr=($(find $CI_PROJECT_DIR -maxdepth 1 -type d -printf "%f\n"))
-# 使用find获取子目录,存入arr数组
-mapfile -t arr < <(find "$CI_PROJECT_DIR" -maxdepth 1 -type d -printf "%f\n")
+root="${CI_PROJECT_DIR:?CI_PROJECT_DIR is not set}"
+manifest="$root/package.json"
 
-#检索packages.json文件，找到目标文件目录名；
-mapfile -t brr < <(grep "~" $CI_PROJECT_DIR/package.json | cut -d'~' -f1 | cut -d ':' -f2 | sed 's/.//' | sed 's/.//')
-#brr=($(grep "~" $CI_PROJECT_DIR/package.json | cut -d'~' -f1 | cut -d ':' -f2 | sed 's/.//' | sed 's/.//'))
-echo "${brr[@]}"
-#去重
-declare -A uniq_brr
-
-for i in "${brr[@]}"; do
-   uniq_brr["$i"]=1 
-done
-
-brr=()
-
-for i in "${!uniq_brr[@]}"; do
-   brr+=("$i")
-done
-echo "packages.json里检测出的目录有: ${brr[@]}"
-#根据目标目录名更改根目录对应的目录名，添加~；
-same=false
-for i in "${arr[@]}"; do
-   echo "开始对目录 $i 进行判断"
-   for j in "${brr[@]}"; do
-      if [ "${i}" == "${j}" ]; then
-        echo "正在处理: $i"
-        mv "$CI_PROJECT_DIR/${i}" "$CI_PROJECT_DIR/${i}~"
-        ii="${i}.meta"
-        echo "将删除meta文件${ii}"
-        ls "$CI_PROJECT_DIR" | grep "$ii"
-        rm -f "$CI_PROJECT_DIR/$ii"
-        same=true
-      fi
-   done
-done
-
-if [ "$same" == false ]; then
-   echo "No same elements"
+if [ ! -f "$manifest" ]; then
+  echo "No package.json at $manifest; nothing to rename."
+  exit 0
 fi
-echo "######修改后目录：######"
-find $CI_PROJECT_DIR -maxdepth 1 -type d -printf "%f\n"
-echo "#########################"
+
+echo "Folders in the package:"
+find "$root" -maxdepth 1 -mindepth 1 -type d -printf '  %f\n' | sort
+
+# The folder names the manifest points at: every string ending in `X~`, which is how
+# a package references a folder that has to carry the tilde once published.
+python="${PYTHON:-$(command -v python3 || command -v python || true)}"
+if [ -z "$python" ]; then
+  echo "::error::renaming folders needs python3 (to read package.json); none on PATH." >&2
+  exit 1
+fi
+
+# Collected into a variable first: a here-document inside a process substitution is
+# consumed by the wrong command, and the names come back empty.
+names=$("$python" - "$manifest" <<'PY'
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8-sig") as handle:
+    data = json.load(handle)
+
+found = set()
+
+
+def walk(node):
+    if isinstance(node, dict):
+        for value in node.values():
+            walk(value)
+    elif isinstance(node, list):
+        for value in node:
+            walk(value)
+    elif isinstance(node, str):
+        match = re.search(r"([^/\\~]+)~\s*$", node)
+        if match:
+            found.add(match.group(1))
+
+
+walk(data)
+for name in sorted(found):
+    print(name)
+PY
+)
+mapfile -t wanted <<< "$names"
+# A manifest with no such folder yields an empty line rather than no line.
+wanted=($(printf '%s\n' "${wanted[@]}" | sed '/^$/d'))
+
+if [ ${#wanted[@]} -eq 0 ]; then
+  echo "No folder referenced with '~' in package.json; nothing to rename."
+else
+  echo "Folders package.json references with '~': ${wanted[*]}"
+fi
+
+renamed=0
+for name in "${wanted[@]}"; do
+  source="$root/$name"
+  if [ ! -d "$source" ]; then
+    echo "  $name: no such folder; skipped."
+    continue
+  fi
+  if [ -e "${source}~" ]; then
+    echo "  $name: ${name}~ already exists; skipped."
+    continue
+  fi
+  mv "$source" "${source}~"
+  echo "  $name -> ${name}~"
+  if [ -f "$root/$name.meta" ]; then
+    rm -f "$root/$name.meta"
+    echo "  removed $name.meta, which named the old folder"
+  fi
+  renamed=$((renamed + 1))
+done
+
+echo "Renamed $renamed folder(s)."
+echo "Folders after the rename:"
+find "$root" -maxdepth 1 -mindepth 1 -type d -printf '  %f\n' | sort
