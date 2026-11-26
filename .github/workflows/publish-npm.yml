@@ -808,9 +808,13 @@ jobs:
             -H "Authorization: Bearer $idtoken" -H 'Content-Type: application/json' \
             -d "{\"username\":\"$NUGET_USER_PROBE\",\"tokenType\":\"ApiKey\"}"
 
+      # Gated like the push below it: this workflow only packs the packages now,
+      # and the caller's own job does the OIDC exchange (a reusable workflow can
+      # never match the policy — NuGet/login#6). Left ungated, a caller that asks
+      # for the nuget channel got a red job for a step nothing needed.
       - name: NuGet login
         id: nuget_login
-        if: ${{ needs.publish.outputs.nuget == 'true' }}
+        if: ${{ needs.publish.outputs.nuget == 'true' && vars.NUGET_OIDC_PROBE == 'true' }}
         uses: NuGet/login@v1
         with:
           user: ${{ inputs.nuget-user }}
