@@ -88,6 +88,11 @@ on:
       # is deleted.
       NPMJS_BOOTSTRAP_TOKEN:
         required: false
+      # nuget.org cannot match a trusted publishing policy against a job defined in
+      # a reusable workflow (NuGet/login#6), so this workflow pushes with an API
+      # key. A nuget.org key expires, so the secret is rotated rather than never.
+      NUGET_API_KEY:
+        required: false
   # The other two channels authenticate with OIDC trusted publishing, so this
   # workflow holds no token for either registry. Two things live in the calling
   # repository instead:
@@ -648,6 +653,41 @@ jobs:
         with:
           name: publish-packages
           path: packages
+
+      # API key, not OIDC: nuget.org validates `job_workflow_ref`, which names THIS
+      # file, and a policy can only ever name the package's own repository — so the
+      # exchange is refused whatever the policy says (NuGet/login#6). The key is a
+      # nuget.org key with push rights; `--skip-duplicate` makes a re-run of the
+      # release succeed instead of failing on a version that is already there.
+      - name: Push the NuGet packages
+        if: ${{ needs.publish.outputs.nuget == 'true' }}
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          NUGET_SOURCE: ${{ inputs.nuget-source }}
+        run: |
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "::error::The nuget channel needs the NUGET_API_KEY secret — a nuget.org key with push rights for this package."
+            exit 1
+          fi
+          shopt -s nullglob
+          packages=(packages/*.nupkg)
+          if [ ${#packages[@]} -eq 0 ]; then
+            echo "::error::no .nupkg in packages/ — the pack step and this one disagree about where they go."
+            exit 1
+          fi
+          for package in "${packages[@]}"; do
+            for attempt in 1 2 3; do
+              if dotnet nuget push "$package" --source "$NUGET_SOURCE" \
+                   --api-key "$NUGET_API_KEY" --skip-duplicate; then
+                break
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                echo "::error::Could not push $(basename "$package") to $NUGET_SOURCE after 3 attempts."
+                exit 1
+              fi
+              sleep $((attempt * 5))
+            done
+          done
 
       # Which repository and workflow file a trusted publisher has to name. The
       # claims are decoded from the OIDC token this job can mint, so the answer is
