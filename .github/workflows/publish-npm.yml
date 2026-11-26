@@ -505,6 +505,35 @@ jobs:
           echo "Copied README.md into $PACKAGE_DIR so the published package carries it."
           wc -l "$PACKAGE_DIR/README.md"
 
+      # Every asset inside a UPM package needs a .meta, and a package installed
+      # from the registry is immutable: Unity cannot generate the missing ones —
+      # it reports "has no meta file, but it's in an immutable folder. The asset
+      # will be ignored." The steps above add files (the README, the rebuilt
+      # assembly, its .xml and .pdb) without metas, so they are made here, once,
+      # after everything that writes into the package has run.
+      - name: Give every asset a .meta
+        working-directory: ${{ github.workspace }}
+        run: |
+          cd "$PACKAGE_DIR"
+          made=0
+          while IFS= read -r path; do
+            case "$path" in
+              ./.*|*/.*) continue ;;
+            esac
+            [ -e "$path.meta" ] && continue
+            guid="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+            if [ -d "$path" ]; then
+              printf 'fileFormatVersion: 2\nguid: %s\nfolderAsset: yes\nDefaultImporter:\n  externalObjects: {}\n  userData: \n  assetBundleName: \n  assetBundleVariant: \n' "$guid" > "$path.meta"
+            else
+              printf 'fileFormatVersion: 2\nguid: %s\n' "$guid" > "$path.meta"
+            fi
+            echo "meta: $path.meta"
+            made=$((made + 1))
+          done <<EOF
+          $(find . -mindepth 1 -not -name '*.meta')
+          EOF
+          echo "Gave $made asset(s) a .meta."
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:

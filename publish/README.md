@@ -17,7 +17,7 @@ jobs:
     uses: peroperogames/ToolsWorkflow/.github/workflows/publish-npm.yml@main
     permissions:
       contents: write   # the version commit
-      id-token: write   # OIDC, for npmjs and nuget.org
+      id-token: write   # OIDC: npmjs here, nuget.org in the caller's push job
     with:
       channels: peronpm
     secrets:
@@ -43,14 +43,18 @@ change to keep publishing to PeroNPM alone.
 | --- | --- | --- |
 | `peronpm` | The npm package to the PeroNPM registry (`NPM_URL`), which is where OpenUPM and the install snippets read it from. | The `npm login` that already lives in the runner user's `~/.npmrc`. |
 | `npmjs` | The same tarball to `registry.npmjs.org`. | OIDC trusted publishing — no token, nothing to rotate. |
-| `nuget` | `dotnet pack` of the project the caller names, pushed to a NuGet feed (`nuget.org` unless `nuget-source` says otherwise). | OIDC trusted publishing through `NuGet/login`. |
+| `nuget` | `dotnet pack` of the project the caller names, into the run's `publish-packages` artifact. The **calling workflow** pushes it to nuget.org. | OIDC trusted publishing through `NuGet/login`, from a job of the caller's own — see [NuGet and reusable workflows](#nuget-and-reusable-workflows). |
 
 ```yaml
     with:
       channels: peronpm,npmjs,nuget
       nuget-project: Core/PeroTools2.AccessKing.Core.csproj
-      nuget-user: Peropero
 ```
+
+`nuget` is the one channel this workflow only prepares: it packs the packages and
+stops. The calling workflow pushes them from a job of its own, because nuget.org
+cannot match a policy against a job defined in a reusable workflow — the section
+after this one is why, and shows the job.
 
 **The first release of a new npm package needs one token, once.** npm attaches a
 trusted publisher to a package, so a package that does not exist has nothing to
@@ -66,10 +70,58 @@ registry cannot be taken back. A channel name that is not in the table above fai
 the run before anything is built — publishing to PeroNPM because `npmjs` was
 misspelled would be the worst of both.
 
-A list without `peronpm` is legal and means exactly that: `channels: nuget` uploads
-to NuGet and nothing else. Each channel owns its prerequisites, so a caller that
+A list without `peronpm` is legal and means exactly that: `channels: nuget` packs
+for NuGet and nothing else. Each channel owns its prerequisites, so a caller that
 uses one need not supply the others'; what a channel is missing is reported by
 `resolve_channels.sh`, by name, before anything is built.
+
+## NuGet and reusable workflows
+
+nuget.org matches its trusted publishing policy against the `job_workflow_ref`
+claim of the OIDC token — the workflow file the job is **defined in**. npm matches
+`workflow_ref`, which names the workflow that was **called**, so a reusable
+workflow can publish to npmjs for its caller but can never publish to nuget.org for
+it: the claim names this repository, while the policy lives in the package's own.
+That is [NuGet/login#6](https://github.com/NuGet/login/issues/6), and the validator
+behind it is described in
+[NuGetGallery#11000](https://github.com/NuGetGallery/issues/11000). `NuGet/login`
+is only where the 401 surfaces; no input to it changes the claim.
+
+A composite action changes no claim. The job that runs it is still defined by the
+caller's workflow, so the policy is matched against the file that holds the
+`uses:` line — which is the file the policy names. The NuGet half of a release
+therefore lives in `.github/actions/publish-nuget`, and every repository calls it
+from one job:
+
+```yaml
+  push-nuget:
+    needs: call-publish
+    if: needs.call-publish.outputs.nuget == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # the token nuget.org reads is minted by this job
+      actions: read     # the artifact this run packed
+    steps:
+      - uses: peroperogames/ToolsWorkflow/.github/actions/publish-nuget@main
+        with:
+          user: Peropero
+```
+
+That job is the whole of a repository's NuGet publishing: it downloads the
+`publish-packages` artifact, exchanges the job's identity for a key that lives an
+hour and works once, and pushes every `.nupkg` in it — `--skip-duplicate`, three
+attempts each. Nothing else is configured per repository. `package-path` pushes a
+directory of packages instead of this run's artifact, and `source` names a feed
+other than nuget.org.
+
+The tag rules still apply: `outputs.nuget` comes from `channels_for_tag.sh`, so a
+`1.2.3-base` or a prerelease leaves the caller's job skipped, and the pack still
+takes its version from the tag.
+
+**What this cannot fix is the notification.** The `notify` job of this workflow
+cannot see a job in the calling workflow, so a release with `nuget` on is announced
+when the channels here are green — before the caller's job has run. A push that
+then fails is a red job in the same run, not a missing message.
 
 ## When a release does not start at all
 
@@ -90,7 +142,7 @@ That was an `env:` left with nothing under it. The other load-time mistake seen 
 
 ## What the caller does not have to say
 
-Three things a caller used to name are answered by the repository, because they are the
+Two things a caller used to name are answered by the repository, because they are the
 same in every repository here and a wrong value fails late — as a version that silently
 did not change:
 
@@ -98,8 +150,11 @@ did not change:
   (`package_dir.sh`);
 - **the project the nuget channel packs** — the only one that is not
   `IsPackable=false`, or the solution holding them when there is more than one
-  (`nuget_project.sh`);
-- **the nuget.org profile** — `Peropero`.
+  (`nuget_project.sh`).
+
+The nuget.org profile is a third, and it moved: `nuget-user` was an input of this
+workflow, and is now `user` on `.github/actions/publish-nuget`, in the caller's job —
+the only one that can push. Still one line per repository.
 
 The first two are resolved in one step before anything is packed, written to `$GITHUB_ENV`
 as `PACKAGE_DIR` (relative), `PACKAGE_ROOT` (absolute) and `NUGET_PROJECT`, and the steps
@@ -138,7 +193,7 @@ release**, and nothing is published to the wrong one:
 | --- | --- | --- |
 | The Unity package — the tarball of `working-directory`, exactly what `npm pack` produces there | `npm pack` after the version bump | PeroNPM and npmjs (the same bytes) |
 | The README shown on the npm page | the repository's `README.md`, copied into the package just before packing | inside the Unity tarball, never in the commit |
-| The .NET package(s) | `dotnet pack` of `nuget-project` | nuget.org |
+| The .NET package(s) | `dotnet pack` of `nuget-project` | nuget.org, by the calling workflow's job |
 | The assembly the Unity package ships, if it ships a precompiled one | rebuilt from `unity-plugin-project` at release time, copied into the package by that project's own target | inside the Unity tarball, and in the version commit |
 
 npm renders the README that is **inside the tarball**, and the tarball is the package
@@ -172,25 +227,32 @@ The work is split over two jobs because it has to be:
 | Job | Runs on | Does |
 | --- | --- | --- |
 | `publish` | the self-hosted runners (`build-server`, `unitypkg-share`) | the version bump, the commit and push, the PeroNPM publish, and packing the artifacts the other registries receive |
-| `external` | `ubuntu-latest` | publishes those artifacts to npmjs and nuget.org over OIDC |
-| `notify` | `ubuntu-latest` | the Feishu message, once both of the above are green |
+| `external` | `ubuntu-latest` | publishes the npm tarball to npmjs over OIDC |
+| `push-nuget` | `ubuntu-latest`, in the **calling** workflow | publishes the `.nupkg` files to nuget.org over OIDC, through `.github/actions/publish-nuget` |
+| `notify` | `ubuntu-latest` | the Feishu message, once both of the workflow's jobs are green |
 
 **npm trusted publishing does not accept self-hosted runners.** npm's docs list
 GitHub Actions "GitHub-hosted runners" as the supported case and say self-hosted
 support is still planned, so a package published from our own runners can never
 authenticate with OIDC — it can only fall back to a token, which is the thing being
-retired. That single constraint is why the two channels live in a second job on a
+retired. That single constraint is why npmjs lives in a second job on a
 GitHub-hosted runner, and why that job receives packages as artifacts instead of
 building them.
+
+nuget.org has the opposite constraint, and a harder one: it reads a claim that
+names the file the job is defined in, so the push cannot happen in this
+repository's workflow at all — it is a job in the calling workflow, one per
+repository, that calls the composite action. See
+[NuGet and reusable workflows](#nuget-and-reusable-workflows).
 
 `id-token: write` has to come from the **calling** job. GitHub only issues an OIDC
 token to a job that asks for it, and a called workflow cannot grant itself
 permission the caller did not give; without it the `external` job stops at its first
-step with a message saying so.
+step, and the caller's `push-nuget` job has no identity to exchange.
 
 ## Set up once per repository
 
-Three things live in the calling repository, and none of them can be done from this
+Four things live in the calling repository, and none of them can be done from this
 one.
 
 1. **`permissions: id-token: write`** on the calling job, as in the example above.
@@ -213,22 +275,35 @@ one.
      real choice, not a formality.
    - **nuget.org**: `nuget.org` → username → Trusted Publishing → Add policy.
      Repository Owner, Repository, Workflow File (**file name only**, e.g.
-     `publish.yml`), optional Environment, and the scope: **publish new packages**
-     and **publish new versions**, with a glob for the package ids if wanted.
+     `publish.yml` — the CALLING workflow's file; this repository's
+     `publish-npm.yml` can never match, see
+     [NuGet and reusable workflows](#nuget-and-reusable-workflows)), optional
+     Environment, and the scope: **publish new packages** and **publish new
+     versions**, with a glob for the package ids if wanted.
 
-For a `workflow_call`, both registries validate the **calling** workflow's file
-rather than this one — that is npm's documented behaviour, and it is what the
-`external` job prints before it publishes:
+4. **The `push-nuget` job**, when the `nuget` channel is used — the ten lines in
+   [NuGet and reusable workflows](#nuget-and-reusable-workflows). Without it a
+   release is green and nuget.org receives nothing; the run says so in its summary.
+
+For a `workflow_call`, the two registries read different claims:
+
+- npmjs validates **`workflow_ref`**, the CALLING workflow's file. That is npm's
+  documented behaviour, and it is what the `external` job prints before it
+  publishes.
+- nuget.org validates **`job_workflow_ref`**, the file the job is **defined in**. For
+  the push that is the caller's file, because the job is the caller's; a job in this
+  workflow would claim `publish-npm.yml` here, which is why there is none.
+
+The `external` job decodes its own claims and prints both, so the values can be read
+off a run instead of guessed:
 
 ```
 calling workflow: peroperogames/AccessKing/.github/workflows/publish.yml@refs/tags/0.4.0-base
 this job's file:  peroperogames/ToolsWorkflow/.github/workflows/publish-npm.yml@refs/heads/main
 ```
 
-The claims are decoded from the OIDC token the job mints, so that line is exactly
-what the registry sees. **A new npm trusted publisher must complete its first
-successful publish within two days**, or the configuration expires and has to be
-created again.
+**A new npm trusted publisher must complete its first successful publish within two
+days**, or the configuration expires and has to be created again.
 
 ## The first release of a package
 
@@ -311,12 +386,14 @@ and `Core/…csproj` in the same commit cannot run from inside `Unity/`.
 | Collect the packages, Upload the packages (`publish`) | `npm pack` of the packaged tree plus the `.nupkg` files, into one `publish-packages` artifact. This is also what you download for a first, manual publish. |
 | Report the identity this job publishes under (`external`) | Decodes the OIDC claims and prints the repository and both workflow refs, so a trusted publisher can be filled in from a run rather than guessed. |
 | Publish to npmjs (`external`) | Checks that npm is 11.5.1 or newer (raising it if not), warns about `repository.url`, then `npm publish <tarball>` three times at most. No credential is passed in. |
-| NuGet login, Push the NuGet packages (`external`) | `NuGet/login` exchanges the job's identity for an API key valid for one hour and one use, then `dotnet nuget push --skip-duplicate`, three attempts each. |
-| Send Feishu notification (`notify`) | For a release (`0.3.0`) and a base release (`0.3.0-base`); never for a variant. Only when every channel that ran came out green. |
+| Say what the calling workflow still has to do (`publish`) | When `nuget` is on: writes the job the caller must add into the run summary, because this workflow packs those packages and cannot push them. |
+| NuGet login, Push the packages (`push-nuget`, in the calling workflow) | Downloads the `publish-packages` artifact, exchanges the job's identity for a key valid for one hour and one use, then `dotnet nuget push --skip-duplicate`, three attempts each. |
+| Send Feishu notification (`notify`) | For a release (`0.3.0`) and a base release (`0.3.0-base`); never for a variant. Only when the jobs above came out green — which, with `nuget` on, is before the caller's push has run. |
 
 Each `publish` step is gated on its own channel flag from the resolver; the
-`external` steps are gated on the flags the `publish` job reports. A channel that is
-off runs nothing at all — a NuGet-only release never sets up Node.
+`external` steps are gated on the flags the `publish` job reports, and the caller's
+`push-nuget` job on `outputs.nuget`. A channel that is off runs nothing at all — a
+NuGet-only release never sets up Node.
 
 ## Running a release twice
 
@@ -349,8 +426,6 @@ same pre-bump commit while the branch and the registries have already moved on.
 | --- | --- | --- |
 | `channels` | `peronpm` | Comma-separated list of `peronpm`, `npmjs`, `nuget`. |
 | `nuget-project` | the only packable project | The `.csproj` or `.sln` the `nuget` channel packs, relative to the **repository root**. Leave it empty and it is found: the one project without `IsPackable=false`, or the solution holding them when there is more than one. |
-| `nuget-user` | `Peropero` | The nuget.org profile name the trusted publishing policy belongs to — the last path segment of `nuget.org/profiles/<name>`. |
-| `nuget-source` | `https://api.nuget.org/v3/index.json` | The feed the `nuget` channel pushes to. |
 | `unity-plugin-project` | — | The `.csproj` or `.sln` whose build produces the assembly the Unity package ships, relative to the **repository root**. When set, it is rebuilt after the version bump and the refreshed files under `working-directory` join the version commit. Leave it empty for a package that ships no precompiled assembly. |
 | `unity-plugin-configuration` | `Unity` | The build configuration whose target copies the assembly into the package. Only used with `unity-plugin-project`. |
 | `expected-package-prefix` | `com.prpr` | Package name prefix the manifest is moved under. |
@@ -364,8 +439,15 @@ same pre-bump commit while the branch and the registries have already moved on.
 | `NPM_URL` | only for `peronpm` | The PeroNPM registry URL. |
 | `NPMJS_BOOTSTRAP_TOKEN` | no | A granular npm token, used only to create a package that does not exist on npmjs yet. Delete it after that release. |
 
+The `.github/actions/publish-nuget` action takes what the caller's job needs, and
+nothing this workflow does: `user` (required — the nuget.org profile, `Peropero` in
+these repositories), `source` (`https://api.nuget.org/v3/index.json`) and
+`artifact-name` (`publish-packages`); `package-path` pushes a directory of packages
+instead of the artifact.
+
 There is no `NPMJS_TOKEN` and no `NUGET_API_KEY`: both registries are authenticated
-with the job's own OIDC identity, which cannot leak and needs no rotation.
+with the job's own OIDC identity, which cannot leak and needs no rotation. The key
+nuget.org hands the caller's job is used and gone when that job ends.
 
 ## Notes that save an afternoon
 
@@ -378,8 +460,9 @@ with the job's own OIDC identity, which cannot leak and needs no rotation.
   a new policy "temporarily active" for seven days and locks it to the repository's
   immutable ids only after a successful publish; if none happens in that window it
   goes inactive until a publish restarts it.
-- **The NuGet key expires in an hour and works once**, which is why the login step
-  sits immediately before the push rather than at the top of the job.
+- **The NuGet key expires in an hour and works once**, which is why `NuGet/login`
+  and the push are consecutive steps of the same action rather than the top and the
+  bottom of a job.
 - **`--skip-duplicate` makes a re-run safe.** Re-running a release whose NuGet
   package is already in the feed succeeds instead of failing on the version that
   exists; the npm publish still fails on an already-published version.
